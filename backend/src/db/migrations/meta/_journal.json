@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1789885150058,
+      "tag": "0000_normal_randall_flagg",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789890937758,
+      "tag": "0001_auth_rbac",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789897388494,
+      "tag": "0002_setlists_and_service_moments",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789904000000,
+      "tag": "0003_single_active_setlist_constraint",
+      "breakpoints": true
+    }
+  ]
+}

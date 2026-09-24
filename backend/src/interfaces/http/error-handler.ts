@@ -1,0 +1,70 @@
+/**
+ * @file error-handler.ts
+ * @description Manejador global de errores para Fastify.
+ * Convierte excepciones en respuestas JSON estructuradas y seguras sin filtrar trazas internas.
+ */
+
+import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
+import { ZodError } from 'zod';
+import { AppError } from '../../domain/errors.ts';
+
+export function errorHandler(error: FastifyError | Error, request: FastifyRequest, reply: FastifyReply) {
+  request.log.error(error);
+
+  // 1. Error de Dominio de la Aplicación (AppError)
+  if (error instanceof AppError) {
+    return reply.status(error.statusCode).send(error.toJSON());
+  }
+
+  // 2. Errores de Validación Zod
+  if (error instanceof ZodError) {
+    const issues = error.issues.map((issue) => ({
+      field: issue.path.join('.'),
+      message: issue.message,
+      code: issue.code,
+    }));
+
+    return reply.status(400).send({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Los datos enviados en la solicitud no cumplen con el esquema requerido.',
+        statusCode: 400,
+        details: issues,
+      },
+    });
+  }
+
+  // 3. Errores de validación de Fastify
+  if ('validation' in error && (error as any).validation) {
+    return reply.status(400).send({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: error.message,
+        statusCode: 400,
+        details: (error as any).validation,
+      },
+    });
+  }
+
+  // 4. Errores 404 de ruta no encontrada
+  if ('statusCode' in error && error.statusCode === 404) {
+    return reply.status(404).send({
+      error: {
+        code: 'NOT_FOUND',
+        message: `Ruta no encontrada: ${request.method} ${request.url}`,
+        statusCode: 404,
+        details: null,
+      },
+    });
+  }
+
+  // 5. Errores genéricos no controlados (500)
+  return reply.status(500).send({
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: 'Ocurrió un error interno en el servidor.',
+      statusCode: 500,
+      details: null,
+    },
+  });
+}

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <work>
+    <work-title>Archivo XML Roto</work-title>
+  <!-- Etiqueta no cerrada deliberadamente para prueba de robustez -->
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4
+      </attributes>
+</score-partwise>

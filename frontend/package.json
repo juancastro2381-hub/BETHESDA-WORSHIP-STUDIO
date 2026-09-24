@@ -1,0 +1,31 @@
+{
+  "name": "@bethesda/frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test --experimental-strip-types \"src/core/**/__tests__/**/*.test.ts\"",
+    "test:theory": "node --test --experimental-strip-types \"src/core/music-theory/__tests__/**/*.test.ts\"",
+    "test:canonical": "node --test --experimental-strip-types \"src/core/canonical-model/__tests__/**/*.test.ts\"",
+    "test:ingestion": "node --test --experimental-strip-types \"src/core/ingestion/__tests__/**/*.test.ts\"",
+    "test:projection": "node --test --experimental-strip-types \"src/core/projection/__tests__/**/*.test.ts\"",
+    "test:rendering": "node --test --experimental-strip-types \"src/core/rendering/__tests__/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@coderline/alphatab": "^1.8.4",
+    "opensheetmusicdisplay": "^2.1.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}

@@ -382,10 +382,47 @@ export const setlistItems = pgTable(
 );
 
 // ============================================================================
+// ENTIDADES DE PREFERENCIAS DE VISTA (FASE 3A — DEC-02)
+// ============================================================================
+
+/**
+ * Tabla: user_view_preferences
+ * Configuración persistente del atril y formato de lectura por usuario.
+ */
+export const userViewPreferences = pgTable(
+  'user_view_preferences',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    instrumentId: varchar('instrument_id', { length: 64 }).notNull(),
+    primaryRepresentation: varchar('primary_representation', { length: 64 }).notNull(),
+    secondaryRepresentations: jsonb('secondary_representations')
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    chordNotationSystem: varchar('chord_notation_system', { length: 32 })
+      .notNull()
+      .default('STANDARD'),
+    transpositionSemitones: integer('transposition_semitones').notNull().default(0),
+    capoFret: integer('capo_fret').notNull().default(0),
+    clefOverride: varchar('clef_override', { length: 32 }),
+    preferFlats: boolean('prefer_flats').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('idx_user_view_preferences_user_id').on(table.userId),
+    index('idx_user_view_preferences_instrument_id').on(table.instrumentId),
+  ]
+);
+
+// ============================================================================
 // RELACIONES DRIZZLE ORM
 // ============================================================================
 
-export const usersRelations = relations(users, ({ many }) => ({
+export const usersRelations = relations(users, ({ many, one }) => ({
   refreshTokens: many(refreshTokens),
   passwordResetTokens: many(passwordResetTokens),
   invitationsSent: many(userInvitations),
@@ -394,6 +431,14 @@ export const usersRelations = relations(users, ({ many }) => ({
   updatedSongs: many(songs, { relationName: 'updater' }),
   createdVersions: many(songVersions),
   directedSetlists: many(setlists),
+  viewPreferences: one(userViewPreferences),
+}));
+
+export const userViewPreferencesRelations = relations(userViewPreferences, ({ one }) => ({
+  user: one(users, {
+    fields: [userViewPreferences.userId],
+    references: [users.id],
+  }),
 }));
 
 export const refreshTokensRelations = relations(refreshTokens, ({ one }) => ({
@@ -504,4 +549,12 @@ export type NewSetlistItem = typeof setlistItems.$inferInsert;
 export type SetlistStatus = (typeof setlistStatusEnum.enumValues)[number];
 export type SetlistItemType = (typeof setlistItemTypeEnum.enumValues)[number];
 export type TransitionType = (typeof transitionTypeEnum.enumValues)[number];
+
+// ============================================================================
+// TIPOS INFERIDOS DRIZZLE ORM (FASE 3A — DEC-02)
+// ============================================================================
+
+export type UserViewPreferenceEntity = typeof userViewPreferences.$inferSelect;
+export type NewUserViewPreferenceEntity = typeof userViewPreferences.$inferInsert;
+
 

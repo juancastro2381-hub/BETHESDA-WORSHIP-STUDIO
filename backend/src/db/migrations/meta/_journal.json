@@ -29,6 +29,13 @@
       "when": 1789904000000,
       "tag": "0003_single_active_setlist_constraint",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789910000000,
+      "tag": "0004_user_view_preferences",
+      "breakpoints": true
     }
   ]
 }

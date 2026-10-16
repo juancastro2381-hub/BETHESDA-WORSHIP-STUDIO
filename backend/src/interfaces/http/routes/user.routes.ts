@@ -21,8 +21,12 @@ import { JwtTokenService } from '../../../application/token-service.ts';
 import { AuditService } from '../../../application/audit-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { NotFoundError, ForbiddenError } from '../../../domain/errors.ts';
+import { userPreferencesRoutes } from './user-preferences.routes.ts';
 
 export const userRoutes: FastifyPluginAsync = async (fastify) => {
+  // 0. Sub-plugin: Preferencias del Usuario Autenticado (/api/v1/users/me/preferences — WP-02)
+  await fastify.register(userPreferencesRoutes, { prefix: '/me/preferences' });
+
   const userRepo = new DrizzleUserRepository();
   const invitationRepo = new DrizzleUserInvitationRepository();
   const refreshTokenRepo = new DrizzleRefreshTokenRepository();

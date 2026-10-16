@@ -78,9 +78,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
       <div className="modal-content auth-modal">
         <div className="modal-header">
-          <h2 id="auth-modal-title" className="modal-title">
-            {isMustChangeMode ? '🔑 Actualizar Contraseña Inicial' : '🔐 Acceso a Bethesda Worship Studio'}
-          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <img
+              src="/worship_studio_saxophone_emblem.png"
+              alt="Bethesda Worship Studio"
+              className="brand-emblem-img"
+              width={32}
+              height={32}
+              style={{ height: '32px', width: 'auto' }}
+            />
+            <h2 id="auth-modal-title" className="modal-title">
+              {isMustChangeMode ? 'Actualizar Contraseña Inicial' : 'Acceso a Bethesda Worship Studio'}
+            </h2>
+          </div>
           <button
             type="button"
             className="modal-close-button"

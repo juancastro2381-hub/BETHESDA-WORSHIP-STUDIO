@@ -15,6 +15,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { type CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 import { InstrumentRegistry, type InstrumentProfile } from '../projection/instrument-profile.ts';
 import { type ChordNotationSystem, type ViewRepresentation } from '../projection/types.ts';
+import { type UserViewPreferenceData } from '../api/preference-types.ts';
 import { RendererRegistry } from '../rendering/renderer-registry.ts';
 import { type RendererId } from '../rendering/types.ts';
 import { GOLDEN_SCENARIO_PRESETS } from './presets.ts';
@@ -59,6 +60,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   readonly selectInstrument: (instrumentId: InstrumentId) => void;
   readonly setPrimaryRepresentation: (representation: ViewRepresentation) => void;
   readonly toggleSecondaryRepresentation: (representation: ViewRepresentation) => void;
+  readonly setReadingFormat: (primary: ViewRepresentation, secondary: ViewRepresentation[]) => void;
+  readonly applyUserPreference: (preference: UserViewPreferenceData) => void;
   readonly setCapo: (fret: number) => void;
   readonly setTransposition: (semitones: number) => void;
   readonly setChordNotation: (system: ChordNotationSystem) => void;
@@ -145,6 +148,54 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     });
   }, []);
 
+  // Cambiar formato de lectura (primaria y secundarias atómicamente)
+  const setReadingFormat = useCallback((primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
+    setState((prev) => {
+      const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+      if (!profile.isRepresentationSupported(primary)) {
+        return prev;
+      }
+      const validSecondary = secondary.filter(
+        (s) => profile.isRepresentationSupported(s) && s !== primary
+      );
+      return {
+        ...prev,
+        primaryRepresentation: primary,
+        secondaryRepresentations: validSecondary,
+        activePresetId: 'CUSTOM',
+      };
+    });
+  }, []);
+
+  // Aplicar preferencias de visualización persistidas del usuario (Fase 3A)
+  const applyUserPreference = useCallback((pref: UserViewPreferenceData) => {
+    setState((prev) => {
+      const targetInstrumentId = pref.instrumentId;
+      const profile = instrumentRegistry.get(targetInstrumentId) ?? instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+      const isPrimarySupported = profile.isRepresentationSupported(pref.primaryRepresentation);
+      const finalPrimary = isPrimarySupported
+        ? pref.primaryRepresentation
+        : Array.from(profile.supportedRepresentations)[0] ?? 'CHORDS';
+
+      const finalSecondary = (pref.secondaryRepresentations ?? []).filter(
+        (s) => profile.isRepresentationSupported(s) && s !== finalPrimary
+      );
+
+      const safeCapo = instrumentSupportsCapo(profile) ? pref.capoFret : 0;
+
+      return {
+        ...prev,
+        selectedInstrumentId: profile.id,
+        primaryRepresentation: finalPrimary,
+        secondaryRepresentations: finalSecondary,
+        chordNotationSystem: pref.chordNotationSystem ?? prev.chordNotationSystem,
+        transpositionSemitones: pref.transpositionSemitones ?? prev.transpositionSemitones,
+        capoFret: safeCapo,
+        activePresetId: 'CUSTOM',
+      };
+    });
+  }, []);
+
   // Modificar cejilla (Capo)
   const setCapo = useCallback((fret: number) => {
     setState((prev) => {
@@ -201,6 +252,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     selectInstrument,
     setPrimaryRepresentation,
     toggleSecondaryRepresentation,
+    setReadingFormat,
+    applyUserPreference,
     setCapo,
     setTransposition,
     setChordNotation,

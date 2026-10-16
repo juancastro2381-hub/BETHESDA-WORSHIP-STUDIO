@@ -24,6 +24,8 @@ import { useMusicalWorkspace } from '../../core/workspace/use-musical-workspace.
 import { useSetlistExecution } from '../../core/workspace/use-setlist-execution.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import { BethesdaApiClient } from '../../core/api/api-client.ts';
+import { type UserViewPreferenceData } from '../../core/api/preference-types.ts';
+import { type ViewRepresentation } from '../../core/projection/types.ts';
 import { type CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
 import { MusicalScoreRenderer } from '../../core/rendering/react/musical-score-renderer.tsx';
 import { DiagnosticPanel } from './DiagnosticPanel.tsx';
@@ -68,12 +70,41 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     selectInstrument,
     setPrimaryRepresentation,
     toggleSecondaryRepresentation,
+    setReadingFormat,
+    applyUserPreference,
     setCapo,
     setTransposition,
     setChordNotation,
     setForcedRenderer,
     resetToOriginal,
   } = useMusicalWorkspace();
+
+  // Estado de preferencias de visualización del usuario autenticado (Fase 3A — WP-02)
+  const [userPreferences, setUserPreferences] = useState<UserViewPreferenceData | null>(null);
+
+  // Cargar preferencias del usuario al autenticarse y aplicarlas por defecto
+  useEffect(() => {
+    if (!user) {
+      setUserPreferences(null);
+      return;
+    }
+
+    let isMounted = true;
+    client
+      .getUserPreferences()
+      .then((prefs) => {
+        if (!isMounted) return;
+        setUserPreferences(prefs);
+        applyUserPreference(prefs);
+      })
+      .catch((err) => {
+        console.warn('No se pudieron obtener preferencias de vista del usuario:', err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user, client, applyUserPreference]);
 
   // Hook de Ejecución de Setlist de Atril Litúrgico (WS6)
   const setlistExecution = useSetlistExecution({
@@ -94,6 +125,27 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     diagnostics,
     supportedRepresentations,
   } = viewResult;
+
+  // Manejador para persistir la preferencia en PostgreSQL mediante PUT /api/v1/users/me/preferences
+  const handleSavePreference = useCallback(
+    async (primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
+      if (!user) return;
+      const payload = {
+        instrumentId: state.selectedInstrumentId,
+        primaryRepresentation: primary,
+        secondaryRepresentations: secondary,
+        chordNotationSystem: state.chordNotationSystem,
+        transpositionSemitones: state.transpositionSemitones,
+        capoFret: state.capoFret,
+        clefOverride: null,
+        preferFlats: false,
+      };
+
+      const updated = await client.updateUserPreferences(payload);
+      setUserPreferences(updated);
+    },
+    [user, client, state]
+  );
 
   // Sincronización del ítem de Setlist activo con el Espacio de Trabajo Musical
   useEffect(() => {
@@ -385,6 +437,11 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             onSetCapo={setCapo}
             onSetTransposition={setTransposition}
             onSetChordNotation={setChordNotation}
+            activeSong={activeSong}
+            userPreferences={userPreferences}
+            isAuthenticated={user !== null}
+            onSelectReadingFormat={setReadingFormat}
+            onSavePreference={handleSavePreference}
           />
 
           {/* 5. RendererStatus: Estado del motor de renderizado */}

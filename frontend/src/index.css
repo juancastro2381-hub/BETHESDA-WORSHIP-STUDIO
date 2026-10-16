@@ -3129,3 +3129,265 @@ body {
     justify-content: flex-end;
   }
 }
+
+/* ==========================================================================
+   WP-03 & FIRST-RELEASE PRIORITY 1: IDENTIDAD VISUAL Y FORMATOS DE LECTURA
+   ========================================================================== */
+
+/* Emblema Oficial del Saxofón (DEC-01 / WP-03) */
+.brand-emblem-img {
+  height: 44px;
+  width: auto;
+  max-width: 44px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 8px rgba(245, 158, 11, 0.25));
+  flex-shrink: 0;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.brand-emblem-img:hover {
+  transform: scale(1.05);
+}
+
+@media (max-width: 768px) {
+  .brand-emblem-img {
+    height: 36px;
+    max-width: 36px;
+  }
+}
+
+/* Contenedor del Selector de Formatos de Lectura */
+.reading-format-container {
+  margin-bottom: 1.5rem;
+}
+
+.reading-format-selector-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(8px);
+}
+
+.format-selector-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.format-selector-header .control-card-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  margin-bottom: 0;
+}
+
+/* Botón de Persistencia de Preferencia (WP-02) */
+.preference-save-wrapper {
+  display: flex;
+  align-items: center;
+}
+
+.btn-save-preference {
+  min-height: 44px;
+  padding: 0.5rem 1.15rem;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--gold-primary);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-save-preference:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.25);
+  border-color: var(--gold-primary);
+  box-shadow: 0 0 12px var(--gold-glow);
+  transform: translateY(-1px);
+}
+
+.btn-save-preference.is-preferred {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  cursor: default;
+}
+
+.btn-save-preference:disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+.auth-spinner-sm {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(245, 158, 11, 0.3);
+  border-top-color: var(--gold-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+
+/* Mensajes de Retroalimentación de Guardado */
+.format-feedback {
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  animation: fadeIn 0.25s ease;
+}
+
+.format-feedback.success {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+}
+
+.format-feedback.error {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+/* Botones de Formatos de Lectura */
+.reading-format-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.btn-reading-format {
+  min-height: 80px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-reading-format:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(245, 158, 11, 0.5);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+}
+
+.btn-reading-format:focus-visible {
+  outline: 2px solid var(--gold-primary);
+  outline-offset: 2px;
+}
+
+.btn-reading-format.active {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: var(--gold-primary);
+  box-shadow: 0 0 15px var(--gold-glow);
+}
+
+.btn-reading-format.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: var(--gold-primary);
+}
+
+.fmt-top {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.fmt-icon {
+  font-size: 1.25rem;
+}
+
+.fmt-label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-main);
+  flex-grow: 1;
+}
+
+.fmt-check {
+  color: var(--gold-primary);
+  font-weight: 800;
+  font-size: 1rem;
+}
+
+.fmt-desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* Estado de Formato No Disponible (Invariante Musical: CERO invención) */
+.btn-reading-format.disabled-unavailable {
+  opacity: 0.45;
+  background: rgba(255, 255, 255, 0.015);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.btn-reading-format.disabled-unavailable:hover {
+  transform: none;
+  border-color: var(--border-subtle);
+  box-shadow: none;
+}
+
+.fmt-unavail-badge {
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  line-height: 1.25;
+}
+
+/* Media Queries Responsivas para Móviles */
+@media (max-width: 640px) {
+  .reading-format-buttons {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .btn-reading-format {
+    min-height: 64px;
+    padding: 0.75rem 1rem;
+  }
+
+  .format-selector-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .btn-save-preference {
+    width: 100%;
+    justify-content: center;
+  }
+}
+

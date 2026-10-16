@@ -22,8 +22,15 @@ import type {
   UpdateSetlistItemPayload,
   UpdateSetlistPayload,
 } from './setlist-types.ts';
+import type {
+  GetUserPreferencesResponse,
+  UpdateUserPreferencesResponse,
+  UpdateUserViewPreferencePayload,
+  UserViewPreferenceData,
+} from './preference-types.ts';
 
 export * from './setlist-types.ts';
+export * from './preference-types.ts';
 export { ApiError } from './api-error.ts';
 
 export interface BackendSongItem {
@@ -452,6 +459,45 @@ export class BethesdaApiClient {
     }
 
     const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Obtiene las preferencias de visualización del usuario autenticado (Fase 3A — WP-02).
+   * Si no existen registros en base de datos, retorna los valores por defecto del rol.
+   * Endpoint: GET /api/v1/users/me/preferences
+   */
+  public async getUserPreferences(): Promise<UserViewPreferenceData> {
+    const res = await this.fetchWithAuth('/users/me/preferences', {
+      method: 'GET',
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json: GetUserPreferencesResponse = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Actualiza o crea las preferencias de visualización del usuario autenticado en PostgreSQL (Fase 3A — WP-02).
+   * Endpoint: PUT /api/v1/users/me/preferences
+   */
+  public async updateUserPreferences(
+    payload: UpdateUserViewPreferencePayload
+  ): Promise<UserViewPreferenceData> {
+    const res = await this.fetchWithAuth('/users/me/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json: UpdateUserPreferencesResponse = await res.json();
     return json.data;
   }
 }

@@ -16,16 +16,19 @@ export const App: React.FC = () => {
         {/* Cabecera Principal */}
         <header className="app-header" role="banner">
           <div className="brand-section">
-            <span className="brand-logo" aria-hidden="true">✝</span>
+            <img
+              src="/worship_studio_saxophone_emblem.png"
+              alt="Bethesda Worship Studio"
+              className="brand-emblem-img"
+              width={44}
+              height={44}
+            />
             <div>
               <h1 className="brand-title">BETHESDA WORSHIP STUDIO</h1>
               <p className="brand-subtitle">Iglesia Cristiana Bethesda — Madrid, Cundinamarca</p>
             </div>
           </div>
           <div className="header-actions">
-            <div className="phase-tag" role="status">
-              Fase 2B — Seguridad RBAC
-            </div>
             <UserProfileBadge />
           </div>
         </header>

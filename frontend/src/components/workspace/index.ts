@@ -19,4 +19,5 @@ export * from './SetlistsModal.tsx';
 export * from './SetlistNavigationToolbar.tsx';
 export * from './ServiceMomentCard.tsx';
 export * from './SetlistDetailEditor.tsx';
+export * from './ReadingFormatSelector.tsx';
 export * from './MusicalWorkspace.tsx';

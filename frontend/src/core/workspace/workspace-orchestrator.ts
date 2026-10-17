@@ -24,6 +24,7 @@ import {
   type ScenarioPreset,
   type WorkspaceDiagnostic,
 } from './types.ts';
+import { type UserViewPreferenceData } from '../api/preference-types.ts';
 
 const defaultInstrumentRegistry = new InstrumentRegistry();
 const defaultRendererRegistry = new RendererRegistry();
@@ -408,7 +409,7 @@ export function orchestrateWorkspaceView(
   let activeRendererId: RendererId | null = null;
   if (projectionResult.view) {
     const activeReps = projectionResult.view.activeRepresentations;
-    if (state.forcedRendererId) {
+    if (state.forcedRendererId && !effective.isFallbackApplied) {
       const forced = rendererRegistry.get(state.forcedRendererId);
       if (forced && forced.capabilities.canRender(activeReps)) {
         activeRendererId = state.forcedRendererId;
@@ -456,3 +457,178 @@ export function orchestrateWorkspaceView(
     availableInstruments,
   };
 }
+
+/**
+ * Transición al seleccionar o cambiar de canción:
+ * Preserva intacta la preferencia de lectura deseada del usuario en el estado,
+ * permitiendo que orchestrateWorkspaceView aplique fallbacks seguros dinámicos y diagnósticos (F-04).
+ */
+export function transitionSelectSong(
+  current: IWorkspaceState,
+  _song: CanonicalMusicPayload,
+  _profile: InstrumentProfile,
+  preferredFormat?: { primary: ViewRepresentation; secondary: readonly ViewRepresentation[] } | null
+): IWorkspaceState {
+  return {
+    ...current,
+    primaryRepresentation: preferredFormat?.primary ?? current.primaryRepresentation,
+    secondaryRepresentations: preferredFormat?.secondary ?? current.secondaryRepresentations,
+    activePresetId: 'CUSTOM',
+  };
+}
+
+/**
+ * Transición al aplicar preferencias guardadas del usuario:
+ * Valida soporte de instrumento y establece la preferencia deseada en el estado.
+ */
+export function transitionApplyUserPreference(
+  current: IWorkspaceState,
+  _activeSong: CanonicalMusicPayload,
+  pref: UserViewPreferenceData,
+  registry: InstrumentRegistry = defaultInstrumentRegistry
+): IWorkspaceState {
+  const targetInstrumentId = pref.instrumentId;
+  const profile = registry.get(targetInstrumentId) ?? registry.getOrThrow(current.selectedInstrumentId);
+  const isPrimarySupported = profile.isRepresentationSupported(pref.primaryRepresentation);
+  const desiredPrimary = isPrimarySupported
+    ? pref.primaryRepresentation
+    : Array.from(profile.supportedRepresentations)[0] ?? 'CHORDS';
+
+  const desiredSecondary = (pref.secondaryRepresentations ?? []).filter(
+    (s) => profile.isRepresentationSupported(s) && s !== desiredPrimary
+  );
+
+  const safeCapo = instrumentSupportsCapo(profile) ? pref.capoFret : 0;
+
+  return {
+    ...current,
+    selectedInstrumentId: profile.id,
+    primaryRepresentation: desiredPrimary,
+    secondaryRepresentations: desiredSecondary,
+    chordNotationSystem: pref.chordNotationSystem ?? current.chordNotationSystem,
+    transpositionSemitones: pref.transpositionSemitones ?? current.transpositionSemitones,
+    capoFret: safeCapo,
+    activePresetId: 'CUSTOM',
+    forcedRendererId: undefined,
+  };
+}
+
+/**
+ * Transición al cambiar el formato de lectura (primaria y secundarias atómicamente):
+ */
+export function transitionSetReadingFormat(
+  current: IWorkspaceState,
+  primary: ViewRepresentation,
+  secondary: readonly ViewRepresentation[],
+  profile: InstrumentProfile
+): IWorkspaceState {
+  if (!profile.isRepresentationSupported(primary)) {
+    return current;
+  }
+  const validSecondary = secondary.filter(
+    (s) => profile.isRepresentationSupported(s) && s !== primary
+  );
+  return {
+    ...current,
+    primaryRepresentation: primary,
+    secondaryRepresentations: validSecondary,
+    activePresetId: 'CUSTOM',
+    forcedRendererId: undefined,
+  };
+}
+
+/**
+ * Sesión determinista del Espacio de Trabajo Musical.
+ * Encapsula la máquina de estados y las transiciones del hook useMusicalWorkspace,
+ * permitiendo pruebas deterministas del ciclo de vida y navegación sin requerir reconciliador DOM.
+ */
+export class MusicalWorkspaceSession {
+  private _state: IWorkspaceState;
+  private _activeSong: CanonicalMusicPayload;
+  private _preferredFormat: { primary: ViewRepresentation; secondary: readonly ViewRepresentation[] } | null = null;
+  private readonly _instrumentRegistry: InstrumentRegistry;
+  private readonly _rendererRegistry: RendererRegistry;
+
+  constructor(
+    initialPresetId: GoldenScenarioId = 'SCENARIO_A',
+    initialSong?: CanonicalMusicPayload,
+    instrumentRegistry = defaultInstrumentRegistry,
+    rendererRegistry = defaultRendererRegistry
+  ) {
+    this._instrumentRegistry = instrumentRegistry;
+    this._rendererRegistry = rendererRegistry;
+    const preset = GOLDEN_SCENARIO_PRESETS[initialPresetId];
+    this._activeSong = initialSong ?? preset.canonicalSongFactory();
+    this._state = createInitialWorkspaceState(initialPresetId);
+    this._preferredFormat = {
+      primary: preset.primaryRepresentation,
+      secondary: preset.secondaryRepresentations,
+    };
+  }
+
+  get state(): IWorkspaceState {
+    return this._state;
+  }
+
+  get activeSong(): CanonicalMusicPayload {
+    return this._activeSong;
+  }
+
+  get preferredFormat(): { primary: ViewRepresentation; secondary: readonly ViewRepresentation[] } | null {
+    return this._preferredFormat;
+  }
+
+  get viewResult(): IWorkspaceViewResult {
+    return orchestrateWorkspaceView(
+      this._activeSong,
+      this._state,
+      this._instrumentRegistry,
+      this._rendererRegistry
+    );
+  }
+
+  applyUserPreference(pref: UserViewPreferenceData): void {
+    this._preferredFormat = {
+      primary: pref.primaryRepresentation,
+      secondary: pref.secondaryRepresentations ?? [],
+    };
+    this._state = transitionApplyUserPreference(
+      this._state,
+      this._activeSong,
+      pref,
+      this._instrumentRegistry
+    );
+  }
+
+  setReadingFormat(primary: ViewRepresentation, secondary: ViewRepresentation[]): void {
+    this._preferredFormat = { primary, secondary };
+    const profile = this._instrumentRegistry.getOrThrow(this._state.selectedInstrumentId);
+    this._state = transitionSetReadingFormat(this._state, primary, secondary, profile);
+  }
+
+  selectSong(song: CanonicalMusicPayload): void {
+    this._activeSong = song;
+    const profile = this._instrumentRegistry.getOrThrow(this._state.selectedInstrumentId);
+    this._state = transitionSelectSong(this._state, song, profile, this._preferredFormat);
+  }
+
+  selectInstrument(instrumentId: InstrumentId): void {
+    const profile = this._instrumentRegistry.getOrThrow(instrumentId);
+    const transitioned = transitionSelectInstrument(this._state, profile);
+    const reqPrimary = this._preferredFormat?.primary ?? transitioned.primaryRepresentation;
+    const reqSecondary = this._preferredFormat?.secondary ?? transitioned.secondaryRepresentations;
+    const isPrimarySupported = profile.isRepresentationSupported(reqPrimary);
+    const validPrimary = isPrimarySupported
+      ? reqPrimary
+      : Array.from(profile.supportedRepresentations)[0] ?? 'CHORDS';
+    const validSecondary = reqSecondary.filter(
+      (s) => profile.isRepresentationSupported(s) && s !== validPrimary
+    );
+    this._state = {
+      ...transitioned,
+      primaryRepresentation: validPrimary,
+      secondaryRepresentations: validSecondary,
+    };
+  }
+}
+

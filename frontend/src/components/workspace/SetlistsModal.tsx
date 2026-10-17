@@ -26,6 +26,8 @@ import type {
 } from '../../core/api/setlist-types.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import { SetlistDetailEditor } from './SetlistDetailEditor.tsx';
+import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
+import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 
 export type SetlistTab = 'ALL' | 'ACTIVE' | 'PLANNING' | 'HISTORY';
 
@@ -49,6 +51,10 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
   const titleId = useId();
 
   const [setlists, setSetlists] = useState<FrontendSetlistSummary[]>([]);
+  const [missingDepsMap, setMissingDepsMap] = useState<Map<string, string[]>>(new Map());
+  const [isOfflineMode, setIsOfflineMode] = useState<boolean>(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<SetlistTab>('ALL');
@@ -86,19 +92,69 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
     setLoading(true);
     setError(null);
     try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        throw new Error('Sin conexión al servidor.');
+      }
+
       const result = await client.listSetlists({ limit: 50 });
       setSetlists(result.items);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        if (err.statusCode === 401) {
-          setError('Sesión expirada. Por favor vuelva a iniciar sesión.');
-        } else if (err.statusCode === 403) {
-          setError('No cuenta con privilegios para consultar los repertorios.');
-        } else {
-          setError(err.message);
+      setIsOfflineMode(false);
+
+      // Cargar metadatos locales de dependencias faltantes
+      const localMeta = await offlineStorage.listMetadata();
+      const depMap = new Map<string, string[]>();
+      for (const m of localMeta) {
+        if (m.resourceType === 'SETLIST' && m.missingSongIds && m.missingSongIds.length > 0) {
+          depMap.set(m.id, [...m.missingSongIds]);
         }
-      } else {
-        setError(err instanceof Error ? err.message : 'Error al conectar con el servidor.');
+      }
+      setMissingDepsMap(depMap);
+    } catch (err) {
+      // Fallback a setlists descargados localmente en IndexedDB (WP-04)
+      setIsOfflineMode(true);
+      try {
+        const localMeta = (await offlineStorage.listMetadata()).filter((m) => m.resourceType === 'SETLIST');
+        const depMap = new Map<string, string[]>();
+        const fallbackSetlists: FrontendSetlistSummary[] = [];
+
+        for (const m of localMeta) {
+          if (m.missingSongIds && m.missingSongIds.length > 0) {
+            depMap.set(m.id, [...m.missingSongIds]);
+          }
+          const payload = await offlineStorage.getSetlistPayload(m.id);
+          if (payload) {
+            fallbackSetlists.push({
+              id: payload.setlistDetail.id,
+              title: payload.setlistDetail.title,
+              scheduledDateTime: payload.setlistDetail.scheduledDateTime,
+              status: payload.setlistDetail.status,
+              directorUserId: payload.setlistDetail.directorUserId,
+              directorName: payload.setlistDetail.directorName ?? null,
+              totalItems: payload.setlistDetail.items.length,
+              totalSongs: payload.setlistDetail.items.filter((i) => i.itemType === 'SONG').length,
+              createdAt: payload.setlistDetail.createdAt,
+              updatedAt: payload.setlistDetail.updatedAt,
+            });
+          }
+        }
+        setMissingDepsMap(depMap);
+        setSetlists(fallbackSetlists);
+
+        if (fallbackSetlists.length === 0) {
+          setError('Sin conexión con el servidor y no hay repertorios guardados en la memoria local.');
+        }
+      } catch (localErr) {
+        if (err instanceof ApiError) {
+          if (err.statusCode === 401) {
+            setError('Sesión expirada. Por favor vuelva a iniciar sesión.');
+          } else if (err.statusCode === 403) {
+            setError('No cuenta con privilegios para consultar los repertorios.');
+          } else {
+            setError(err.message);
+          }
+        } else {
+          setError(err instanceof Error ? err.message : 'Error al conectar con el servidor.');
+        }
       }
     } finally {
       setLoading(false);
@@ -449,6 +505,15 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
                               {s.status === 'COMPLETED' && 'COMPLETADO'}
                               {s.status === 'ARCHIVED' && 'ARCHIVADO'}
                             </span>
+                            {missingDepsMap.has(s.id) && (
+                              <span
+                                className="setlist-missing-dep-badge"
+                                role="alert"
+                                title={`Repertorio incompleto: Faltan ${missingDepsMap.get(s.id)?.length} canciones por descargar para poder ejecutarlo sin conexión`}
+                              >
+                                ⚠️ Incompleto ({missingDepsMap.get(s.id)?.length} faltantes)
+                              </span>
+                            )}
                             {s.scheduledDateTime && (
                               <span className="setlist-date-badge">
                                 📅 {new Date(s.scheduledDateTime).toLocaleDateString()}
@@ -469,6 +534,14 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
                         </div>
 
                         <div className="setlist-card-actions">
+                          {/* Guardar / Gestionar Copia Local Offline (WP-04) */}
+                          <DownloadActionButton
+                            resourceId={s.id}
+                            resourceType="SETLIST"
+                            title={s.title}
+                            compact={true}
+                          />
+
                           {/* Administrar Ítems (GAP-01, GAP-02, GAP-03) */}
                           <button
                             type="button"

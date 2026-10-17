@@ -1,11 +1,8 @@
-/**
- * @file DatabaseSongsModal.tsx
- * @description Modal para explorar, seleccionar y persistir canciones en la base de datos PostgreSQL (Fase 2A).
- */
-
 import React, { useEffect, useState } from 'react';
 import { BethesdaApiClient, type BackendSongItem } from '../../core/api/api-client.ts';
-import { type CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
+import { CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
+import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
+import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 
 export interface DatabaseSongsModalProps {
   readonly activeSong: CanonicalMusicPayload;
@@ -21,6 +18,9 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
   const [client] = useState(() => new BethesdaApiClient());
   const [health, setHealth] = useState<{ status: string; database: string } | null>(null);
   const [songs, setSongs] = useState<BackendSongItem[]>([]);
+  const [isOfflineMode, setIsOfflineMode] = useState<boolean>(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [persisting, setPersisting] = useState(false);
@@ -30,13 +30,41 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     setLoading(true);
     setError(null);
     try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        throw new Error('Sin conexión al servidor.');
+      }
+
       const h = await client.checkHealth();
       setHealth(h);
+      setIsOfflineMode(false);
 
       const list = await client.listSongs({ limit: 50 });
       setSongs(list.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'No se pudo conectar con el servidor backend.');
+      // Fallback a canciones guardadas en almacenamiento offline IndexedDB (WP-04)
+      setIsOfflineMode(true);
+      try {
+        const localMeta = (await offlineStorage.listMetadata()).filter((m) => m.resourceType === 'SONG');
+        const fallbackItems: BackendSongItem[] = localMeta.map((m) => ({
+          id: m.id,
+          title: m.title,
+          artist: null,
+          ccliNumber: null,
+          defaultKey: 'Canónico',
+          defaultBpm: 120,
+          timeSignature: '4/4',
+          status: 'APPROVED',
+          currentVersionId: null,
+          createdAt: m.downloadedAt,
+          updatedAt: m.lastValidatedAt,
+        }));
+        setSongs(fallbackItems);
+        if (fallbackItems.length === 0) {
+          setError('Sin conexión con el servidor y no hay canciones descargadas en la memoria local.');
+        }
+      } catch (localErr) {
+        setError(err instanceof Error ? err.message : 'No se pudo conectar con el servidor backend.');
+      }
     } finally {
       setLoading(false);
     }
@@ -50,6 +78,25 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     setLoading(true);
     setError(null);
     try {
+      // 1. Verificar primero si existe en IndexedDB local
+      const localSong = await offlineStorage.getSongPayload(songId);
+      if (localSong) {
+        const canonical = CanonicalMusicPayload.fromJSON(localSong.canonicalPayload);
+        onSelectSong(canonical, {
+          isPersisted: true,
+          songId: localSong.id,
+          versionNumber: localSong.metadata.versionNumber,
+        });
+        onClose();
+        return;
+      }
+
+      // 2. Si no está en local y estamos sin conexión, rechazar con mensaje claro
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        throw new Error('Esta canción no ha sido descargada para uso sin conexión.');
+      }
+
+      // 3. Cargar desde el servidor si estamos en línea
       const response = await client.getSong(songId);
       const canonical = BethesdaApiClient.toCanonicalPayload(response);
       onSelectSong(canonical, {
@@ -59,7 +106,7 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
       });
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error al cargar la canción desde la base de datos.');
+      setError(err instanceof Error ? err.message : 'Error al cargar la canción.');
       setLoading(false);
     }
   };
@@ -164,13 +211,21 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
                       {s.artist ? `${s.artist} • ` : ''}Tono: {s.defaultKey} • ♩ = {s.defaultBpm} BPM • {s.timeSignature}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    className="btn-load-db-song"
-                    onClick={() => handleSelectSong(s.id)}
-                  >
-                    Abrir en Atril
-                  </button>
+                  <div className="db-song-actions">
+                    <DownloadActionButton
+                      resourceId={s.id}
+                      resourceType="SONG"
+                      title={s.title}
+                      compact={true}
+                    />
+                    <button
+                      type="button"
+                      className="btn-load-db-song"
+                      onClick={() => handleSelectSong(s.id)}
+                    >
+                      Abrir en Atril
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>

@@ -26,7 +26,7 @@ import { useAuth } from '../../core/auth/use-auth.ts';
 import { BethesdaApiClient } from '../../core/api/api-client.ts';
 import { type UserViewPreferenceData } from '../../core/api/preference-types.ts';
 import { type ViewRepresentation } from '../../core/projection/types.ts';
-import { type CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
+import { CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
 import { MusicalScoreRenderer } from '../../core/rendering/react/musical-score-renderer.tsx';
 import { DiagnosticPanel } from './DiagnosticPanel.tsx';
 import { MusicalControls } from './MusicalControls.tsx';
@@ -39,6 +39,7 @@ import { DatabaseSongsModal } from './DatabaseSongsModal.tsx';
 import { SetlistsModal } from './SetlistsModal.tsx';
 import { SetlistNavigationToolbar } from './SetlistNavigationToolbar.tsx';
 import { ServiceMomentCard } from './ServiceMomentCard.tsx';
+import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -169,22 +170,37 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         });
         setTransposition(setlistExecution.transpositionSemitones);
       } else {
-        // 2. Cargar bajo demanda desde el servidor
+        // 2. Cargar bajo demanda: consultar primero el almacenamiento offline local en IndexedDB (WP-04)
         setSongLoading(true);
-        client
-          .getSong(songId)
-          .then((response) => {
-            const canonical = BethesdaApiClient.toCanonicalPayload(response);
-            songCacheRef.current.set(songId, canonical);
-            selectPersistedSong(canonical, {
-              isPersisted: true,
-              songId: response.song.id,
-              versionNumber: response.version.versionNumber,
+        offlineStorage
+          .getSongPayload(songId)
+          .then((localPayload) => {
+            if (localPayload) {
+              const canonical = CanonicalMusicPayload.fromJSON(localPayload.canonicalPayload);
+              songCacheRef.current.set(songId, canonical);
+              selectPersistedSong(canonical, {
+                isPersisted: true,
+                songId: localPayload.id,
+                versionNumber: localPayload.metadata.versionNumber,
+              });
+              setTransposition(setlistExecution.transpositionSemitones);
+              setSongLoading(false);
+              return;
+            }
+
+            // Si no está en local, cargar desde el servidor
+            return client.getSong(songId).then((response) => {
+              const canonical = BethesdaApiClient.toCanonicalPayload(response);
+              songCacheRef.current.set(songId, canonical);
+              selectPersistedSong(canonical, {
+                isPersisted: true,
+                songId: response.song.id,
+                versionNumber: response.version.versionNumber,
+              });
+              setTransposition(setlistExecution.transpositionSemitones);
             });
-            setTransposition(setlistExecution.transpositionSemitones);
           })
           .catch((err) => {
-            // Manejo silencioso/resiliente de error de carga
             console.error('Error al cargar la partitura del setlist:', err);
           })
           .finally(() => {
@@ -418,6 +434,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             importedFormat={importedMeta?.format}
             isPersisted={persistedMeta !== null}
             versionNumber={persistedMeta?.versionNumber}
+            persistedSongId={persistedMeta?.songId}
           />
 
           {/* 4. MusicalControls: Instrumento, Representaciones, Capo, Transposición y Cifrado */}

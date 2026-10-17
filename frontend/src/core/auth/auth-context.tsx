@@ -11,6 +11,7 @@ import React, { createContext, useState, useEffect, useCallback, type ReactNode 
 import type { AuthUser, UserRole } from './types.ts';
 import { tokenManager } from './token-manager.ts';
 import { BethesdaApiClient } from '../api/api-client.ts';
+import { offlineManager } from '../offline/offline-manager.ts';
 
 export interface AuthContextType {
   user: AuthUser | null;
@@ -91,16 +92,23 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   );
 
   /**
-   * Cerrar sesión invalidando el refresh token en el servidor y limpiando la cookie y memoria.
+   * Cerrar sesión invalidando el refresh token en el servidor y limpiando la cookie, memoria y datos offline privados.
    */
   const logout = useCallback(async (): Promise<void> => {
+    const currentUserId = user?.id;
     try {
       await apiClient.logout();
     } finally {
+      // WP-04 (Requisito 4.6): Purga y cancelación de descargas privadas de la sesión
+      if (currentUserId) {
+        await offlineManager.purgeSessionData(currentUserId).catch((err) => {
+          console.error('⚠️ Error al purgar almacenamiento offline durante logout:', err);
+        });
+      }
       tokenManager.clearToken();
       setUser(null);
     }
-  }, [apiClient]);
+  }, [apiClient, user]);
 
   /**
    * Cambiar contraseña inicial para usuarios en estado MUST_CHANGE_PASSWORD.

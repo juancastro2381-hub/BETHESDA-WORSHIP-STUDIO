@@ -1,0 +1,27 @@
+{
+  "name": "Bethesda Worship Studio",
+  "short_name": "WorshipStudio",
+  "description": "Sistema Musical y Atril Digital Litúrgico para la Iglesia Cristiana Bethesda",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "es",
+  "dir": "ltr",
+  "categories": ["music", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/worship_studio_saxophone_emblem.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/worship_studio_saxophone_emblem.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

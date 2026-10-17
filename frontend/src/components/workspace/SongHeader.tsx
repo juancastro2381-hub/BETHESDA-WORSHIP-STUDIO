@@ -7,6 +7,7 @@
 
 import React from 'react';
 import { type CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
+import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 
 export interface SongHeaderProps {
   readonly song: CanonicalMusicPayload;
@@ -15,6 +16,7 @@ export interface SongHeaderProps {
   readonly importedFormat?: string | undefined;
   readonly isPersisted?: boolean;
   readonly versionNumber?: number | undefined;
+  readonly persistedSongId?: string | undefined;
 }
 
 export const SongHeader: React.FC<SongHeaderProps> = ({
@@ -24,6 +26,7 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
   importedFormat,
   isPersisted,
   versionNumber,
+  persistedSongId,
 }) => {
   const tempoBpm = song.timeline.tempoMap.events[0]?.bpm ?? 120;
   const firstMeasure = song.measures[0];
@@ -39,6 +42,16 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
     <header className="workspace-song-header" aria-label="Metadatos de la Canción Activa">
       <div className="song-title-row">
         <h2 className="song-title" id="active-song-title">{song.title}</h2>
+        {isPersisted && persistedSongId && (
+          <div className="song-offline-action">
+            <DownloadActionButton
+              resourceId={persistedSongId}
+              resourceType="SONG"
+              title={song.title}
+              compact={false}
+            />
+          </div>
+        )}
         <div className="song-badges" role="group" aria-label="Atributos canónicos">
           {isPersisted && (
             <span className="badge-meta badge-persisted" title="Canción persistida en PostgreSQL">

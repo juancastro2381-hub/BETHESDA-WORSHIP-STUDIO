@@ -20,20 +20,21 @@ This report establishes the final, evidence-based verification and remediation c
 
 All verification criteria mandated by the Project Owner have been resolved and proven through directly captured runtime execution:
 1. **Real Selector Component Coverage (Finding A):** The real `ReadingFormatSelector` React component was tested in rendered HTML markup and simulated interaction via native `react-dom/server` (`renderToStaticMarkup`) and React test harness under `node --test --experimental-strip-types`, asserting actual disabled attributes, accessibility badges, contextual tooltips, and click handling without adding third-party dependencies.
-2. **Real Workspace Hook & Navigation Lifecycle Coverage (Finding B):** The React hook `useMusicalWorkspace` was mounted and executed, and its underlying state machine was verified through `MusicalWorkspaceSession`. The complete multi-transition navigation lifecycle was tested across contrasting song structures, proving deterministic fallback, zero state corruption of user preferences, and automatic view restoration.
+2. **Real Workspace Hook & Navigation Lifecycle Coverage (Finding B):** The React hook `useMusicalWorkspace` was mounted and executed in a React harness for initial render and public API contract validation (`B.1`). The complete multi-transition navigation lifecycle (`B.2`) was tested through `MusicalWorkspaceSession`, which shares the pure transition functions 1:1 with the hook, proving deterministic fallback, zero state corruption of user preferences, and automatic view restoration. Interactive multi-step client re-rendering is clearly identified as a test-environment limitation in the absence of JSDOM.
 3. **Domain & Code Invariants Reconfirmed (Finding C):** Enforced that "Cifrado con Letra" requires both chords and lyrics, rests are excluded from note counts via `measure.getAllNotes().length`, content-aware fallbacks never fabricate notes or lyrics, and renderer selection dynamically resolves compatible engines (`LEADSHEET_DOM` vs `ALPHATAB`).
-4. **Git State & Documentary Integrity (Finding D):** Clearly established the exact Git timeline from baseline `ba3278f`, through remediation commits `2bd2ff2` and `f9225ef`, up to the current uncommitted working-tree state preserved for Project Owner inspection. Reconciled all SHA-256 manifests.
+4. **Git State & Documentary Integrity (Finding D & E):** Accurately established the complete Git timeline, including baseline `ba3278f`, remediation commits `2bd2ff2` and `f9225ef`, and the publication commit `8895378a135558595b0d494c77f2e4ec81fa19a3`. The current reconciliation changes remain uncommitted for Project Owner review. All SHA-256 manifests are synchronized.
 
-### Final Recommendation: `GATE EXIT PASS — READY FOR OWNER SIGN-OFF`
+### Final Recommendation: `CONDITIONAL PASS — OWNER REVIEW REQUIRED`
 
 | Verification Dimension | Mandatory Standard | Verified Result | Status |
 | :--- | :--- | :--- | :---: |
 | **Component DOM Testing** | Exercise real rendered component controls & attributes | `ReadingFormatSelector` tested via `renderToStaticMarkup` & capture harness; asserts real HTML `disabled=""`, ARIA, and callbacks | **PASS** |
-| **Hook Lifecycle Testing** | Exercise complete navigation lifecycle with state preservation | `useMusicalWorkspace` & `MusicalWorkspaceSession` tested across 7-step sequence; preference preserved and restored | **PASS** |
-| **Domain Invariants** | Cero note fabrication, rests excluded, strict format contract | Verified via canonical methods (`getAllNotes()`, strict union checks, payload immutability) | **PASS** |
+| **Hook Initial Render & API** | Mount real hook and verify initial projection and API contract | `useMusicalWorkspace` mounted in `WorkspaceHarness`; verifies initial projection and public callback methods | **PASS** |
+| **Navigation Lifecycle** | Exercise multi-step navigation sequence with state preservation | `MusicalWorkspaceSession` tested across 7-step sequence; preference preserved and restored via shared transition functions | **PASS** |
+| **Domain Invariants** | Zero note fabrication, rests excluded, strict format contract | Verified via canonical methods (`getAllNotes()`, strict union checks, payload immutability) | **PASS** |
 | **Test Suite Execution** | Real-time command capture with 0 failures | Frontend: 281/281 PASS. Backend: 221/221 PASS. Total: 502/502 PASS | **PASS** |
 | **Static Type Safety** | TypeScript compiler strict pass on both packages | Frontend: 0 errors. Backend: 0 errors. Vite build: 0 errors | **PASS** |
-| **Scope Boundary** | No commit, no push, no migrations, no scope expansion | Working tree dirty, 0 commits, 0 pushes. WP-04/05/3B/3C untouched | **PASS** |
+| **Scope Boundary** | No commit, no push, no migrations, no scope expansion | Current working tree contains only reconciliation updates. WP-04/05/3B/3C untouched | **PASS** |
 
 ---
 
@@ -47,9 +48,10 @@ The repository state was inspected prior to, during, and upon completion of the 
 - **Historical Remote Commit (Pre-Remediation):** `ba3278f7c28e7f2cc96dcc74312dd738866df86d` (*WP-03 & First-Release Priority 1 Completion Summary*)
 - **Published Remediation Commit:** `2bd2ff2ecf2a2bbaa34995b7c65633dd10ffc6bd` (*fix(priority1): resolve independent audit findings F-01 through F-05 and publish remediation report*)
 - **Published Remediation Report Sync Commit:** `f9225ef6373e50f28a450e88be3f276482aa55c5` (*docs(remediation): record publication commit SHA and verified remote state in remediation report*)
-- **Preflight HEAD SHA (Local & Remote):** `f9225ef6373e50f28a450e88be3f276482aa55c5`
-- **Local Branch Divergence vs origin/main:** Aligned (0 commits ahead, 0 commits behind `f9225ef`).
-- **Current Task Working-Tree State:** Uncommitted changes in 5 files (strictly preserved for Project Owner review). No commit or push was performed during this task.
+- **Published Verification Report & Code Commit:** `8895378a135558595b0d494c77f2e4ec81fa19a3` (*WP-03 / Primera Entrega Prioridad 1*, authored by `juancastro2381-hub` on `Fri Oct 16 20:07:55 2026 -0500`)
+- **Current HEAD SHA (Local & Remote):** `8895378a135558595b0d494c77f2e4ec81fa19a3`
+- **Local Branch Divergence vs origin/main:** Aligned (0 commits ahead, 0 commits behind `8895378`).
+- **Current Task Working-Tree State:** Uncommitted changes containing test description precision and reconciliation documentation. Zero new commits or pushes were performed during this reconciliation task.
 
 ---
 
@@ -77,17 +79,16 @@ To enable real React component rendering and inspection under Node.js native tes
 
 ### 3.2 Finding B — Real Workspace Hook and Navigation Lifecycle Coverage
 
-#### Audit Observation
-The resolver test proved mathematical fallback calculation but did not exercise the state transitions during active navigation between songs with different musical structures.
-
-#### Implementation Architecture
+#### Audit Observation & Architectural Seam
+The resolver test proved mathematical fallback calculation but did not exercise state transitions during active navigation. In Node.js without JSDOM, interactive multi-step client re-renders cannot be driven via `renderToStaticMarkup`. To address this honestly:
 1. In `frontend/src/core/workspace/workspace-orchestrator.ts`, extracted deterministic state transition functions:
    - `transitionSelectSong`: Updates the active song while strictly preserving the musician's preferred format in state.
    - `transitionApplyUserPreference`: Applies user-saved preferences and resets forced renderer locks to allow dynamic capability-based renderer resolution.
    - `transitionSetReadingFormat`: Sets atomic primary and secondary representations.
-2. Implemented `MusicalWorkspaceSession`: A deterministic testable session class that mirrors the state machine of `useMusicalWorkspace` without requiring a browser DOM reconciler.
+2. Implemented `MusicalWorkspaceSession`: A deterministic testable session class that encapsulates the exact transition functions and state machine of `useMusicalWorkspace`.
 3. In `frontend/src/core/workspace/use-musical-workspace.ts`, refactored the hook callbacks to delegate 1:1 to these pure transition functions, ensuring 100% behavioral identity between the hook and the test session.
-4. Added test `B.1` that mounts and executes `useMusicalWorkspace` inside a React test harness (`WorkspaceHarness`), verifying hook initialization and projection validity.
+4. Added test `B.1` that mounts and executes `useMusicalWorkspace` inside a React test harness (`WorkspaceHarness`), verifying hook initialization, initial projection validity, and public callback contract.
+5. Added test `B.2` that executes the complete 7-step navigation lifecycle through `MusicalWorkspaceSession`.
 
 #### Verified 7-Step Navigation Lifecycle (`B.2`)
 1. **Step 1 — Apply Stored Preference:** Loaded stored preference with `STANDARD_NOTATION` on Acoustic Guitar (`acoustic_guitar`).
@@ -111,11 +112,11 @@ The following domain rules are strictly enforced and verified by tests `C.1`, `C
 
 ---
 
-### 3.4 Finding D — Accurate Reports, Commit State, and SHA-256 Manifests
+### 3.4 Finding D & E — Accurate Reports, Commit State, and SHA-256 Manifests
 
-- **Exact HEAD Recorded:** `f9225ef6373e50f28a450e88be3f276482aa55c5` (remote origin/main).
-- **Prior Published Remediation Commit:** `2bd2ff2ecf2a2bbaa34995b7c65633dd10ffc6bd`.
-- **Current Verification State:** Uncommitted working tree containing the bounded verification remediation files, intact for Project Owner review.
+- **Exact HEAD Recorded:** `8895378a135558595b0d494c77f2e4ec81fa19a3` (remote origin/main).
+- **Publication History:** Commit `8895378` published the initial version of the final verification report, manifests, component refactoring, and orchestrator transitions to `origin/main`.
+- **Current Verification State:** Uncommitted working tree containing the bounded reconciliation updates, intact for Project Owner review.
 - **Manifest Synchronization:** Verified that existing report copies are byte-identical and match their `.sha256` files.
 
 ---
@@ -148,17 +149,17 @@ node --test --experimental-strip-types "src/core/workspace/__tests__/reading-for
 **Captured Output:**
 ```
 ▶ Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 / Priority 1)
-  ✔ A.1 should render ReadingFormatSelector and disable "Cifrado con Letra" when song has chords but NO lyrics (23.4104ms)
-  ✔ A.2 should render ReadingFormatSelector and enable "Cifrado con Letra" when song has chords AND lyrics (3.026ms)
-  ✔ A.3 should render ReadingFormatSelector and disable note-dependent formats for rests-only song (F-03) (3.9406ms)
-  ✔ A.4 should render accurate ARIA attributes, semantic roles and tooltips (1.4916ms)
-  ✔ A.5 should render preference persistence button when authenticated and reflect saved match (4.5098ms)
-  ✔ B.1 should mount and execute useMusicalWorkspace hook via React test harness (4.9331ms)
-  ✔ B.2 should execute complete navigation lifecycle: preference preservation and automatic restoration (Finding B) (2.4426ms)
-  ✔ C.1 should enforce invariant: format compatibility for full score (Guitar) (0.8098ms)
-  ✔ C.2 should enforce invariant: Tablatura is disabled for non-string instruments regardless of song notes (0.7905ms)
-  ✔ C.3 should guarantee strict immutability of CanonicalMusicPayload when switching reading views (4.1576ms)
-✔ Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 / Priority 1) (51.8283ms)
+  ✔ A.1 should render ReadingFormatSelector and disable "Cifrado con Letra" when song has chords but NO lyrics (11.4655ms)
+  ✔ A.2 should render ReadingFormatSelector and enable "Cifrado con Letra" when song has chords AND lyrics (2.3633ms)
+  ✔ A.3 should render ReadingFormatSelector and disable note-dependent formats for rests-only song (F-03) (1.7772ms)
+  ✔ A.4 should render accurate ARIA attributes, semantic roles and tooltips (1.2542ms)
+  ✔ A.5 should render preference persistence button when authenticated and reflect saved match (2.2157ms)
+  ✔ B.1 should mount and execute useMusicalWorkspace hook via React test harness (initial render & API contract) (3.9154ms)
+  ✔ B.2 should execute complete navigation lifecycle via MusicalWorkspaceSession (shared transition seam) (1.9048ms)
+  ✔ C.1 should enforce invariant: format compatibility for full score (Guitar) (0.3638ms)
+  ✔ C.2 should enforce invariant: Tablatura is disabled for non-string instruments regardless of song notes (0.3295ms)
+  ✔ C.3 should guarantee strict immutability of CanonicalMusicPayload when switching reading views (1.5299ms)
+✔ Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 / Priority 1) (28.5961ms)
 ℹ tests 10
 ℹ suites 1
 ℹ pass 10
@@ -166,7 +167,7 @@ node --test --experimental-strip-types "src/core/workspace/__tests__/reading-for
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 723.3294
+ℹ duration_ms 751.5104
 ```
 
 ### 4.4 Full Frontend Test Suite
@@ -183,7 +184,7 @@ npm test
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 2344.4423
+ℹ duration_ms 2718.6445
 ```
 
 ### 4.5 Full Backend Test Suite
@@ -237,8 +238,8 @@ dist/assets/index-D46tbyne.js   2,884.38 kB │ gzip: 734.69 kB
 | **A.3** | Disable note-dependent formats for rests-only song (F-03) | `reading-format-selector.test.ts` | Renders real component with rests-only song; asserts Partitura and Tablatura buttons receive `disabled=""` and explanation badges. |
 | **A.4** | Accurate ARIA attributes and semantic roles | `reading-format-selector.test.ts` | Asserts `role="radiogroup"`, `role="radio"`, `aria-checked`, and accessible labelling. |
 | **A.5** | Preference persistence button & saved match reflection | `reading-format-selector.test.ts` | Asserts "Guardar como Preferida" button rendering when authenticated, disabled state when matching saved preferences, and click handling. |
-| **B.1** | Mount and execute `useMusicalWorkspace` via React test harness | `reading-format-selector.test.ts` | Mounts the real React hook `useMusicalWorkspace` inside `WorkspaceHarness`, verifying initial execution and projection validity. |
-| **B.2** | Multi-step navigation lifecycle & preference restoration | `reading-format-selector.test.ts` | Executes 7-step sequence: loads preference (`STANDARD_NOTATION`), navigates to Lead Sheet (applies fallback, preserves stored preference), navigates back to notes (restores view), navigates to chords-only song (falls back to Cifrado Solo). |
+| **B.1** | Mount and execute `useMusicalWorkspace` via React test harness (initial render & API contract) | `reading-format-selector.test.ts` | Mounts the real React hook `useMusicalWorkspace` inside `WorkspaceHarness`, verifying initial execution, projection validity, and public callback methods. |
+| **B.2** | Multi-step navigation lifecycle via `MusicalWorkspaceSession` (shared transition seam) | `reading-format-selector.test.ts` | Executes 7-step sequence: loads preference (`STANDARD_NOTATION`), navigates to Lead Sheet (applies fallback, preserves stored preference), navigates back to notes (restores view), navigates to chords-only song (falls back to Cifrado Solo). |
 | **C.1** | Format compatibility invariant for full score | `reading-format-selector.test.ts` | Proves all four formats are available for acoustic guitar with full notation song. |
 | **C.2** | Tablatura disabled for non-string instruments | `reading-format-selector.test.ts` | Proves Tablatura is strictly unavailable for piano/alto sax regardless of notes in song. |
 | **C.3** | Strict immutability of `CanonicalMusicPayload` | `reading-format-selector.test.ts` | Freezes canonical song payload with `Object.freeze` and proves zero mutations occur across projections and view transitions. |
@@ -249,11 +250,11 @@ dist/assets/index-D46tbyne.js   2,884.38 kB │ gzip: 734.69 kB
 
 | File | Change Description | Non-Obvious Rationale |
 | :--- | :--- | :--- |
-| `frontend/src/components/workspace/reading-format-selector-component.ts` | **Created**. Pure TypeScript component using `React.createElement`. | Enables Node.js native testing via `react-dom/server` (`renderToStaticMarkup`) without JSX transpilation errors or external test libraries. |
-| `frontend/src/components/workspace/ReadingFormatSelector.tsx` | Re-exports `reading-format-selector-component.ts`. | Preserves 100% backward compatibility for all existing imports in `MusicalControls.tsx` and `workspace/index.ts`. |
-| `frontend/src/core/workspace/workspace-orchestrator.ts` | Extracted transition functions (`transitionSelectSong`, `transitionApplyUserPreference`, `transitionSetReadingFormat`); created `MusicalWorkspaceSession`; bypassed forced renderer during fallbacks. | Separates state transition math from React hook internals, allowing deterministic lifecycle testing while preventing guitar tablature engine locks during fallback to chord sheets. |
-| `frontend/src/core/workspace/use-musical-workspace.ts` | Delegated hook actions 1:1 to transition functions. | Guarantees that the runtime hook behaves identically to the tested state transitions without code divergence. |
-| `frontend/src/core/workspace/__tests__/reading-format-selector.test.ts` | Comprehensive 10-test suite exercising real rendered component, hook harness, navigation lifecycle, and domain invariants. | Completely replaces boolean formula tests with real component and lifecycle tests, resolving Findings A, B, and C. |
+| `frontend/src/components/workspace/reading-format-selector-component.ts` | Pure TypeScript component using `React.createElement`. | Enables Node.js native testing via `react-dom/server` (`renderToStaticMarkup`) without JSX transpilation errors or external test libraries. Published in `8895378`. |
+| `frontend/src/components/workspace/ReadingFormatSelector.tsx` | Re-exports `reading-format-selector-component.ts`. | Preserves 100% backward compatibility for all existing imports in `MusicalControls.tsx` and `workspace/index.ts`. Published in `8895378`. |
+| `frontend/src/core/workspace/workspace-orchestrator.ts` | Extracted transition functions (`transitionSelectSong`, `transitionApplyUserPreference`, `transitionSetReadingFormat`); created `MusicalWorkspaceSession`; bypassed forced renderer during fallbacks. | Separates state transition math from React hook internals, allowing deterministic lifecycle testing while preventing guitar tablature engine locks during fallback to chord sheets. Published in `8895378`. |
+| `frontend/src/core/workspace/use-musical-workspace.ts` | Delegated hook actions 1:1 to transition functions. | Guarantees that the runtime hook behaves identically to the tested state transitions without code divergence. Published in `8895378`. |
+| `frontend/src/core/workspace/__tests__/reading-format-selector.test.ts` | Comprehensive 10-test suite exercising real rendered component, hook harness, navigation lifecycle, and domain invariants. | Accurately tests rendered component DOM, hook initial mount/contract, and session transition sequence. Updated with precision in current turn. |
 
 ---
 
@@ -267,6 +268,7 @@ All report copies were verified for byte-for-byte equality and manifest integrit
 | `WORSHIP_STUDIO_WP03_VISUAL_IDENTITY_IMPLEMENTATION_REPORT.md` | `7ff24dbf97f59305d0d467609f3a44e4deeff52b059aa4242d3af880d41e54f4` | Synchronized (3 copies) |
 | `WP03_PRIORITY1_INDEPENDENT_AUDIT_REMEDIATION_REPORT.md` | `aca3e6eb0c292db20f3bc4d39759f969f33ffe94edb5ff6f9d08cee353df309f` | Synchronized (3 copies) |
 | `WP03_PRIORITY1_FINAL_VERIFICATION_REPORT.md` *(This Report)* | *(Recorded in .sha256 manifest)* | Synchronized (3 copies) |
+| `WP03_PRIORITY1_PUBLICATION_AND_HOOK_COVERAGE_RECONCILIATION.md` | *(Recorded in .sha256 manifest)* | Synchronized (3 copies) |
 
 ---
 
@@ -275,12 +277,13 @@ All report copies were verified for byte-for-byte equality and manifest integrit
 1. **Browser / Playwright E2E Tests:** Marked **NOT RUN**. No repository-mandated browser gate exists for this package, and no live deployment server was authorized.
 2. **Database Migrations on Production:** Marked **NOT RUN**. Migrations were executed only within the automated PostgreSQL test container for integration test verification.
 3. **Multi-Track / OMR Ingestion (Phase 3C):** Unimplemented (governance boundary strictly respected).
+4. **Interactive Client-Loop Hook Testing:** In the absence of an installed browser DOM event loop (JSDOM / Testing Library), multi-step interactive state re-rendering of `useMusicalWorkspace` is exercised via `MusicalWorkspaceSession` (sharing pure transition functions 1:1) rather than interactive client re-renders.
 
 ---
 
 ## 9. Scope Boundaries & Governance Declarations
 
-- **Zero Git Commits / Zero Pushes:** No commits or pushes to GitHub were performed during this verification remediation task. The working tree has been left uncommitted for Project Owner review.
+- **Zero Git Commits / Zero Pushes:** No commits or pushes to GitHub were performed during this reconciliation task. The working tree has been left ready for Project Owner review.
 - **Zero New Dependencies:** No new npm packages (e.g. `@testing-library/react`, `jsdom`, Vitest) were introduced. All component tests run natively on the existing test stack.
 - **Zero Phase Creep:** WP-04 (PWA Offline), WP-05 (Autoscroll & Pedal Sync), Phase 3B (Realtime Liturgical Flow), and Phase 3C (Multitracks & OMR) were NOT started or implemented.
 
@@ -288,10 +291,10 @@ All report copies were verified for byte-for-byte equality and manifest integrit
 
 ## 10. Recommended Next Governance Action
 
-The technical verification and remediation for **WP-03 / First-Release Priority 1** is complete, fully tested (502/502 tests passing), and ready for Project Owner sign-off.
+The technical verification, publication reconciliation, and evidence granularity for **WP-03 / First-Release Priority 1** are fully reconciled, thoroughly tested (502/502 tests passing), and ready for Project Owner sign-off.
 
 **Recommended Steps for Project Owner:**
 1. Review the uncommitted working-tree changes (`git diff`).
-2. Review this verification report (`docs/WP03_PRIORITY1_FINAL_VERIFICATION_REPORT.md`).
-3. Authorize publication (commit and push to `origin/main`).
+2. Review this verification report (`docs/WP03_PRIORITY1_FINAL_VERIFICATION_REPORT.md`) and the reconciliation report (`docs/WP03_PRIORITY1_PUBLICATION_AND_HOOK_COVERAGE_RECONCILIATION.md`).
+3. Commit and push the reconciliation deliverables in a single controlled commit.
 4. Issue formal sign-off for WP-03 / First-Release Priority 1 before proceeding to future work packages.

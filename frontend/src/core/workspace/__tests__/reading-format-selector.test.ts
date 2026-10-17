@@ -9,14 +9,16 @@
  *    - Canción de solo silencios (0 notas): desactiva Partitura y Tablatura con badge explicativo (F-03).
  *    - Verificación de atributos ARIA y tooltips accesibles.
  *    - Callback y persistencia de preferencias (onSelectFormat y onSavePreference).
- * 2. Finding B: Pruebas de integración del ciclo de vida y navegación del Workspace (useMusicalWorkspace & MusicalWorkspaceSession):
+ * 2. Finding B: Pruebas de integración del ciclo de vida y navegación del Workspace:
+ *    - Hook useMusicalWorkspace: montado y ejecutado en arnés React (renderToStaticMarkup) para verificar render inicial y contrato público de callbacks.
+ *    - MusicalWorkspaceSession: ejercita la máquina de estados y el ciclo completo de navegación multi-paso a través de las funciones de transición puras compartidas 1:1 con el hook.
  *    - Carga de preferencia con STANDARD_NOTATION.
  *    - Canción con notas proyecta STANDARD_NOTATION.
  *    - Navegación a Lead Sheet (0 notas) aplica fallback seguro determinista a CHORDS + LYRICS (F-04).
  *    - Invariante estricto: la preferencia almacenada NUNCA es mutada ni sobrescrita por el fallback.
  *    - Navegación de vuelta a canción con notas restaura automáticamente STANDARD_NOTATION.
  *    - Proyección válida y no nula durante todas las transiciones (cero parpadeo o proyección en blanco).
- *    - Canción con acordes pero sin letra aplica fallback a "Cifrado Solo" (CHORDS sin LYRICS).
+ *    - Canción con acordes pero sin letra ni notas aplica fallback a "Cifrado Solo" (CHORDS sin LYRICS).
  * 3. Invariantes de dominio e inmutabilidad estricta de CanonicalMusicPayload.
  */
 
@@ -400,13 +402,15 @@ describe('Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 /
   // SECTION 2: Finding B — Real Workspace Hook and Navigation Lifecycle Coverage
   // -------------------------------------------------------------------------
 
-  it('B.1 should mount and execute useMusicalWorkspace hook via React test harness', () => {
-    // Harness de prueba que ejecuta el hook real useMusicalWorkspace
+  it('B.1 should mount and execute useMusicalWorkspace hook via React test harness (initial render & API contract)', () => {
+    // Harness de prueba que ejecuta el hook real useMusicalWorkspace en SSR
     let capturedResult: any = null;
+    let capturedHook: any = null;
 
     function WorkspaceHarness() {
       const ws = useMusicalWorkspace();
       capturedResult = ws.viewResult;
+      capturedHook = ws;
       return React.createElement(
         'div',
         { 'data-testid': 'workspace-harness' },
@@ -419,17 +423,33 @@ describe('Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 /
     assert.ok(capturedResult !== null, 'El hook useMusicalWorkspace debe ejecutarse y producir viewResult');
     assert.ok(capturedResult.isProjectionValid, 'La proyección inicial debe ser válida');
     assert.ok(capturedResult.activeRendererId !== null, 'Debe asignar un renderizador inicial');
+
+    // Verificar contrato de callbacks públicos expuestos por el hook en runtime
+    assert.equal(typeof capturedHook.selectSong, 'function', 'El hook debe exponer selectSong');
+    assert.equal(typeof capturedHook.applyUserPreference, 'function', 'El hook debe exponer applyUserPreference');
+    assert.equal(typeof capturedHook.setReadingFormat, 'function', 'El hook debe exponer setReadingFormat');
+    assert.equal(typeof capturedHook.selectInstrument, 'function', 'El hook debe exponer selectInstrument');
+    assert.equal(typeof capturedHook.selectPersistedSong, 'function', 'El hook debe exponer selectPersistedSong');
+    assert.equal(typeof capturedHook.importSong, 'function', 'El hook debe exponer importSong');
+    assert.equal(typeof capturedHook.applyPreset, 'function', 'El hook debe exponer applyPreset');
+
+    // Invocación segura de callbacks sin excepciones
+    assert.doesNotThrow(() => {
+      capturedHook.selectSong(GOLDEN_SCENARIO_PRESETS.SCENARIO_A.canonicalSongFactory());
+      capturedHook.setReadingFormat('CHORDS', ['LYRICS']);
+    }, 'La invocación de callbacks del hook no debe lanzar errores');
   });
 
-  it('B.2 should execute complete navigation lifecycle: preference preservation and automatic restoration (Finding B)', () => {
-    // Escenario exigido por el Prompt:
+  it('B.2 should execute complete navigation lifecycle via MusicalWorkspaceSession (shared transition seam)', () => {
+    // Escenario de navegación multi-paso ejecutado a través de MusicalWorkspaceSession,
+    // la cual comparte 1:1 las funciones puras de transición con useMusicalWorkspace:
     // 1. Aplicar preferencia con STANDARD_NOTATION en guitarra acústica.
     // 2. Cargar canción con notas: verificar que la notación en pentagrama es la vista efectiva.
     // 3. Navegar a canción Lead Sheet con 0 notas pero con acordes y letra: verificar fallback a CHORDS con LYRICS.
     // 4. Verificar que la preferencia almacenada/solicitada permanece STANDARD_NOTATION (cero mutación silenciosa).
     // 5. Navegar de vuelta a la canción con notas: verificar restauración automática de STANDARD_NOTATION.
     // 6. Verificar que ninguna proyección intermedia sea nula o inválida.
-    // 7. Navegar a canción instrumental (acordes, 0 letra): verificar que cae a "Cifrado Solo" (CHORDS), no "Cifrado con Letra".
+    // 7. Navegar a canción con acordes pero sin letra ni notas: verificar que cae a "Cifrado Solo" (CHORDS), no "Cifrado con Letra".
 
     const session = new MusicalWorkspaceSession('SCENARIO_A');
 

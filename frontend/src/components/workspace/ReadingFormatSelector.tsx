@@ -54,8 +54,9 @@ export const ReadingFormatSelector: React.FC<ReadingFormatSelectorProps> = ({
   const [saveErrorMessage, setSaveErrorMessage] = useState<string | null>(null);
 
   // Inspección del contenido canónico de la canción (CERO invención de contenido)
+  // Se utiliza getAllNotes() para que los silencios (Rest) NUNCA cuenten como notas (F-03).
   const totalNotes = song.measures.reduce(
-    (acc, m) => acc + m.voices.reduce((vAcc, v) => vAcc + v.events.length, 0),
+    (acc, m) => acc + m.getAllNotes().length,
     0
   );
   const totalChords = song.measures.reduce((acc, m) => acc + m.chords.length, 0);
@@ -77,18 +78,25 @@ export const ReadingFormatSelector: React.FC<ReadingFormatSelectorProps> = ({
     staffUnavailability = `El instrumento "${instrumentProfile.name}" no utiliza notación en pentagrama.`;
   }
 
-  // 2. Cifrado con Letra
+  // 2. Cifrado con Letra (requiere tanto acordes armónicos como texto lírico, F-02)
   const chordsSupportedByInstrument = instrumentProfile.isRepresentationSupported('CHORDS');
-  const chordChartAvailable = chordsSupportedByInstrument && hasChords;
+  const lyricsSupportedByInstrument = instrumentProfile.isRepresentationSupported('LYRICS');
+  const chordChartAvailable =
+    chordsSupportedByInstrument && lyricsSupportedByInstrument && hasChords && hasLyrics;
   let chordChartUnavailability = '';
-  if (!hasChords) {
+  if (!hasChords && !hasLyrics) {
+    chordChartUnavailability = 'La canción no contiene acordes de cifrado ni texto lírico.';
+  } else if (!hasChords) {
     chordChartUnavailability = 'La canción no contiene acordes de cifrado armónico.';
+  } else if (!hasLyrics) {
+    chordChartUnavailability = 'La canción no contiene texto lírico para acompañar el cifrado.';
   } else if (!chordsSupportedByInstrument) {
     chordChartUnavailability = `El instrumento "${instrumentProfile.name}" no soporta cifrado.`;
+  } else if (!lyricsSupportedByInstrument) {
+    chordChartUnavailability = `El instrumento "${instrumentProfile.name}" no soporta capa de letra.`;
   }
 
   // 3. Letra Sola
-  const lyricsSupportedByInstrument = instrumentProfile.isRepresentationSupported('LYRICS');
   const lyricsAvailable = lyricsSupportedByInstrument && hasLyrics;
   let lyricsUnavailability = '';
   if (!hasLyrics) {
@@ -129,7 +137,7 @@ export const ReadingFormatSelector: React.FC<ReadingFormatSelectorProps> = ({
       isAvailable: chordChartAvailable,
       unavailabilityReason: chordChartUnavailability,
       primary: 'CHORDS',
-      secondary: hasLyrics ? ['LYRICS', 'SECTION_MARKERS'] : ['SECTION_MARKERS'],
+      secondary: ['LYRICS', 'SECTION_MARKERS'],
     },
     {
       id: 'LYRICS_ONLY',

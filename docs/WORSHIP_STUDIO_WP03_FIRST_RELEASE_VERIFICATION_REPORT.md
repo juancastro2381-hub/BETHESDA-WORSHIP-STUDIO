@@ -16,7 +16,11 @@
 
 This report provides the formal verification record and acceptance audit for **WP-03 (Visual Identity Alignment)** and **First-Release Priority 1 (Musician-Selectable Reading Views with Authenticated Persistence)**.
 
-All code modifications have been verified through automated non-browser test suites, static TypeScript typechecking, and contract audits. Zero commits, zero pushes, and zero deployments have been executed.
+All code modifications have been verified through automated non-browser test suites, static TypeScript typechecking, and contract audits.
+
+> [!NOTE]
+> **Delivery State Reconciled (Finding F-01 Addendum — October 16, 2026):**  
+> At initial authoring time (October 16, 2026 ~12:00 UTC-5), the implementation files and reports were verified and left uncommitted in the local working tree by the automated agent as requested by the initial prompt. Subsequently, on October 16, 2026 at 12:12:45 -0500, the Project Owner (`juancastro2381-hub`) formally reviewed and published these changes to remote `main` in commit `ba3278f7c28e7f2cc96dcc74312dd738866df86d` (*"WP-03 & First-Release Priority 1 Completion Summary"*). This addendum reconciles the verifiable Git reality with the initial drafting record without altering historical facts.
 
 ---
 
@@ -36,7 +40,7 @@ All code modifications have been verified through automated non-browser test sui
 | **Reading Views** | View control works on phone and tablet layouts | Responsive CSS grid wraps cleanly to 2 columns on mobile screens (<500px) and 4 inline buttons on desktop. Touch targets exceed 44px. | **PASS** |
 | **Governance** | Only authorized scope implemented (WP-03 + First-Release Priority 1) | Scope strictly confined to visual identity and reading view selection. | **PASS** |
 | **Governance** | WP-04/WP-05, Phase 3B/3C, and subsequent packages remain unauthorized | No offline PWA, no auto-scroll, no pedal sync, no audio/multitracks, no OMR, no WebSocket sync. | **PASS** |
-| **Governance** | No commit, push, or deployment occurs | Working tree left dirty for Project Owner review. Git status confirms 0 commits made. | **PASS** |
+| **Governance** | No commit, push, or deployment occurs by agent | Working tree initially left dirty by agent for review; subsequently reviewed, committed, and pushed to remote main by Project Owner in commit `ba3278f7c28e7f2cc96dcc74312dd738866df86d`. | **PASS (RECONCILED)** |
 | **Governance** | Reports accurately distinguish implemented, tested, and unverified behavior | Complete forensic reports generated in `docs/reports/`. | **PASS** |
 
 **Final Acceptance Verdict:** **14 / 14 CRITERIA PASS (100%)**
@@ -144,3 +148,16 @@ To visually verify the implementation in the browser:
    - Select your preferred reading format (e.g., Cifrado con Letra).
    - Click **"★ Guardar como preferida"**: observe success banner *"Preferencia guardada en tu cuenta"*.
    - Refresh the page: observe your preferred view is automatically selected and applied by default.
+
+---
+
+## 6. Documentary Amendment & Repository Reconciliation (October 16, 2026)
+
+- **Prior Baseline Reference:** `6477e18e8ba894940713b20365615a685734cf9e`
+- **Initial Verification State:** Agent verified all test suites and left working tree dirty for Project Owner inspection.
+- **Published Commit SHA:** `ba3278f7c28e7f2cc96dcc74312dd738866df86d`
+- **Commit Author & Committer:** `juancastro2381-hub <juancastro2381@gmail.com>`
+- **Commit Date:** Fri Oct 16 12:12:45 2026 -0500
+- **Commit Message:** `WP-03 & First-Release Priority 1 Completion Summary`
+- **Verification of Remote State:** Verified that commit `ba3278f7c28e7f2cc96dcc74312dd738866df86d` is the current HEAD of remote `main` (`origin/main`), containing the full implementation of WP-03 and Priority 1.
+- **Remediation Reference:** For independent audit findings F-01 through F-05, see `docs/WP03_PRIORITY1_INDEPENDENT_AUDIT_REMEDIATION_REPORT.md`.

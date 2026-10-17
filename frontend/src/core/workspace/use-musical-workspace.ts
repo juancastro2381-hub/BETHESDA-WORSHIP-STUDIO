@@ -11,7 +11,7 @@
  * - Proveer callbacks interactivos accesibles
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { type CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 import { InstrumentRegistry, type InstrumentProfile } from '../projection/instrument-profile.ts';
 import { type ChordNotationSystem, type ViewRepresentation } from '../projection/types.ts';
@@ -29,6 +29,7 @@ import {
   createInitialWorkspaceState,
   instrumentSupportsCapo,
   orchestrateWorkspaceView,
+  resolveEffectiveViewRepresentation,
   transitionApplyPreset,
   transitionSelectInstrument,
   transitionSetCapo,
@@ -38,7 +39,7 @@ import {
   transitionToggleSecondary,
 } from './workspace-orchestrator.ts';
 
-export { instrumentSupportsCapo };
+export { instrumentSupportsCapo, resolveEffectiveViewRepresentation };
 
 const instrumentRegistry = new InstrumentRegistry();
 const rendererRegistry = new RendererRegistry();
@@ -78,6 +79,13 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   const [importedMeta, setImportedMeta] = useState<{ sourceName?: string; format: string } | null>(null);
   const [persistedMeta, setPersistedMeta] = useState<{ isPersisted: boolean; songId: string; versionNumber: number } | null>(null);
 
+  // Referencia a la preferencia o formato deseado por el usuario (F-04).
+  // Se preserva intacta para restaurar la vista deseada cuando el usuario navegue a una canción compatible.
+  const preferredFormatRef = useRef<{
+    primary: ViewRepresentation;
+    secondary: readonly ViewRepresentation[];
+  } | null>(null);
+
   const [state, setState] = useState<IWorkspaceState>(
     createInitialWorkspaceState(initialPresetId)
   );
@@ -96,7 +104,12 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   const applyPreset = useCallback((presetId: GoldenScenarioId) => {
     const preset = GOLDEN_SCENARIO_PRESETS[presetId];
     if (!preset) return;
-    setActiveSong(preset.canonicalSongFactory());
+    const song = preset.canonicalSongFactory();
+    preferredFormatRef.current = {
+      primary: preset.primaryRepresentation,
+      secondary: preset.secondaryRepresentations,
+    };
+    setActiveSong(song);
     setImportedMeta(null);
     setPersistedMeta(null);
     setState(transitionApplyPreset(preset));
@@ -107,7 +120,18 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     setActiveSong(song);
     setImportedMeta(null);
     setPersistedMeta(null);
-    setState((prev) => ({ ...prev, activePresetId: 'CUSTOM' }));
+    setState((prev) => {
+      const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+      const reqPrimary = preferredFormatRef.current?.primary ?? prev.primaryRepresentation;
+      const reqSecondary = preferredFormatRef.current?.secondary ?? prev.secondaryRepresentations;
+      const effective = resolveEffectiveViewRepresentation(song, profile, reqPrimary, reqSecondary);
+      return {
+        ...prev,
+        primaryRepresentation: effective.primaryRepresentation,
+        secondaryRepresentations: [...effective.secondaryRepresentations],
+        activePresetId: 'CUSTOM',
+      };
+    });
   }, []);
 
   // Importar partitura desde archivo real
@@ -115,7 +139,18 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     setActiveSong(song);
     setImportedMeta(meta);
     setPersistedMeta(null);
-    setState((prev) => ({ ...prev, activePresetId: 'CUSTOM' }));
+    setState((prev) => {
+      const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+      const reqPrimary = preferredFormatRef.current?.primary ?? prev.primaryRepresentation;
+      const reqSecondary = preferredFormatRef.current?.secondary ?? prev.secondaryRepresentations;
+      const effective = resolveEffectiveViewRepresentation(song, profile, reqPrimary, reqSecondary);
+      return {
+        ...prev,
+        primaryRepresentation: effective.primaryRepresentation,
+        secondaryRepresentations: [...effective.secondaryRepresentations],
+        activePresetId: 'CUSTOM',
+      };
+    });
   }, []);
 
   // Cargar canción persistida desde base de datos PostgreSQL
@@ -123,14 +158,35 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     setActiveSong(song);
     setImportedMeta(null);
     setPersistedMeta(meta);
-    setState((prev) => ({ ...prev, activePresetId: 'CUSTOM' }));
+    setState((prev) => {
+      const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+      const reqPrimary = preferredFormatRef.current?.primary ?? prev.primaryRepresentation;
+      const reqSecondary = preferredFormatRef.current?.secondary ?? prev.secondaryRepresentations;
+      const effective = resolveEffectiveViewRepresentation(song, profile, reqPrimary, reqSecondary);
+      return {
+        ...prev,
+        primaryRepresentation: effective.primaryRepresentation,
+        secondaryRepresentations: [...effective.secondaryRepresentations],
+        activePresetId: 'CUSTOM',
+      };
+    });
   }, []);
 
   // Cambiar instrumento seleccionado y filtrar representaciones incompatibles
   const selectInstrument = useCallback((instrumentId: InstrumentId) => {
     const targetProfile = instrumentRegistry.getOrThrow(instrumentId);
-    setState((prev) => transitionSelectInstrument(prev, targetProfile));
-  }, []);
+    setState((prev) => {
+      const transitioned = transitionSelectInstrument(prev, targetProfile);
+      const reqPrimary = preferredFormatRef.current?.primary ?? transitioned.primaryRepresentation;
+      const reqSecondary = preferredFormatRef.current?.secondary ?? transitioned.secondaryRepresentations;
+      const effective = resolveEffectiveViewRepresentation(activeSong, targetProfile, reqPrimary, reqSecondary);
+      return {
+        ...transitioned,
+        primaryRepresentation: effective.primaryRepresentation,
+        secondaryRepresentations: [...effective.secondaryRepresentations],
+      };
+    });
+  }, [activeSong]);
 
   // Cambiar representación primaria
   const setPrimaryRepresentation = useCallback((representation: ViewRepresentation) => {
@@ -150,6 +206,7 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Cambiar formato de lectura (primaria y secundarias atómicamente)
   const setReadingFormat = useCallback((primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
+    preferredFormatRef.current = { primary, secondary };
     setState((prev) => {
       const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
       if (!profile.isRepresentationSupported(primary)) {
@@ -169,32 +226,39 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Aplicar preferencias de visualización persistidas del usuario (Fase 3A)
   const applyUserPreference = useCallback((pref: UserViewPreferenceData) => {
+    preferredFormatRef.current = {
+      primary: pref.primaryRepresentation,
+      secondary: pref.secondaryRepresentations ?? [],
+    };
     setState((prev) => {
       const targetInstrumentId = pref.instrumentId;
       const profile = instrumentRegistry.get(targetInstrumentId) ?? instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
       const isPrimarySupported = profile.isRepresentationSupported(pref.primaryRepresentation);
-      const finalPrimary = isPrimarySupported
+      const desiredPrimary = isPrimarySupported
         ? pref.primaryRepresentation
         : Array.from(profile.supportedRepresentations)[0] ?? 'CHORDS';
 
-      const finalSecondary = (pref.secondaryRepresentations ?? []).filter(
-        (s) => profile.isRepresentationSupported(s) && s !== finalPrimary
+      const desiredSecondary = (pref.secondaryRepresentations ?? []).filter(
+        (s) => profile.isRepresentationSupported(s) && s !== desiredPrimary
       );
+
+      // Calcular la representación efectiva considerando el contenido de la canción activa (F-04)
+      const effective = resolveEffectiveViewRepresentation(activeSong, profile, desiredPrimary, desiredSecondary);
 
       const safeCapo = instrumentSupportsCapo(profile) ? pref.capoFret : 0;
 
       return {
         ...prev,
         selectedInstrumentId: profile.id,
-        primaryRepresentation: finalPrimary,
-        secondaryRepresentations: finalSecondary,
+        primaryRepresentation: effective.primaryRepresentation,
+        secondaryRepresentations: [...effective.secondaryRepresentations],
         chordNotationSystem: pref.chordNotationSystem ?? prev.chordNotationSystem,
         transpositionSemitones: pref.transpositionSemitones ?? prev.transpositionSemitones,
         capoFret: safeCapo,
         activePresetId: 'CUSTOM',
       };
     });
-  }, []);
+  }, [activeSong]);
 
   // Modificar cejilla (Capo)
   const setCapo = useCallback((fret: number) => {

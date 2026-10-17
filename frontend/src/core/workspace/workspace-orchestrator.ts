@@ -191,6 +191,154 @@ export function transitionApplyPreset(preset: ScenarioPreset): IWorkspaceState {
   };
 }
 
+export interface EffectiveViewResult {
+  readonly primaryRepresentation: ViewRepresentation;
+  readonly secondaryRepresentations: readonly ViewRepresentation[];
+  readonly isFallbackApplied: boolean;
+  readonly fallbackReason?: string;
+}
+
+/**
+ * Resuelve de forma determinista y segura la representación efectiva de lectura musical
+ * basada en el contenido REAL de la canción (CERO invención de notas) y el perfil del instrumento.
+ *
+ * Si la representación solicitada no puede ser satisfecha por los datos reales de la canción
+ * (por ejemplo, STANDARD_NOTATION en un Lead Sheet con 0 notas melódicas), aplica un fallback seguro
+ * sin corromper ni sobrescribir la preferencia almacenada del usuario (F-04).
+ */
+export function resolveEffectiveViewRepresentation(
+  song: CanonicalMusicPayload,
+  instrumentProfile: InstrumentProfile,
+  requestedPrimary: ViewRepresentation,
+  requestedSecondary: readonly ViewRepresentation[] = []
+): EffectiveViewResult {
+  // Inspección del contenido canónico de la canción (CERO invención de contenido).
+  // Se utiliza getAllNotes() para asegurar que los silencios (Rest) NUNCA se cuenten como notas (F-03).
+  const totalNotes = song.measures.reduce((acc, m) => acc + m.getAllNotes().length, 0);
+  const totalChords = song.measures.reduce((acc, m) => acc + m.chords.length, 0);
+  const totalLyrics = song.measures.reduce((acc, m) => acc + m.lyrics.length, 0);
+
+  const hasNotes = totalNotes > 0;
+  const hasChords = totalChords > 0;
+  const hasLyrics = totalLyrics > 0;
+
+  // 1. Verificar si la representación primaria solicitada es directamente soportada
+  let isPrimarySupported = false;
+  let reason = '';
+
+  if (requestedPrimary === 'STANDARD_NOTATION' || requestedPrimary === 'GRAND_STAFF') {
+    if (!instrumentProfile.isRepresentationSupported(requestedPrimary)) {
+      reason = `El instrumento "${instrumentProfile.name}" no soporta notación en pentagrama.`;
+    } else if (!hasNotes) {
+      reason = 'La canción no contiene notas melódicas registradas (Lead Sheet puro).';
+    } else {
+      isPrimarySupported = true;
+    }
+  } else if (requestedPrimary === 'TABLATURE') {
+    if (instrumentProfile.tuning === undefined) {
+      reason = 'El instrumento no es de cuerda afinada (requiere Guitarra o Bajo).';
+    } else if (!instrumentProfile.isRepresentationSupported('TABLATURE')) {
+      reason = 'El perfil del instrumento no tiene habilitada tablatura.';
+    } else if (!hasNotes) {
+      reason = 'La canción no contiene notas melódicas para calcular digitación en trastes.';
+    } else {
+      isPrimarySupported = true;
+    }
+  } else if (requestedPrimary === 'CHORDS') {
+    if (!instrumentProfile.isRepresentationSupported('CHORDS')) {
+      reason = `El instrumento "${instrumentProfile.name}" no soporta cifrado.`;
+    } else if (!hasChords) {
+      reason = 'La canción no contiene acordes de cifrado armónico.';
+    } else {
+      isPrimarySupported = true;
+    }
+  } else if (requestedPrimary === 'LYRICS') {
+    if (!instrumentProfile.isRepresentationSupported('LYRICS')) {
+      reason = `El instrumento "${instrumentProfile.name}" no soporta capa de letra.`;
+    } else if (!hasLyrics) {
+      reason = 'La canción no contiene texto lírico.';
+    } else {
+      isPrimarySupported = true;
+    }
+  }
+
+  if (isPrimarySupported) {
+    const validSecondary = requestedSecondary.filter((s) => {
+      if (s === requestedPrimary) return false;
+      if (!instrumentProfile.isRepresentationSupported(s)) return false;
+      if (s === 'LYRICS' && !hasLyrics) return false;
+      if (s === 'CHORDS' && !hasChords) return false;
+      if (s === 'TABLATURE' && (!hasNotes || instrumentProfile.tuning === undefined)) return false;
+      if ((s === 'STANDARD_NOTATION' || s === 'GRAND_STAFF') && !hasNotes) return false;
+      return true;
+    });
+
+    return {
+      primaryRepresentation: requestedPrimary,
+      secondaryRepresentations: validSecondary,
+      isFallbackApplied: false,
+    };
+  }
+
+  // 2. Si no es soportada por el contenido o instrumento, calcular Fallback Seguro
+  // Orden jerárquico determinista:
+  // A. Cifrado con Letra (si tiene acordes y letra, y el instrumento los soporta)
+  if (
+    instrumentProfile.isRepresentationSupported('CHORDS') &&
+    hasChords &&
+    hasLyrics &&
+    instrumentProfile.isRepresentationSupported('LYRICS')
+  ) {
+    return {
+      primaryRepresentation: 'CHORDS',
+      secondaryRepresentations: ['LYRICS', 'SECTION_MARKERS'],
+      isFallbackApplied: true,
+      fallbackReason: reason,
+    };
+  }
+
+  // B. Cifrado Solo (si tiene acordes y no letra)
+  if (instrumentProfile.isRepresentationSupported('CHORDS') && hasChords) {
+    return {
+      primaryRepresentation: 'CHORDS',
+      secondaryRepresentations: ['SECTION_MARKERS'],
+      isFallbackApplied: true,
+      fallbackReason: reason,
+    };
+  }
+
+  // C. Letra Sola (si tiene letra)
+  if (instrumentProfile.isRepresentationSupported('LYRICS') && hasLyrics) {
+    return {
+      primaryRepresentation: 'LYRICS',
+      secondaryRepresentations: ['SECTION_MARKERS'],
+      isFallbackApplied: true,
+      fallbackReason: reason,
+    };
+  }
+
+  // D. Partitura tradicional (si tiene notas)
+  const isGrandStaff = instrumentProfile.isRepresentationSupported('GRAND_STAFF');
+  const staffRep: ViewRepresentation = isGrandStaff ? 'GRAND_STAFF' : 'STANDARD_NOTATION';
+  if (hasNotes && instrumentProfile.isRepresentationSupported(staffRep)) {
+    return {
+      primaryRepresentation: staffRep,
+      secondaryRepresentations: hasChords ? ['CHORDS'] : [],
+      isFallbackApplied: true,
+      fallbackReason: reason,
+    };
+  }
+
+  // E. Fallback canónico por defecto del instrumento
+  const defaultRep = Array.from(instrumentProfile.supportedRepresentations)[0] ?? 'CHORDS';
+  return {
+    primaryRepresentation: defaultRep,
+    secondaryRepresentations: [],
+    isFallbackApplied: true,
+    fallbackReason: reason,
+  };
+}
+
 /**
  * Orquesta la proyección y resolución del renderizador para el estado actual del Workspace.
  * Función pura y determinista: dado el mismo (song, state), produce exactamente el mismo IWorkspaceViewResult.
@@ -205,10 +353,18 @@ export function orchestrateWorkspaceView(
   const supportedRepresentations = Array.from(instrumentProfile.supportedRepresentations);
   const availableInstruments = instrumentRegistry.getAll();
 
+  // Resolución determinista de representación efectiva con fallback seguro (F-04)
+  const effective = resolveEffectiveViewRepresentation(
+    activeSong,
+    instrumentProfile,
+    state.primaryRepresentation,
+    state.secondaryRepresentations
+  );
+
   const viewPreference = new ViewPreference({
     instrumentId: state.selectedInstrumentId,
-    primaryRepresentation: state.primaryRepresentation,
-    secondaryRepresentations: [...state.secondaryRepresentations],
+    primaryRepresentation: effective.primaryRepresentation,
+    secondaryRepresentations: [...effective.secondaryRepresentations],
     capoFret: state.capoFret,
     transpositionSemitones: state.transpositionSemitones,
     chordNotationSystem: state.chordNotationSystem,
@@ -217,6 +373,16 @@ export function orchestrateWorkspaceView(
   const projectionResult = ProjectionService.project(activeSong, instrumentProfile, viewPreference);
 
   const diagnostics: WorkspaceDiagnostic[] = [];
+
+  // Diagnóstico de fallback de vista aplicado (F-04)
+  if (effective.isFallbackApplied) {
+    diagnostics.push({
+      source: 'WORKSPACE',
+      severity: 'INFO',
+      code: 'VIEW_FALLBACK_APPLIED',
+      message: `Fallback de vista aplicado: "${state.primaryRepresentation}" no está soportado por el contenido de la canción (${effective.fallbackReason}). Mostrando "${effective.primaryRepresentation}".`,
+    });
+  }
 
   // Diagnóstico de canción vacía
   if (activeSong.measures.length === 0) {
@@ -273,7 +439,13 @@ export function orchestrateWorkspaceView(
 
   return {
     activeSong,
-    state,
+    state: effective.isFallbackApplied
+      ? {
+          ...state,
+          primaryRepresentation: effective.primaryRepresentation,
+          secondaryRepresentations: effective.secondaryRepresentations,
+        }
+      : state,
     instrumentProfile,
     viewPreference,
     derivedView: projectionResult.view ?? null,

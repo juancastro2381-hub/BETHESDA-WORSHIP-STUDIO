@@ -253,7 +253,7 @@ describe('WP-04 — BethesdaOfflineStorage Suite', () => {
     assert.strictEqual(usage.usedBytes, 5000);
   });
 
-  it('6. should isolate user data and purge only the specified user records on logout', async () => {
+  it('6. should isolate user data and purge only the specified user records on logout, preserving unowned resources (Finding B)', async () => {
     // User Alice resources
     await storage.saveMetadata({
       id: 'song_alice',
@@ -282,9 +282,23 @@ describe('WP-04 — BethesdaOfflineStorage Suite', () => {
       checksumSha256: 'hb',
     });
 
+    // Unowned / public resource (ownerUserId === null)
+    await storage.saveMetadata({
+      id: 'song_public_shared',
+      resourceType: 'SONG',
+      title: 'Public Shared Song',
+      versionNumber: 1,
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      ownerUserId: null,
+      byteSize: 1500,
+      status: 'AVAILABLE_OFFLINE',
+      checksumSha256: 'hnull',
+    });
+
     // Purge Alice
     const purgeResult = await storage.purgeUserData('user_alice');
-    assert.strictEqual(purgeResult.deletedCount, 1);
+    assert.strictEqual(purgeResult.deletedCount, 1, 'Only Alice resource should be deleted');
 
     // Alice should be gone
     const aliceData = await storage.getMetadata('song_alice');
@@ -294,6 +308,11 @@ describe('WP-04 — BethesdaOfflineStorage Suite', () => {
     const bobData = await storage.getMetadata('song_bob');
     assert.ok(bobData !== null, 'Bob data must remain intact');
     assert.strictEqual(bobData?.title, 'Bob Song');
+
+    // Unowned / public resource must remain untouched (Finding B)
+    const publicData = await storage.getMetadata('song_public_shared');
+    assert.ok(publicData !== null, 'Public unowned data (ownerUserId: null) must remain intact');
+    assert.strictEqual(publicData?.title, 'Public Shared Song');
   });
 
   it('7. should wipe all stores completely on purgeAll', async () => {
@@ -314,5 +333,47 @@ describe('WP-04 — BethesdaOfflineStorage Suite', () => {
 
     const all = await storage.listMetadata();
     assert.strictEqual(all.length, 0);
+  });
+
+  it('8. should unconditionally purge orphaned payloads across all stores on deleteResource even if metadata is absent (Finding B)', async () => {
+    const meta: OfflineResourceMetadata = {
+      id: 'orphan_song_test',
+      resourceType: 'SONG',
+      title: 'Orphan Song',
+      versionNumber: 1,
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      ownerUserId: 'user_alice',
+      byteSize: 1024,
+      status: 'AVAILABLE_OFFLINE',
+      checksumSha256: 'orphan_hash',
+    };
+
+    // Save payload and metadata
+    await storage.saveSongPayload({
+      id: 'orphan_song_test',
+      metadata: meta,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+      canonicalPayload: {
+        version: '1.0.0',
+        title: 'Orphan Song',
+        timeline: { tpqn: 480, totalDurationTicks: 0, measureCount: 0, tempoMap: { events: [] } } as any,
+        sections: [],
+        measures: [],
+        instrumentTracks: [],
+      },
+    });
+
+    // Delete ONLY metadata to simulate orphaned payload state
+    await storage.deleteMetadata('orphan_song_test');
+    assert.strictEqual(await storage.getMetadata('orphan_song_test'), null);
+
+    // Call deleteResource: must unconditionally delete payload despite missing metadata
+    await storage.deleteResource('orphan_song_test');
+
+    const checkPayload = await storage.getSongPayload('orphan_song_test');
+    assert.strictEqual(checkPayload, null, 'Orphaned payload must be deleted');
   });
 });

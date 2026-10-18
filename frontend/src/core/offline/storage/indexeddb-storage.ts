@@ -132,7 +132,7 @@ export class BethesdaOfflineStorage {
         }
         // Verificar que no queden datos del usuario tombstoned
         const remaining = (await this.listMetadata()).filter(
-          (m) => m.ownerUserId === tombstonedUserId || m.ownerUserId === null
+          (m) => m.ownerUserId === tombstonedUserId
         );
         if (remaining.length === 0) {
           localStorage.removeItem(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY);
@@ -256,18 +256,32 @@ export class BethesdaOfflineStorage {
   public async getSongPayload(id: string): Promise<OfflineSongPayload | null> {
     await this.init();
 
+    let payload: OfflineSongPayload | null = null;
     if (this.isMemoryFallback || !this.db) {
-      return this.memorySongs.get(id) ?? null;
+      payload = this.memorySongs.get(id) ?? null;
+    } else {
+      payload = await new Promise((resolve, reject) => {
+        const tx = this.db!.transaction(STORES.SONG_PAYLOADS, 'readonly');
+        const store = tx.objectStore(STORES.SONG_PAYLOADS);
+        const req = store.get(id);
+
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener canción '${id}'.`));
+      });
     }
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORES.SONG_PAYLOADS, 'readonly');
-      const store = tx.objectStore(STORES.SONG_PAYLOADS);
-      const req = store.get(id);
+    if (!payload) return null;
 
-      req.onsuccess = () => resolve(req.result ?? null);
-      req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener canción '${id}'.`));
-    });
+    // Consistencia canónica de metadatos (Finding A): sincronizar con el almacén canónico de metadatos
+    const latestMeta = await this.getMetadata(id);
+    if (latestMeta) {
+      return {
+        ...payload,
+        metadata: latestMeta,
+      };
+    }
+
+    return payload;
   }
 
   public async deleteSongPayload(id: string): Promise<void> {
@@ -315,18 +329,32 @@ export class BethesdaOfflineStorage {
   public async getSetlistPayload(id: string): Promise<OfflineSetlistPayload | null> {
     await this.init();
 
+    let payload: OfflineSetlistPayload | null = null;
     if (this.isMemoryFallback || !this.db) {
-      return this.memorySetlists.get(id) ?? null;
+      payload = this.memorySetlists.get(id) ?? null;
+    } else {
+      payload = await new Promise((resolve, reject) => {
+        const tx = this.db!.transaction(STORES.SETLIST_PAYLOADS, 'readonly');
+        const store = tx.objectStore(STORES.SETLIST_PAYLOADS);
+        const req = store.get(id);
+
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener setlist '${id}'.`));
+      });
     }
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORES.SETLIST_PAYLOADS, 'readonly');
-      const store = tx.objectStore(STORES.SETLIST_PAYLOADS);
-      const req = store.get(id);
+    if (!payload) return null;
 
-      req.onsuccess = () => resolve(req.result ?? null);
-      req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener setlist '${id}'.`));
-    });
+    // Consistencia canónica de metadatos (Finding A)
+    const latestMeta = await this.getMetadata(id);
+    if (latestMeta) {
+      return {
+        ...payload,
+        metadata: latestMeta,
+      };
+    }
+
+    return payload;
   }
 
   public async deleteSetlistPayload(id: string): Promise<void> {
@@ -382,18 +410,32 @@ export class BethesdaOfflineStorage {
   public async getAudioRecord(id: string): Promise<OfflineAudioRecord | null> {
     await this.init();
 
+    let record: OfflineAudioRecord | null = null;
     if (this.isMemoryFallback || !this.db) {
-      return this.memoryAudio.get(id) ?? null;
+      record = this.memoryAudio.get(id) ?? null;
+    } else {
+      record = await new Promise((resolve, reject) => {
+        const tx = this.db!.transaction(STORES.AUDIO_BLOBS, 'readonly');
+        const store = tx.objectStore(STORES.AUDIO_BLOBS);
+        const req = store.get(id);
+
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener pista de audio '${id}'.`));
+      });
     }
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORES.AUDIO_BLOBS, 'readonly');
-      const store = tx.objectStore(STORES.AUDIO_BLOBS);
-      const req = store.get(id);
+    if (!record) return null;
 
-      req.onsuccess = () => resolve(req.result ?? null);
-      req.onerror = () => reject(new OfflineStorageError('STORAGE_UNAVAILABLE', `Error al obtener pista de audio '${id}'.`));
-    });
+    // Consistencia canónica de metadatos (Finding A)
+    const latestMeta = await this.getMetadata(id);
+    if (latestMeta) {
+      return {
+        ...record,
+        metadata: latestMeta,
+      };
+    }
+
+    return record;
   }
 
   public async deleteAudioRecord(id: string): Promise<void> {
@@ -421,20 +463,24 @@ export class BethesdaOfflineStorage {
   /**
    * Elimina un recurso local y todos sus datos asociados (metadatos + carga).
    * NO AFECTA EL SERVIDOR (El servidor permanece como fuente de la verdad).
+   * Garantiza la eliminación incondicional de cargas útiles en todos los almacenes para evitar cargas huérfanas (Finding B).
    */
   public async deleteResource(id: string): Promise<void> {
     const meta = await this.getMetadata(id);
-    if (!meta) {
-      return;
-    }
-
     await this.deleteMetadata(id);
 
-    if (meta.resourceType === 'SONG') {
+    if (meta) {
+      if (meta.resourceType === 'SONG') {
+        await this.deleteSongPayload(id);
+      } else if (meta.resourceType === 'SETLIST') {
+        await this.deleteSetlistPayload(id);
+      } else if (meta.resourceType === 'AUDIO') {
+        await this.deleteAudioRecord(id);
+      }
+    } else {
+      // Limpieza incondicional preventiva de cargas huérfanas
       await this.deleteSongPayload(id);
-    } else if (meta.resourceType === 'SETLIST') {
       await this.deleteSetlistPayload(id);
-    } else if (meta.resourceType === 'AUDIO') {
       await this.deleteAudioRecord(id);
     }
   }
@@ -465,13 +511,15 @@ export class BethesdaOfflineStorage {
   /**
    * Purga todos los datos locales privados pertenecientes a un usuario (Fase 2B / WP-04 Logout).
    * Garantiza que el siguiente usuario del mismo dispositivo no pueda acceder al material previo.
+   * Política auditada (Finding B): Solo elimina recursos cuyo ownerUserId coincide exactamente con el usuario.
+   * Preserva recursos no asignados o públicos (ownerUserId === null).
    */
   public async purgeUserData(userId: string): Promise<{ deletedCount: number }> {
     const allItems = await this.listMetadata();
     let deletedCount = 0;
 
     for (const item of allItems) {
-      if (item.ownerUserId === userId || item.ownerUserId === null) {
+      if (item.ownerUserId === userId) {
         await this.deleteResource(item.id);
         deletedCount++;
       }

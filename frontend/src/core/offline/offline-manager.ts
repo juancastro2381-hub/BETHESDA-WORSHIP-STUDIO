@@ -11,7 +11,7 @@
  * 5. Cero persistencia de tokens de acceso en almacenes locales.
  */
 
-import { BethesdaApiClient, type BackendSongResponse } from '../api/api-client.ts';
+import { BethesdaApiClient, type BackendSongResponse, type BackendSongItem } from '../api/api-client.ts';
 import { CanonicalMusicPayload, CanonicalModelValidator } from '../canonical-model/index.ts';
 import { type FrontendSetlistDetail } from '../api/setlist-types.ts';
 import {
@@ -671,11 +671,13 @@ export class BethesdaOfflineManager {
           versionNumber: response.version.versionNumber,
           status: 'AVAILABLE_OFFLINE',
         };
-        await this.storage.saveMetadata(updatedMeta);
-        return {
+        const updatedPayload: OfflineSongPayload = {
           ...payload,
           metadata: updatedMeta,
         };
+        // Persistir en ambos almacenes (song_payloads y metadata) para garantizar consistencia canónica (Finding A)
+        await this.storage.saveSongPayload(updatedPayload);
+        return updatedPayload;
       } catch (err: any) {
         if (err?.statusCode === 401 || err?.statusCode === 403) {
           await this.storage.deleteResource(songId);
@@ -696,9 +698,14 @@ export class BethesdaOfflineManager {
 
   /**
    * Compara los recursos locales con el catálogo online del servidor para detectar versiones más recientes.
-   * INVARIANTE: Preserva la copia local válida anterior hasta que se complete una actualización exitosa.
-   * Actualiza lastValidatedAt solo tras una confirmación exitosa del servidor.
-   * Si el servidor responde 401/403 o el recurso fue retirado, revoca la autorización local.
+   * INVARIANTE (Finding C):
+   * 1. Pagina exhaustivamente el catálogo del servidor sin truncar en 100 elementos.
+   * 2. NUNCA infiere revocación por ausencia en respuestas parciales o errores de red.
+   * 3. Compara números de versión reales (serverVersionNumber vs localVersionNumber) marcando UPDATE_AVAILABLE.
+   * 4. Si la versión es igual o anterior, actualiza lastValidatedAt como revalidación exitosa.
+   * 5. Para canciones ausentes del catálogo completo, realiza verificación dirigida con getSong(id);
+   *    solo marca FAILED si el servidor responde explícitamente 404 (eliminado) o 401/403 (revocado).
+   * 6. Preserva la copia local válida intacta ante errores transitorios.
    */
   public async checkForUpdates(): Promise<{ updatedCount: number; revokedCount: number }> {
     if (!this.isOnline()) {
@@ -708,36 +715,127 @@ export class BethesdaOfflineManager {
     let updatedCount = 0;
     let revokedCount = 0;
     try {
-      const serverSongs = await this.apiClient.listSongs({ limit: 100 });
       const localSongs = (await this.storage.listMetadata()).filter((m) => m.resourceType === 'SONG');
-
-      const serverMap = new Map<string, number>();
-      for (const s of serverSongs.items) {
-        serverMap.set(s.id, 1);
+      if (localSongs.length === 0) {
+        return { updatedCount: 0, revokedCount: 0 };
       }
 
+      // 1. Paginación exhaustiva del catálogo del servidor
+      const serverMap = new Map<string, BackendSongItem>();
+      let offset = 0;
+      const pageSize = 100;
+      let catalogIsComplete = false;
+
+      while (true) {
+        const page = await this.apiClient.listSongs({ limit: pageSize, offset });
+        for (const s of page.items) {
+          serverMap.set(s.id, s);
+        }
+        offset += page.items.length;
+        if (page.items.length === 0 || offset >= page.total) {
+          catalogIsComplete = true;
+          break;
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+
+      // 2. Evaluación individual de cada canción local
       for (const local of localSongs) {
         if (serverMap.has(local.id)) {
-          // Revalidación exitosa con el servidor: actualizar lastValidatedAt
-          const meta = await this.storage.getMetadata(local.id);
-          if (meta && meta.status === 'AVAILABLE_OFFLINE') {
-            await this.storage.saveMetadata({
-              ...meta,
-              lastValidatedAt: new Date().toISOString(),
-            });
+          try {
+            // Comparar versión real del servidor
+            const serverSong = await this.apiClient.getSong(local.id);
+            const serverVersion = serverSong.version?.versionNumber ?? 1;
+
+            const meta = await this.storage.getMetadata(local.id);
+            if (meta) {
+              if (serverVersion > local.versionNumber) {
+                updatedCount++;
+                await this.storage.saveMetadata({
+                  ...meta,
+                  status: 'UPDATE_AVAILABLE',
+                  lastValidatedAt: nowIso,
+                });
+              } else if (meta.status === 'AVAILABLE_OFFLINE') {
+                await this.storage.saveMetadata({
+                  ...meta,
+                  lastValidatedAt: nowIso,
+                });
+              }
+            }
+          } catch (err: any) {
+            const isUnauthorized =
+              err?.statusCode === 401 ||
+              err?.statusCode === 403 ||
+              (typeof err?.message === 'string' && (err.message.includes('HTTP 401') || err.message.includes('HTTP 403')));
+
+            if (isUnauthorized) {
+              revokedCount++;
+              const meta = await this.storage.getMetadata(local.id);
+              if (meta) {
+                await this.storage.saveMetadata({
+                  ...meta,
+                  status: 'FAILED',
+                  errorMessage: 'Autorización revocada por el servidor.',
+                });
+              }
+            } else {
+              // Falla transitoria: preservar la copia local válida y no extender lastValidatedAt
+              console.warn(`⚠️ Error de red o transitorio al consultar versión de '${local.id}'. Preservando copia local.`);
+            }
           }
-        } else {
-          // El recurso ya no está en el catálogo del servidor (acceso revocado o eliminado)
-          revokedCount++;
-          const meta = await this.storage.getMetadata(local.id);
-          if (meta) {
-            await this.storage.saveMetadata({
-              ...meta,
-              status: 'FAILED',
-              errorMessage: 'Autorización revocada o recurso retirado del catálogo del servidor.',
-            });
+        } else if (catalogIsComplete) {
+          // Canción no encontrada en el catálogo completo: verificación dirigida para confirmar revocación real
+          try {
+            const serverSong = await this.apiClient.getSong(local.id);
+            // El recurso aún existe en el servidor: actualizar versión o vigencia
+            const serverVersion = serverSong.version?.versionNumber ?? 1;
+            const meta = await this.storage.getMetadata(local.id);
+            if (meta) {
+              if (serverVersion > local.versionNumber) {
+                updatedCount++;
+                await this.storage.saveMetadata({
+                  ...meta,
+                  status: 'UPDATE_AVAILABLE',
+                  lastValidatedAt: nowIso,
+                });
+              } else if (meta.status === 'AVAILABLE_OFFLINE') {
+                await this.storage.saveMetadata({
+                  ...meta,
+                  lastValidatedAt: nowIso,
+                });
+              }
+            }
+          } catch (err: any) {
+            const isRevokedOrRemoved =
+              err?.statusCode === 404 ||
+              err?.statusCode === 401 ||
+              err?.statusCode === 403 ||
+              (typeof err?.message === 'string' &&
+                (err.message.includes('HTTP 404') ||
+                  err.message.includes('HTTP 401') ||
+                  err.message.includes('HTTP 403') ||
+                  err.message.includes('no encontrada') ||
+                  err.message.includes('No se encontró')));
+
+            if (isRevokedOrRemoved) {
+              revokedCount++;
+              const meta = await this.storage.getMetadata(local.id);
+              if (meta) {
+                await this.storage.saveMetadata({
+                  ...meta,
+                  status: 'FAILED',
+                  errorMessage: 'Autorización revocada o recurso retirado del catálogo del servidor.',
+                });
+              }
+            } else {
+              // Inconcluso por fallo de red: preservar la copia local válida
+              console.warn(`⚠️ Verificación inconclusa para canción ausente '${local.id}'. Preservando copia local.`);
+            }
           }
         }
+        // Si !catalogIsComplete, NUNCA inferir revocación por ausencia.
       }
     } catch (err: any) {
       if (err?.statusCode === 401 || err?.statusCode === 403) {

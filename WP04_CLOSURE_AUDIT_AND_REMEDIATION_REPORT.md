@@ -32,23 +32,16 @@ The Project Owner authorized a focused closure audit and corrective remediation 
 - **Repository URL:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO`
 - **Active Branch:** `main`
 - **Baseline Implementation Commit (from specification):** `47a764b2142ed0f75bd3d1a1bf36d15c6cc82cb5`
-- **Starting HEAD Commit:** `4634c19b54df3c9fce62571095d0d442079c7adc`
-- **Ending HEAD Commit:** `4634c19b54df3c9fce62571095d0d442079c7adc` *(Strictly Unchanged)*
+- **Target Inspected HEAD Commit:** `6c31f5722c081062180b1c4ee6d40c8d5c6346cf`
+- **Current HEAD Commit:** `6c31f5722c081062180b1c4ee6d40c8d5c6346cf` *(Strictly Unchanged)*
 - **Working-Tree Status Before Task:** Clean
 - **Working-Tree Status After Task:** Modified files strictly bounded to WP-04 implementation corrections and documentation reconciliation:
   - `frontend/src/core/offline/storage/indexeddb-storage.ts`
   - `frontend/src/core/offline/offline-manager.ts`
-  - `frontend/src/components/workspace/MusicalWorkspace.tsx`
-  - `frontend/src/components/workspace/DatabaseSongsModal.tsx`
-  - `frontend/src/components/offline/OfflineInventoryModal.tsx`
-  - `frontend/src/components/offline/DownloadActionButton.tsx`
+  - `frontend/src/core/offline/__tests__/indexeddb-storage.test.ts`
   - `frontend/src/core/offline/__tests__/offline-manager.test.ts`
   - `frontend/src/core/offline/__tests__/session-isolation.test.ts`
-  - `docs/wp04/WP04_TEST_AND_ACCEPTANCE_REPORT.md` (and root mirror)
-  - `docs/wp04/WP04_IMPLEMENTATION_REPORT.md` (and root mirror)
-  - `docs/wp04/WP04_PREFLIGHT_TECHNICAL_REPORT.md` (and root mirror)
-  - `docs/wp04/WP04_SECURITY_AND_SESSION_ISOLATION_REPORT.md` (and root mirror)
-  - `docs/wp04/ADR_004_OFFLINE_STORAGE_AND_SESSION_ISOLATION.md` (and root mirror)
+  - `docs/wp04/WP04_TARGETED_REMEDIATION_REPORT.md` (and root mirror)
   - `docs/wp04/WP04_CLOSURE_AUDIT_AND_REMEDIATION_REPORT.md` (and root mirror)
 - **Governance Confirmation:**
   - **No `git commit`** was executed.
@@ -226,20 +219,21 @@ Based on unambiguous repository evidence, the audit selects **Outcome C**:
 - **Exit Status:** `0` (Success)
 - **Output Summary:**
   ```
-  ℹ tests 306
+  ℹ tests 312
   ℹ suites 49
-  ℹ pass 306
+  ℹ pass 312
   ℹ fail 0
   ℹ cancelled 0
   ℹ skipped 0
   ℹ todo 0
-  ℹ duration_ms 6218.5239
+  ℹ duration_ms 3814.2955
   ```
-- **New WP-04 Tests:** 25 passing tests across 4 dedicated test suites:
-  - `indexeddb-storage.test.ts`: 7 passed, 0 failed.
-  - `offline-manager.test.ts`: 9 passed, 0 failed.
-  - `session-isolation.test.ts`: 6 passed, 0 failed.
+- **WP-04 Dedicated Offline Tests:** 31 passing tests across 4 dedicated test suites (`node --test --experimental-strip-types "src/core/offline/__tests__/*.test.ts"`):
+  - `indexeddb-storage.test.ts`: 8 passed, 0 failed.
+  - `offline-manager.test.ts`: 13 passed, 0 failed.
+  - `session-isolation.test.ts`: 7 passed, 0 failed.
   - `setlist-packager.test.ts`: 3 passed, 0 failed.
+  - *Reference:* See `WP04_TARGETED_REMEDIATION_REPORT.md` for complete regression suite covering Findings A, B, and C.
 
 ### 8.2 Frontend TypeScript Typecheck
 - **Command:** `npm run typecheck` (in `frontend/`)

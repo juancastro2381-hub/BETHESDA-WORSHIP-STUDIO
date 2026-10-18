@@ -210,4 +210,157 @@ describe('WP-04 — Session Isolation & Logout Security Suite', () => {
       globalThis.localStorage = originalLocalStorage;
     }
   });
+
+  it('7. should isolate multi-user session logout & tombstone recovery with Alice, Bob, and unowned resources (Finding B)', async () => {
+    // 1. Create User Alice private resource + payload
+    await storage.saveSongPayload({
+      id: 'song_alice_iso',
+      metadata: {
+        id: 'song_alice_iso',
+        resourceType: 'SONG',
+        title: 'Alice Iso Song',
+        versionNumber: 1,
+        ownerUserId: 'user_alice',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: new Date().toISOString(),
+        lastValidatedAt: new Date().toISOString(),
+        byteSize: 1024,
+        checksumSha256: 'sha_alice_iso',
+      },
+      canonicalPayload: {
+        version: '1.0.0',
+        title: 'Alice Iso Song',
+        timeline: { tpqn: 480, totalDurationTicks: 0, measureCount: 0, tempoMap: { events: [] } } as any,
+        sections: [],
+        measures: [],
+        instrumentTracks: [],
+      },
+      defaultKey: 'G',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+    });
+
+    // 2. Create User Bob private resource + payload
+    await storage.saveSongPayload({
+      id: 'song_bob_iso',
+      metadata: {
+        id: 'song_bob_iso',
+        resourceType: 'SONG',
+        title: 'Bob Iso Song',
+        versionNumber: 1,
+        ownerUserId: 'user_bob',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: new Date().toISOString(),
+        lastValidatedAt: new Date().toISOString(),
+        byteSize: 2048,
+        checksumSha256: 'sha_bob_iso',
+      },
+      canonicalPayload: {
+        version: '1.0.0',
+        title: 'Bob Iso Song',
+        timeline: { tpqn: 480, totalDurationTicks: 0, measureCount: 0, tempoMap: { events: [] } } as any,
+        sections: [],
+        measures: [],
+        instrumentTracks: [],
+      },
+      defaultKey: 'A',
+      defaultBpm: 100,
+      timeSignature: '4/4',
+    });
+
+    // 3. Create unowned public resource + payload (ownerUserId === null)
+    await storage.saveSongPayload({
+      id: 'song_unowned_iso',
+      metadata: {
+        id: 'song_unowned_iso',
+        resourceType: 'SONG',
+        title: 'Unowned Public Song',
+        versionNumber: 1,
+        ownerUserId: null,
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: new Date().toISOString(),
+        lastValidatedAt: new Date().toISOString(),
+        byteSize: 1500,
+        checksumSha256: 'sha_unowned_iso',
+      },
+      canonicalPayload: {
+        version: '1.0.0',
+        title: 'Unowned Public Song',
+        timeline: { tpqn: 480, totalDurationTicks: 0, measureCount: 0, tempoMap: { events: [] } } as any,
+        sections: [],
+        measures: [],
+        instrumentTracks: [],
+      },
+      defaultKey: 'D',
+      defaultBpm: 90,
+      timeSignature: '4/4',
+    });
+
+    // Setup mock localStorage
+    const mockStorageMap = new Map<string, string>();
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k: string) => mockStorageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => mockStorageMap.set(k, v),
+      removeItem: (k: string) => mockStorageMap.delete(k),
+      clear: () => mockStorageMap.clear(),
+      key: () => null,
+      length: mockStorageMap.size,
+    } as any;
+
+    try {
+      // 4. Trigger Alice's logout
+      const purgeResult = await manager.purgeSessionData('user_alice');
+      assert.strictEqual(purgeResult.success, true);
+
+      // Verify Alice's records are purged
+      assert.strictEqual(await storage.getMetadata('song_alice_iso'), null, 'Alice metadata must be purged');
+      assert.strictEqual(await storage.getSongPayload('song_alice_iso'), null, 'Alice payload must be purged');
+
+      // Verify Bob's records remain intact
+      const bobMeta = await storage.getMetadata('song_bob_iso');
+      assert.ok(bobMeta !== null, 'Bob metadata must remain intact');
+      assert.strictEqual(bobMeta?.ownerUserId, 'user_bob');
+      const bobPayload = await storage.getSongPayload('song_bob_iso');
+      assert.ok(bobPayload !== null, 'Bob payload must remain intact');
+
+      // Verify null-owned records follow explicitly documented policy (must remain intact)
+      const unownedMeta = await storage.getMetadata('song_unowned_iso');
+      assert.ok(unownedMeta !== null, 'Unowned metadata must remain intact');
+      assert.strictEqual(unownedMeta?.ownerUserId, null);
+      const unownedPayload = await storage.getSongPayload('song_unowned_iso');
+      assert.ok(unownedPayload !== null, 'Unowned payload must remain intact');
+
+      // Verify no orphan payloads remain for deleted records
+      assert.strictEqual(await storage.getSongPayload('song_alice_iso'), null);
+
+      // 5. Simulate tombstone recovery scenario: plant Alice's tombstone
+      mockStorageMap.set(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY, 'user_alice');
+
+      // Re-trigger tombstone recovery
+      await storage.recoverPendingCleanupTombstone();
+
+      // Tombstone must be removed because Alice has 0 records left
+      assert.strictEqual(mockStorageMap.has(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY), false, 'Tombstone must be cleared after verified cleanup');
+
+      // Bob and unowned records must still remain intact after recovery!
+      assert.ok(await storage.getMetadata('song_bob_iso') !== null, 'Bob must remain intact after tombstone recovery');
+      assert.ok(await storage.getMetadata('song_unowned_iso') !== null, 'Unowned must remain intact after tombstone recovery');
+
+      // 6. Test cleanup failure: if storage throws, tombstone remains set
+      mockStorageMap.set(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY, 'user_alice');
+      const originalPurge = storage.purgeUserData.bind(storage);
+      storage.purgeUserData = async () => {
+        throw new Error('Storage lock error');
+      };
+      try {
+        await storage.recoverPendingCleanupTombstone();
+        assert.strictEqual(mockStorageMap.get(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY), 'user_alice', 'Tombstone must remain when cleanup fails');
+      } finally {
+        storage.purgeUserData = originalPurge;
+      }
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
+  });
 });

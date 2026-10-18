@@ -36,6 +36,8 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
     }).toJSON();
   };
 
+  const defaultCanonicalJson = createValidCanonicalJSON('Default Mock');
+
   beforeEach(async () => {
     storage = new BethesdaOfflineStorage();
     await storage.init();
@@ -237,23 +239,54 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
       (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
     );
 
-    // Test B: When online -> successfully revalidates with server and updates lastValidatedAt
+    // Test B: When online -> successfully revalidates with server and updates lastValidatedAt in persisted representation (Finding A)
     manager.isOnline = () => true;
     const revalidated = await manager.getAuthorizedSongPayload('song_expiry_1');
     assert.ok(revalidated !== null);
     assert.strictEqual(manager.isAuthorizationExpired(revalidated.metadata), false);
 
-    // Test C: When server returns 401/403 -> revokes and purges local copy
+    // Assert directly against persisted storage read-back (both stores)
+    const persistedPayload = await storage.getSongPayload('song_expiry_1');
+    assert.ok(persistedPayload !== null, 'Persisted payload must exist');
+    assert.notStrictEqual(persistedPayload.metadata.lastValidatedAt, expiredDate, 'Persisted payload lastValidatedAt must be updated');
+    assert.strictEqual(manager.isAuthorizationExpired(persistedPayload.metadata), false, 'Persisted payload must be within valid grace period');
+
+    const persistedMeta = await storage.getMetadata('song_expiry_1');
+    assert.ok(persistedMeta !== null, 'Persisted metadata must exist');
+    assert.notStrictEqual(persistedMeta.lastValidatedAt, expiredDate);
+    assert.strictEqual(manager.isAuthorizationExpired(persistedMeta), false);
+
+    // Test C: Subsequent offline read succeeds within the renewed seven-day grace period
+    manager.isOnline = () => false;
+    const offlineRenewedRead = await manager.getAuthorizedSongPayload('song_expiry_1');
+    assert.ok(offlineRenewedRead !== null, 'Subsequent offline read must succeed within renewed grace period');
+    assert.strictEqual(offlineRenewedRead.id, 'song_expiry_1');
+
+    // Test D: After the renewed grace period expires, offline read is rejected
+    const expiredRenewedDate = new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString();
+    await storage.saveSongPayload({
+      ...offlineRenewedRead,
+      metadata: {
+        ...offlineRenewedRead.metadata,
+        lastValidatedAt: expiredRenewedDate,
+      },
+    });
+
+    manager.isOnline = () => false;
+    await assert.rejects(
+      async () => {
+        await manager.getAuthorizedSongPayload('song_expiry_1');
+      },
+      (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
+    );
+
+    // Test E: When server returns 401/403 -> revokes and purges local copy from all stores
+    manager.isOnline = () => true;
     mockApiClient.getSong = async () => {
       const err: any = new Error('Forbidden');
       err.statusCode = 403;
       throw err;
     };
-    // Make it expired again
-    await storage.saveMetadata({
-      ...revalidated.metadata,
-      lastValidatedAt: expiredDate,
-    });
 
     await assert.rejects(
       async () => {
@@ -261,8 +294,50 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
       },
       (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
     );
-    const purgedCheck = await storage.getSongPayload('song_expiry_1');
-    assert.strictEqual(purgedCheck, null, 'Song must be purged after 403 response');
+    const purgedPayloadCheck = await storage.getSongPayload('song_expiry_1');
+    assert.strictEqual(purgedPayloadCheck, null, 'Song payload must be purged after 403 response');
+    const purgedMetaCheck = await storage.getMetadata('song_expiry_1');
+    assert.strictEqual(purgedMetaCheck, null, 'Song metadata must be purged after 403 response');
+
+    // Test F: Transient server failure does not refresh authorization timestamp or extend grace period
+    const transientDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    await storage.saveSongPayload({
+      id: 'song_transient_1',
+      metadata: {
+        id: 'song_transient_1',
+        resourceType: 'SONG',
+        title: 'Transient Song',
+        versionNumber: 1,
+        ownerUserId: 'user_test',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: transientDate,
+        lastValidatedAt: transientDate,
+        byteSize: 500,
+        checksumSha256: 'sha_transient',
+      },
+      canonicalPayload: validJson,
+      defaultKey: 'D',
+      defaultBpm: 100,
+      timeSignature: '4/4',
+    });
+
+    mockApiClient.getSong = async () => {
+      const err: any = new Error('Internal Server Error');
+      err.statusCode = 500;
+      throw err;
+    };
+
+    manager.isOnline = () => true;
+    await assert.rejects(
+      async () => {
+        await manager.getAuthorizedSongPayload('song_transient_1');
+      },
+      (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
+    );
+
+    const untouchedTransient = await storage.getSongPayload('song_transient_1');
+    assert.ok(untouchedTransient !== null, 'Local copy must remain saved for future re-auth');
+    assert.strictEqual(untouchedTransient.metadata.lastValidatedAt, transientDate, 'Transient error must NOT extend authorization timestamp');
   });
 
   it('6. should enforce 50MB single-track audio size quota (Decision U-03)', async () => {
@@ -382,5 +457,184 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
 
     const check = await storage.getMetadata('local_song_delete');
     assert.strictEqual(check, null, 'Local resource should be deleted');
+  });
+
+  it('10. should not falsely revoke local songs beyond first 100 server results (Finding C)', async () => {
+    // Generate 150 items across 2 pages
+    const page1Items = Array.from({ length: 100 }, (_, i) => ({
+      id: `song_catalog_${i}`,
+      title: `Song Catalog ${i}`,
+      artist: 'Artist',
+      ccliNumber: null,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+      status: 'APPROVED',
+      currentVersionId: `v_${i}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    const page2Items = Array.from({ length: 50 }, (_, i) => ({
+      id: `song_catalog_${100 + i}`,
+      title: `Song Catalog ${100 + i}`,
+      artist: 'Artist',
+      ccliNumber: null,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+      status: 'APPROVED',
+      currentVersionId: `v_${100 + i}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    // Local song is at index 120 (on page 2)
+    const localSongId = 'song_catalog_120';
+    await storage.saveMetadata({
+      id: localSongId,
+      resourceType: 'SONG',
+      title: 'Song Catalog 120',
+      versionNumber: 1,
+      ownerUserId: 'user_test',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      byteSize: 1024,
+      checksumSha256: 'hash_120',
+    });
+
+    const mockPaginatedApiClient: any = {
+      listSongs: async (params?: { limit?: number; offset?: number }) => {
+        const offset = params?.offset ?? 0;
+        if (offset === 0) {
+          return { items: page1Items, total: 150 };
+        }
+        return { items: page2Items, total: 150 };
+      },
+      getSong: async (id: string) => ({
+        song: { id, title: `Song ${id}` },
+        version: { versionNumber: 1, canonicalPayload: defaultCanonicalJson },
+      }),
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockPaginatedApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 0, 'Song on page 2 must NOT be marked revoked');
+
+    const meta = await storage.getMetadata(localSongId);
+    assert.ok(meta !== null);
+    assert.strictEqual(meta?.status, 'AVAILABLE_OFFLINE');
+  });
+
+  it('11. should detect actual newer server versions and mark status UPDATE_AVAILABLE (Finding C)', async () => {
+    const songId = 'song_version_test';
+    await storage.saveMetadata({
+      id: songId,
+      resourceType: 'SONG',
+      title: 'Version Test Song',
+      versionNumber: 1, // local is version 1
+      ownerUserId: 'user_test',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      byteSize: 1024,
+      checksumSha256: 'hash_ver',
+    });
+
+    const mockVersionApiClient: any = {
+      listSongs: async () => ({
+        items: [{ id: songId, title: 'Version Test Song' }],
+        total: 1,
+      }),
+      getSong: async (id: string) => ({
+        song: { id, title: 'Version Test Song' },
+        version: { versionNumber: 2, canonicalPayload: defaultCanonicalJson }, // server is version 2!
+      }),
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockVersionApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.updatedCount, 1, 'Should detect 1 updated song');
+    assert.strictEqual(result.revokedCount, 0);
+
+    const meta = await storage.getMetadata(songId);
+    assert.strictEqual(meta?.status, 'UPDATE_AVAILABLE');
+  });
+
+  it('12. should mark status FAILED and increment revokedCount when server confirms genuine removal (404/401/403) (Finding C)', async () => {
+    const removedSongId = 'song_genuinely_removed';
+    await storage.saveMetadata({
+      id: removedSongId,
+      resourceType: 'SONG',
+      title: 'Removed Song',
+      versionNumber: 1,
+      ownerUserId: 'user_test',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      byteSize: 1024,
+      checksumSha256: 'hash_rem',
+    });
+
+    const mockRemovedApiClient: any = {
+      listSongs: async () => ({
+        items: [], // Catalog is empty
+        total: 0,
+      }),
+      getSong: async (id: string) => {
+        const err: any = new Error(`Error al obtener canción '${id}': HTTP 404`);
+        err.statusCode = 404;
+        throw err;
+      },
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockRemovedApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 1, 'Removed song must be counted as revoked');
+
+    const meta = await storage.getMetadata(removedSongId);
+    assert.strictEqual(meta?.status, 'FAILED');
+    assert.ok(meta?.errorMessage?.includes('Autorización revocada o recurso retirado'));
+  });
+
+  it('13. should not revoke local resources or extend authorization when catalog response fails or is incomplete (Finding C)', async () => {
+    const songId = 'song_net_err';
+    const originalDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    await storage.saveMetadata({
+      id: songId,
+      resourceType: 'SONG',
+      title: 'Preserved Song',
+      versionNumber: 1,
+      ownerUserId: 'user_test',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: originalDate,
+      lastValidatedAt: originalDate,
+      byteSize: 1024,
+      checksumSha256: 'hash_net',
+    });
+
+    const mockFailingApiClient: any = {
+      listSongs: async () => {
+        throw new Error('Network failure or incomplete catalog');
+      },
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockFailingApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 0, 'No songs should be marked revoked on catalog network error');
+    assert.strictEqual(result.updatedCount, 0);
+
+    const meta = await storage.getMetadata(songId);
+    assert.strictEqual(meta?.status, 'AVAILABLE_OFFLINE', 'Status must remain AVAILABLE_OFFLINE');
+    assert.strictEqual(meta?.lastValidatedAt, originalDate, 'Authorization timestamp must NOT be modified');
   });
 });

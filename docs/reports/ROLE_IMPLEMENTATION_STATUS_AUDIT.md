@@ -2,8 +2,8 @@
 
 **Fecha de la Auditoría:** 18 de octubre de 2026  
 **Rama:** `main`  
-**Commit base verificado:** `e89f5a9`  
-**Estado:** AUDITORÍA TÉCNICA INDEPENDIENTE — SOLO LECTURA  
+**Revisiones Reconciliadas:** `e89f5a9` (sprint R1-A), `dae46fa` (HEAD remoto con docs y fixtures WAV), complementado con la remediación de seguridad post-auditoría en árbol de trabajo  
+**Estado:** AUDITORÍA TÉCNICA INDEPENDIENTE Y REMEDIACIÓN DE SEGURIDAD  
 **Documento Relacionado:** [BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md](../user-guide/BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md)
 
 ---
@@ -19,8 +19,8 @@ Esta auditoría técnica evalúa de manera exhaustiva el subsistema de autentica
    - **En el Frontend:** **NO existe interfaz gráfica (UI)** para administrar, listar ni invitar usuarios. No hay vistas ni formularios de gestión de usuarios en la aplicación web.
    - **En el Backend (API REST):** El flujo completo de aprovisionamiento por invitación está **100% implementado y probado** (`POST /api/v1/users/invite` y `POST /api/v1/auth/accept-invite`). Un administrador puede emitir invitaciones vía API y el destinatario puede activar su cuenta estableciendo su propia contraseña.
 4. **Inicio de Sesión:** Todos los 5 roles pueden iniciar sesión exitosamente en la interfaz web a través del componente [LoginModal.tsx](../../frontend/src/components/auth/LoginModal.tsx) siempre que su cuenta se encuentre en estado `ACTIVE` o `MUST_CHANGE_PASSWORD`.
-5. **Cumplimiento y Enforzamiento RBAC:** En las rutas protegidas (`/api/v1/users`, `/api/v1/setlists`, `/api/v1/audio`, `/api/v1/multitrack`), el servidor aplica validaciones estrictas y consultas en tiempo real a PostgreSQL (`verifyDatabaseRole = true`), bloqueando de inmediato tokens JWT obsoletos o cuentas degradadas/suspendidas.
-6. **Hallazgo de Seguridad Crítico (Catálogo de Canciones):** Los endpoints de catálogo en [song.routes.ts](../../backend/src/interfaces/http/routes/song.routes.ts) (`GET /api/v1/songs`, `POST /api/v1/songs`, `POST /api/v1/songs/import`, etc.) no tienen conectado el middleware `authGuard.requirePermission()`, lo que permite la creación/importación de canciones sin autenticación a nivel de transporte HTTP directo, aun cuando los permisos `songs:create` y `songs:update_draft` están modelados formalmente en el RBAC.
+5. **Cumplimiento y Enforzamiento RBAC:** En todas las rutas protegidas (`/api/v1/users`, `/api/v1/setlists`, `/api/v1/audio`, `/api/v1/multitrack` y `/api/v1/songs`), el servidor aplica validaciones estrictas y consultas en tiempo real a PostgreSQL (`verifyDatabaseRole = true`), bloqueando de inmediato tokens JWT obsoletos o cuentas degradadas/suspendidas.
+6. **Remediación Exitosa del Catálogo de Canciones y Sesiones Multipista:** Los endpoints de catálogo en [song.routes.ts](../../backend/src/interfaces/http/routes/song.routes.ts) han sido blindados con el middleware `authGuard.requirePermission()`, exigiendo `songs:read` para lectura, `songs:create` con verificación obligatoria en base de datos para creación e importación, y `songs:update_draft` para versiones. Adicionalmente, las rutas multipista en [multitrack.routes.ts](../../backend/src/interfaces/http/routes/multitrack.routes.ts) implementan autorización a nivel de recurso (privacidad inter-músicos, sesiones compartidas ministeriales, inmutabilidad y anulación administrativa).
 
 ---
 
@@ -164,18 +164,20 @@ El middleware [AuthGuard](../../backend/src/interfaces/http/middlewares/auth-mid
   - En `addItem`: valida que la canción canónica `songId` exista previamente en `songRepository.findById(dto.songId)`. Si no existe, lanza `NotFoundError('Canción', dto.songId)`.
 - **Resultado:** **VERIFICADO Y SEGURO.** No es posible manipular ítems cruzados entre repertorios diferentes mediante inyección de IDs.
 
-### 6.2 Validación de Contaminación Cruzada en Sesiones Multipista
-- **Escenario Investigado:** ¿Puede una sesión multipista asociar pistas de audio (*stems*) que pertenezcan a canciones diferentes?
+### 6.2 Validación de Contaminación Cruzada y Autorización a Nivel de Recurso en Sesiones Multipista
+- **Escenario Investigado 1 (Contaminación Cruzada):** ¿Puede una sesión multipista asociar pistas de audio (*stems*) que pertenezcan a canciones diferentes?
 - **Evidencia en Código:** En [multitrack-service.ts](../../backend/src/application/multitrack-service.ts#L95-L100):
-  - Al crear una sesión (`createSession`) o agregar pistas, el servicio itera sobre cada `audioAssetId`, lo recupera del repositorio de audio y ejecuta la comprobación estricta:
-    ```typescript
-    if (asset.songId !== dto.songId) {
-      throw new ValidationError(
-        `El recurso de audio '${t.name}' (${t.audioAssetId}) no pertenece a la canción de la sesión (${dto.songId}).`
-      );
-    }
-    ```
-- **Resultado:** **VERIFICADO Y SEGURO.** Queda bloqueada la contaminación cruzada o manipulación arbitraria de pistas entre canciones.
+  - Al crear una sesión (`createSession`) o agregar pistas, el servicio itera sobre cada `audioAssetId`, lo recupera del repositorio de audio y ejecuta la comprobación estricta de pertenencia al mismo `songId`.
+- **Resultado:** **VERIFICADO Y SEGURO.** Queda bloqueada la contaminación cruzada de pistas entre canciones.
+- **Escenario Investigado 2 (Aislamiento y Autorización a Nivel de Recurso):** ¿Puede un usuario acceder, modificar o eliminar sesiones multipista pertenecientes a otro usuario?
+- **Evidencia en Código:** En [multitrack.routes.ts](../../backend/src/interfaces/http/routes/multitrack.routes.ts):
+  - Función `assertSessionResourceAccess(session, user, isMutation)`:
+    1. *Override Administrativo:* Roles `SUPER_ADMIN` y `ADMIN` tienen autorización total de lectura, actualización y eliminación sobre cualquier sesión.
+    2. *Propiedad:* El usuario creador (`createdByUserId === user.sub`) tiene autorización completa sobre sus sesiones.
+    3. *Inmutabilidad por Terceros:* Ningún usuario no administrador puede alterar (`PATCH`) o eliminar (`DELETE`) una sesión creada por otro usuario (HTTP 403 Forbidden).
+    4. *Aislamiento Privado vs Sesiones Compartidas:* Las sesiones creadas por un músico (`MUSICIAN`) son estrictamente privadas; cualquier intento de lectura o consulta offline por otro usuario es rechazado con HTTP 403 Forbidden. Las sesiones creadas por `WORSHIP_LEADER`, `ADMIN` o con la marca `[SHARED]` en el título se consideran arreglos ministeriales compartidos y permiten lectura y descarga offline a usuarios con `songs:read`.
+    5. *Filtrado en Catálogo:* `GET /by-song/:songId` filtra de forma automática las sesiones privadas de otros músicos.
+- **Resultado:** **VERIFICADO Y SEGURO (Pruebas D1.11 a D1.16 en `multitracks-omr.test.ts`).**
 
 ### 6.3 Protección en Canales de Tiempo Real (SSE Ticket Burning)
 - **Escenario Investigado:** ¿Cómo se autentican las conexiones de eventos en tiempo real (Server-Sent Events) sin exponer tokens en la URL?
@@ -185,26 +187,38 @@ El middleware [AuthGuard](../../backend/src/interfaces/http/middlewares/auth-mid
   - Al abrir la conexión SSE (`GET /api/v1/realtime/events?ticket=...`), el servidor quema inmediatamente el ticket (*single-use invariant*). Cualquier intento de reutilizar el mismo ticket es rechazado con HTTP 401.
 - **Resultado:** **VERIFICADO Y SEGURO.**
 
-### 6.4 Hallazgo de Seguridad: Ausencia de Guardas RBAC en Rutas de Canciones
-- **Severidad:** Moderada / Alta (en entornos abiertos a red pública).
+### 6.4 Remediación Exitosa: Enforzamiento de Guardas RBAC en Rutas de Canciones
+- **Estado:** REMEDIADO Y VERIFICADO CON PRUEBAS DE INTEGRACIÓN.
 - **Ubicación:** [backend/src/interfaces/http/routes/song.routes.ts](../../backend/src/interfaces/http/routes/song.routes.ts).
-- **Descripción:** Las rutas correspondientes a la gestión del catálogo de canciones (`POST /api/v1/songs`, `POST /api/v1/songs/import`, `POST /api/v1/songs/:songId/versions`) no tienen especificado el hook `preHandler: authGuard.requirePermission('songs:create')` ni `authGuard.requireAuth`.
-- **Impacto:** Cualquier petición HTTP que alcance el backend puede invocar la importación o creación de canciones canónicas sin presentar un token de autorización.
-- **Causa Raíz:** `song.routes.ts` fue desarrollado durante la Fase 2A (catálogo canónico), previo a la introducción del subsistema RBAC en la Fase 2B. Mientras que `setlist.routes.ts`, `user.routes.ts`, `audio.routes.ts` y `multitrack.routes.ts` incorporaron las guardas, `song.routes.ts` no fue actualizado con el middleware de protección.
-- **Recomendación para Futuras Fases:** Aplicar `authGuard.requirePermission('songs:create', true)` en `POST /api/v1/songs` e importaciones, y `authGuard.requirePermission('songs:update_draft', true)` en la creación de versiones.
+- **Protección Implementada:**
+  - `GET /api/v1/songs` -> `authGuard.requirePermission('songs:read', false)`
+  - `POST /api/v1/songs` -> `authGuard.requirePermission('songs:create', true)` (verificación en tiempo real en PostgreSQL)
+  - `POST /api/v1/songs/import` -> `authGuard.requirePermission('songs:create', true)` (verificación en tiempo real en PostgreSQL)
+  - `GET /api/v1/songs/:songId` -> `authGuard.requirePermission('songs:read', false)`
+  - `POST /api/v1/songs/:songId/versions` -> `authGuard.requirePermission('songs:update_draft', true)` (verificación en tiempo real en PostgreSQL)
+  - `GET /api/v1/songs/:songId/versions` -> `authGuard.requirePermission('songs:read', false)`
+  - `GET /api/v1/songs/:songId/versions/:versionId` -> `authGuard.requirePermission('songs:read', false)`
+- **Validación Automatizada:** 9 pruebas de integración en [api-routes.test.ts](../../backend/src/__tests__/api-routes.test.ts) demuestran que:
+  - Peticiones anónimas son rechazadas con HTTP 401 Unauthorized.
+  - Tokens malformados o alterados son rechazados con HTTP 401 Unauthorized.
+  - Usuarios con roles insuficientes (`VIEWER`, `MUSICIAN` en creación) son rechazados con HTTP 403 Forbidden.
+  - Usuarios autorizados (`WORSHIP_LEADER`, `ADMIN`, `SUPER_ADMIN`) ejecutan exitosamente sus operaciones autorizadas.
+  - Cuentas suspendidas o degradadas en PostgreSQL son bloqueadas en tiempo real.
 
 ---
 
 ## 7. Cobertura de Pruebas Automatizadas y Limitaciones
 
 ### 7.1 Pruebas Automatizadas Ejecutadas
-El sistema cuenta con suites de prueba automatizadas que validan de punta a punta la lógica criptográfica y de autorización:
+El sistema cuenta con suites de prueba automatizadas que validan de punta a punta la lógica criptográfica y de autorización (281 pruebas backend y 349 frontend, 100% PASS):
 
 | Suite de Prueba | Archivo | Casos Verificados | Resultado |
 | :--- | :--- | :--- | :---: |
+| **RBAC en Rutas de Canciones** | [api-routes.test.ts](../../backend/src/__tests__/api-routes.test.ts) | 9 pruebas: rechazo anónimo (401), token malformado (401), roles insuficientes (403), operaciones autorizadas de creación/versiones, validación de esquemas Zod (400/404/422). | **PASS** |
+| **Aislamiento y Recursos Multipista** | [multitracks-omr.test.ts](../../backend/src/__tests__/multitracks-omr.test.ts) | 27 pruebas: aislamiento inter-canciones (IDOR), aislamiento inter-usuarios (privacidad 403, mutación no propietaria 403, sesiones compartidas 200, anulación admin). | **PASS** |
 | **RBAC y Guardas en BD** | [rbac-permission-guards.test.ts](../../backend/src/__tests__/rbac-permission-guards.test.ts) | 6 pruebas: permisos explícitos sin herencia, rechazo de VIEWER en invitaciones, rechazo de MUSICIAN en cambio de rol, token Bearer requerido, verificación de usuario SUSPENDED en tiempo real, verificación de rol degradado en tiempo real. | **PASS** |
-| **Ciclo de Vida de Invitaciones** | [user-invitation-lifecycle.test.ts](../../backend/src/__tests__/user-invitation-lifecycle.test.ts) | 4 pruebas: emisión de token de 256 bits, aceptación de invitación y activación de cuenta, rechazo de token consumido (single-use), verificación de auditoría. | **PASS** |
-| **Seguridad JWT HS256** | [jwt-hs256-security.test.ts](../../backend/src/__tests__/jwt-hs256-security.test.ts) | Firma y verificación de claims, rechazo de firma alterada, expiración de tokens, sanitización de payloads. | **PASS** |
+| **Ciclo de Vida de Invitaciones** | [user-invitation-lifecycle.test.ts](../../backend/src/__tests__/user-invitation-lifecycle.test.ts) | 5 pruebas: emisión de token de 256 bits, aceptación de invitación y activación de cuenta, rechazo de token consumido (single-use), verificación de auditoría. | **PASS** |
+| **Seguridad JWT HS256** | [jwt-hs256-security.test.ts](../../backend/src/__tests__/jwt-hs256-security.test.ts) | Firma y verificación de claims, rechazo de firma alterada, expiración de tokens, categoric alg=none rejection. | **PASS** |
 | **Hashing Argon2id** | [argon2-hasher.test.ts](../../backend/src/__tests__/argon2-hasher.test.ts) | Parámetros de memoria, costo temporal, paralelismo, verificación de claves y resistencia a colisiones. | **PASS** |
 | **Control de Sesiones y Rotación** | [token-family-replay.test.ts](../../backend/src/__tests__/token-family-replay.test.ts) | Rotación de cookies HttpOnly, detección de ataques de replay y revocación de familia. | **PASS** |
 | **Rate Limiting Bidimensional** | [rate-limiting-dual-dimension.test.ts](../../backend/src/__tests__/rate-limiting-dual-dimension.test.ts) | Bloqueo por IP y por cuenta ante ataques de fuerza bruta. | **PASS** |
@@ -271,8 +285,9 @@ curl -X POST http://localhost:3000/api/v1/auth/accept-invite \
 2. **¿Cuáles roles están genuinamente implementados?**
    - Los 5 roles (`SUPER_ADMIN`, `ADMIN`, `WORSHIP_LEADER`, `MUSICIAN`, `VIEWER`) están genuinamente implementados en el dominio, en la base de datos PostgreSQL, en las guardas del backend y en el estado de sesión del frontend. En la interfaz web, las restricciones visuales se aplican principalmente en la gestión de repertorios litúrgicos (`SetlistsModal.tsx` y `SetlistDetailEditor.tsx`).
 3. **¿Cuáles permisos se hacen cumplir en el servidor?**
-   - Se hacen cumplir rigurosamente en el servidor los 18 permisos de `ROLE_PERMISSIONS` en las rutas de usuarios (`/api/v1/users`), repertorios (`/api/v1/setlists`), audio (`/api/v1/audio`) y multipistas (`/api/v1/multitrack`). Además, las operaciones de mutación validan el estado de la cuenta y el rol directo en la base de datos en tiempo real (`verifyDatabaseRole = true`).
-4. **¿Qué limitaciones o aspectos pendientes se identificaron?**
-   - Falta de interfaz gráfica (UI) para administración de usuarios, asignación de roles e invitaciones.
-   - Las rutas de canciones en `song.routes.ts` no tienen conectadas las guardas RBAC, permitiendo importación sin autenticación a nivel de transporte HTTP.
-   - No existe flujo de registro público autoservicio (diseñado intencionalmente por invitación ministerial).
+   - Se hacen cumplir rigurosamente en el servidor los 18 permisos de `ROLE_PERMISSIONS` en las rutas de usuarios (`/api/v1/users`), repertorios (`/api/v1/setlists`), audio (`/api/v1/audio`), multipistas (`/api/v1/multitrack`) y catálogo de canciones (`/api/v1/songs`). Además, las operaciones de mutación validan el estado de la cuenta y el rol directo en la base de datos en tiempo real (`verifyDatabaseRole = true`).
+4. **¿Qué limitaciones o aspectos pendientes se identificaron y remediaron?**
+   - **Remediado:** Las rutas de catálogo en `song.routes.ts` han sido dotadas de guardas RBAC explícitas (`songs:read`, `songs:create` y `songs:update_draft`), respaldadas por 9 pruebas de integración.
+   - **Remediado:** Las rutas de sesiones multipista en `multitrack.routes.ts` ahora aplican aislamiento a nivel de recurso entre usuarios, distinguiendo sesiones privadas y compartidas del ministerio, y bloqueando mutaciones no autorizadas, respaldadas por pruebas D1.11 a D1.16.
+   - **Pendiente / Limitación Estructural:** Ausencia de interfaz gráfica (UI) para administración de usuarios, asignación de roles e invitaciones.
+   - **Diseño por Principio:** No existe flujo de registro público autoservicio (diseñado intencionalmente por invitación ministerial).

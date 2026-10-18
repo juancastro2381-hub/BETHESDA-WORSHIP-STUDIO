@@ -1,7 +1,7 @@
 # MANUAL DE USUARIO Y GUÍA DE OPERACIÓN DEL ATRIL LITÚRGICO
 ## BETHESDA WORSHIP STUDIO
 **Iglesia Cristiana Bethesda — Madrid, Cundinamarca, Colombia**  
-*Versión del Sistema: 0.1.0 (Auditoría Posterior a Remediación R1-A)*  
+*Versión del Sistema: 0.1.0 (Auditoría y Remediación de Seguridad Post-Documentación)*  
 *Fecha de Emisión: 18 de octubre de 2026*  
 *Audiencia: Equipo Pastoral, Líderes de Alabanza, Músicos, Directores de Coro y Operadores Técnicos*
 
@@ -67,7 +67,7 @@ Bethesda Worship Studio es una estación de trabajo musical litúrgica web dise�
 - **Problemas comunes:**
   - *Mensaje "Credenciales inválidas":* Verifique que no tenga activadas las mayúsculas involuntariamente o que el correo no tenga espacios en blanco al inicio o final.
   - *Mensaje de bloqueo temporal:* Si introduce 5 contraseñas erróneas consecutivas, el sistema bloqueará temporalmente la cuenta por 15 minutos para prevenir ataques automatizados.
-- **Limitaciones actuales:** No existe formulario de registro público autónomo (*Sign Up*). Todas las cuentas deben ser invitadas previamente por un administrador.
+- **Limitaciones actuales de gestión de usuarios:** No existe formulario de registro público autónomo (*Sign Up*). Todas las cuentas deben ser invitadas previamente por un administrador. **Actualmente NO existe interfaz gráfica (pantallas, botones o formularios)** en la aplicación web para invitar usuarios, asignar o revocar roles, ni consultar la lista general de usuarios. El aprovisionamiento de cuentas y cambio de roles debe ser realizado por un administrador a través de la API REST (`POST /api/v1/users/invite`, `PATCH /api/v1/users/:id/role`) o directamente en la base de datos PostgreSQL.
 
 ### 3.2 Primer Inicio de Sesión: Cambio Obligatorio de Clave
 **Estado:** IMPLEMENTADO Y VERIFICADO EN CÓDIGO  
@@ -423,6 +423,10 @@ Cuando un setlist está cargado en el atril:
    - La barra litúrgica detectará este desvío y mostrará una alerta ámbar: *"Viendo canción fuera de repertorio: [Título]"*.
    - Para regresar exactamente al punto donde iba el culto, basta hacer clic en el botón azul **↩ Volver al Culto**.
 
+> [!IMPORTANT]
+> **Condición de Inicialización para Operación sin Conexión (*Offline*):**
+> Al descargar un repertorio desde el modal correspondiente, el sistema descarga y almacena las partituras y pistas de audio de cada una de sus canciones en IndexedDB para disponibilidad local. Sin embargo, la inicialización y carga de la barra de navegación litúrgica (`useSetlistExecution`) consulta el endpoint del servidor (`GET /api/v1/setlists/:id`) para validar el orden secuencial. Por lo tanto, el culto debe cargarse en el atril mientras el dispositivo aún disponga de conexión. Si la conexión se interrumpe después de haber cargado el setlist, la navegación entre canciones e ítems continúa operando de forma fluida; asimismo, cada canción descargada puede abrirse de manera autónoma e individual directamente desde el **📦 Inventario Offline** en cualquier momento sin internet.
+
 ---
 
 ## 10. IMPORTACIÓN DE FUENTES (MUSICXML Y CHORDPRO)
@@ -467,10 +471,13 @@ Cuando un setlist está cargado en el atril:
 ### 11.2 Descarga de Material para Uso sin Conexión (*Offline*)
 1. En cualquier listado (en el catálogo de canciones o en el modal de repertorios), observará el botón de descarga con ícono de nube: **Descargar Offline**.
 2. Al hacer clic:
-   - El sistema descarga la estructura de la canción o el paquete completo del repertorio con todas sus obras asociadas.
+   - El sistema descarga la estructura de la canción o el paquete completo del repertorio con todas sus obras asociadas, guardándolos en IndexedDB.
    - Si la canción tiene audio de referencia, descarga el archivo binario.
    - **Verificación Criptográfica Estricta (R1-A):** El cliente compara los bytes recibidos contra el resumen criptográfico SHA-256 enviado por el servidor (`X-Checksum-Sha256`). Si los bytes no coinciden exactamente, la descarga se descarta para evitar archivos corruptos en el atril.
 3. El botón cambiará su estado a: **✓ Guardado Offline**.
+4. **Alcance y Calificación Operativa Offline:**
+   - **Canciones Individuales:** Pueden ser abiertas, leídas, transportadas y reproducidas sin conexión en cualquier momento abriendo el **Inventario Offline**.
+   - **Repertorios Litúrgicos:** La descarga de un repertorio asegura que todas sus canciones queden en la memoria local. No obstante, para que la barra de avance secuencial del atril (`SetlistNavigationToolbar`) ordene el culto, el setlist debe haberse cargado en el atril previamente con conexión; si el navegador se reinicia totalmente desconectado, las canciones deben abrirse individualmente desde el inventario local.
 
 ### 11.3 Gestión del Inventario Offline
 1. En la barra de conectividad superior, haga clic en el botón **📦 Inventario Offline (N)** (`#btn-open-offline-inventory`).
@@ -485,13 +492,17 @@ Cuando un setlist está cargado en el atril:
 ## 12. SESIONES MULTIPISTA (MULTITRACK) Y PISTAS INDIVIDUALES
 
 **Estado:** PARCIALMENTE IMPLEMENTADO / REQUIERE VALIDACIÓN MANUAL  
-**Backend:** IMPLEMENTADO Y VERIFICADO EN CÓDIGO (`backend/src/interfaces/http/routes/multitrack.routes.ts`, `multitrack-service.ts`)  
+**Backend:** IMPLEMENTADO Y VERIFICADO EN CÓDIGO CON AUTORIZACIÓN A NIVEL DE RECURSO (`backend/src/interfaces/http/routes/multitrack.routes.ts`, `multitrack-service.ts`)  
 **Frontend UI:** NO IMPLEMENTADO EN INTERFAZ GRÁFICA
 
 ### 12.1 Qué Existe Actualmente en el Sistema
 - **Base de Datos y API del Servidor:**
   El servidor dispone de tablas relacionales dedicadas (`multitrack_sessions` y `multitrack_tracks`) y rutas REST completas (`/api/v1/multitrack/sessions`) para crear sesiones multipista, asociar pistas de audio individuales (*stems*: batería, bajo, guitarras, teclados, metales, coros, voz guía), ajustar volumen individual, paneo estéreo, silenciamiento (*mute*) y solo (*solo*).
-- **Protección de Seguridad R1-A:** Se encuentra verificado que no es posible asociar pistas de audio de una canción a la sesión de otra diferente (*Anti-IDOR / Cross-Song Isolation*).
+- **Protección de Seguridad y Autorización a Nivel de Recurso:**
+  1. *Aislamiento Inter-Canciones (R1-A):* Se encuentra verificado que no es posible asociar pistas de audio de una canción a la sesión de otra diferente (*Anti-IDOR / Cross-Song Stem Isolation*).
+  2. *Aislamiento Inter-Usuarios:* Las sesiones creadas por un músico (`MUSICIAN`) son privadas para su ensayo individual y quedan totalmente ocultas e inaccesibles (HTTP 403) para otros músicos.
+  3. *Sesiones Compartidas Ministeriales:* Las sesiones creadas por roles de liderazgo pastoral (`WORSHIP_LEADER`, `ADMIN`, `SUPER_ADMIN`), o marcadas como `[SHARED]` en el título, son accesibles para lectura y consulta de estado offline por todo el equipo ministerial con permiso `songs:read`.
+  4. *Inmutabilidad y Protección frente a Modificaciones de Terceros:* Modificar la mezcla (`PATCH`) o eliminar (`DELETE`) una sesión ajena está categóricamente denegado (HTTP 403). Solo el usuario propietario o un administrador (`ADMIN` / `SUPER_ADMIN` con override administrativo) pueden alterar o suprimir sesiones.
 - **Motor Lógico en Cliente:** Existe la clase `MultitrackEngine` que implementa la matemática de mezcla y verificación de completitud offline.
 
 ### 12.2 Limitación Operativa para el Usuario Ordinario
@@ -522,6 +533,10 @@ Es fundamental que el equipo de alabanza conozca la verdad técnica sobre la dig
 ---
 
 ## 14. ROLES DE USUARIO Y PERMISOS DE ACCESO
+
+> [!WARNING]
+> **Ausencia de Interfaz Gráfica para Gestión de Usuarios:**
+> Actualmente la aplicación web **no cuenta con pantallas, botones ni formularios para registrar, invitar ni listar usuarios**. Cualquier invitación de nuevos integrantes o actualización de roles ministeriales debe gestionarse vía API REST (`POST /api/v1/users/invite`, `PATCH /api/v1/users/:id/role`) con credenciales de Administrador o directamente en la base de datos PostgreSQL.
 
 Bethesda Worship Studio implementa un control de acceso basado en roles (RBAC) estricto. La siguiente tabla resume lo que cada integrante de la congregación puede y no puede hacer:
 
@@ -637,7 +652,7 @@ Imprima o mantenga a mano esta lista para validar el funcionamiento del atril en
 | **Autenticación JWT y RBAC** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `LoginModal.tsx`, `auth.routes.ts` | 5 roles definidos, Argon2id, cookies HttpOnly, rate limiting dual. |
 | **Gestión de Usuarios en UI** | **NO IMPLEMENTADO O NO VERIFICADO** | N/A (Solo backend `/api/v1/users/invite`) | Invitaciones y altas de nuevos roles deben realizarse por API o base de datos. |
 | **Catálogo Canónico Local** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `presets.ts`, `SongSelector.tsx` | Presets dorados para guitarra, piano, saxo alto y voz. |
-| **Catálogo en PostgreSQL** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `DatabaseSongsModal.tsx`, `song.routes.ts` | Listado, búsqueda, carga y persistencia en base de datos central. |
+| **Catálogo en PostgreSQL** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `DatabaseSongsModal.tsx`, `song.routes.ts` | Listado y lectura protegidos por `songs:read`; creación e importación por `songs:create` con verificación de cuenta activa en BD; versiones por `songs:update_draft`. |
 | **Atril: Instrumentos (12 perfiles)** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `instrument-profile.ts`, `InstrumentSelector.tsx` | Guitarras, bajo, pianos, vientos, percusión, voces y general. |
 | **Atril: Transporte y Cejilla** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `CapoControl.tsx`, `TranspositionControl.tsx` | Cejilla 0-12 trastes, transposición ±11 semitonos con enarmonía. |
 | **Atril: Cifrados (4 sistemas)** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `ChordNotationControl.tsx` | Americano, Latino/Solfeo, Grados Romanos, Nashville. |
@@ -649,7 +664,7 @@ Imprima o mantenga a mano esta lista para validar el funcionamiento del atril en
 | **Almacenamiento Offline (IndexedDB)** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `offline-manager.ts`, `indexeddb-storage.ts` | Paquetes de culto y canciones completas para uso sin internet. |
 | **Audio: Streaming con Tickets** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `AudioPlayerBar.tsx`, `audio.routes.ts` | Streaming con Range requests (HTTP 206) mediante boletos temporales de 60s. |
 | **Audio: Descarga con Checksum SHA-256** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `offline-manager.ts`, `audio-service.ts` | Verificación criptográfica estricta contra `X-Checksum-Sha256` y `ETag`. |
-| **Sesiones Multipista (Backend API)** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `multitrack.routes.ts`, `multitrack-service.ts` | Rutas REST completas con aislamiento anti-IDOR y transacciones. |
+| **Sesiones Multipista (Backend API)** | **IMPLEMENTADO Y VERIFICADO EN CÓDIGO** | `multitrack.routes.ts`, `multitrack-service.ts` | Rutas REST con autorización a nivel de recurso (privacidad inter-músicos, sesiones compartidas ministeriales, inmutabilidad y anulación administrativa). |
 | **Consola Gráfica Multipista (UI)** | **NO IMPLEMENTADO O NO VERIFICADO** | N/A en `frontend/src/components` | Solo existe motor lógico; no hay interfaz gráfica de faders/mezclador. |
 | **Reconocimiento OMR en Producción** | **NO IMPLEMENTADO O NO VERIFICADO** | `omr-provider.ts` | Sin motor real configurado; devuelve 0 compases para garantizar cero invención. |
 | **Sincronización por Pedales Físicos** | **NO IMPLEMENTADO O NO VERIFICADO** | N/A (Exclusión mandatoria) | Prohibida expresamente por diseño y arquitectura en toda la plataforma. |
@@ -680,8 +695,8 @@ Imprima o mantenga a mano esta lista para validar el funcionamiento del atril en
 
 ## 20. LIMITACIONES DE LA DOCUMENTACIÓN Y FECHA DE REVISIÓN
 
-- **Fecha de Auditoría y Redacción:** 18 de octubre de 2026.
-- **Base Técnica Verificada:** Repositorio oficial en rama `main`, commit base `e89f5a9` posterior a la remediación independiente Sprint R1-A (623 pruebas automatizadas ejecutadas y superadas con 100% de éxito).
+- **Fecha de Auditoría y Remediación:** 18 de octubre de 2026.
+- **Base Técnica Verificada:** Repositorio oficial en rama `main`, reconciliación histórica de commits `e89f5a9` (sprint R1-A) y `dae46fa` (HEAD remoto con documentación y fixtures WAV), complementado con la remediación de seguridad de autorización en catálogo de canciones y autorización a nivel de recurso en multitrack (630 pruebas automatizadas frontend y backend ejecutadas y superadas con 100% de éxito).
 - **Limitaciones Expresas:**
   - Esta guía describe con fidelidad matemática lo que el código fuente y las pruebas vigentes ejecutan hoy. No promete funciones que solo existan en planes futuros o maquetas visuales.
   - **No se declara preparación para producción comercial (*Production Readiness*):** La puesta en marcha definitiva en el presbiterio de la Iglesia Cristiana Bethesda permanece sujeta a las pruebas y validación manual directa por parte del Propietario del Proyecto y el liderazgo pastoral.

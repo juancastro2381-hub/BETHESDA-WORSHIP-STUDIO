@@ -61,6 +61,72 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     return freshUser;
   };
 
+  /**
+   * Helper de autorización a nivel de recurso (Resource-Level Authorization):
+   * Enforza la política de compartición y propiedad para sesiones multipistas.
+   *
+   * Reglas:
+   * 1. SUPER_ADMIN y ADMIN: Acceso administrativo total a cualquier sesión del ministerio.
+   * 2. Dueño (createdByUserId === user.sub): Acceso total a su propia sesión.
+   * 3. Modificaciones (PATCH) y Eliminación (DELETE): Estrictamente restringidas al dueño o a ADMIN/SUPER_ADMIN.
+   * 4. Lectura (GET) y Estado Offline:
+   *    - Permitido si la sesión es compartida ministerialmente:
+   *      a) createdByUserId es null (sesión maestra del sistema).
+   *      b) O fue creada por un WORSHIP_LEADER, ADMIN o SUPER_ADMIN (sesión oficial de culto compartida).
+   *      c) O el título incluye la etiqueta '[SHARED]' (indicador explícito de compartición con el equipo).
+   *    - Denegado (403 Forbidden) si es una sesión privada creada por otro usuario (ej. otro MUSICIAN).
+   */
+  const assertSessionResourceAccess = async (
+    session: any,
+    currentUserId: string,
+    currentUserRole: string,
+    action: 'read' | 'modify' | 'delete' | 'offline'
+  ): Promise<void> => {
+    // 1. Acceso de administrador total
+    if (currentUserRole === 'SUPER_ADMIN' || currentUserRole === 'ADMIN') {
+      return;
+    }
+
+    // 2. Acceso del creador / dueño de la sesión
+    if (session.createdByUserId && session.createdByUserId === currentUserId) {
+      return;
+    }
+
+    // 3. Mutaciones y borrado: Denegado si no es el dueño ni administrador
+    if (action === 'modify' || action === 'delete') {
+      throw new ForbiddenError(
+        `No tiene autorización para ${action === 'modify' ? 'modificar' : 'eliminar'} una sesión multipista perteneciente a otro usuario.`
+      );
+    }
+
+    // 4. Lectura y estado offline: Verificar si la sesión califica como compartida
+    if (!session.createdByUserId) {
+      return; // Sesión de catálogo del sistema
+    }
+
+    if (typeof session.title === 'string' && session.title.includes('[SHARED]')) {
+      return; // Compartida explícitamente
+    }
+
+    // Comprobar si el creador es WORSHIP_LEADER, ADMIN o SUPER_ADMIN
+    const creatorUser = await userRepo.findById(session.createdByUserId);
+    if (
+      creatorUser &&
+      (creatorUser.role === 'WORSHIP_LEADER' ||
+        creatorUser.role === 'ADMIN' ||
+        creatorUser.role === 'SUPER_ADMIN')
+    ) {
+      return; // Sesión oficial del liderazgo de alabanza disponible para el equipo
+    }
+
+    // Si es una sesión privada de otro integrante: Denegado
+    throw new ForbiddenError(
+      `No tiene autorización para ${
+        action === 'offline' ? 'consultar el estado offline de' : 'acceder a'
+      } una sesión multipista privada de otro usuario.`
+    );
+  };
+
   // 1. POST /api/v1/multitrack/sessions - Crear sesión multipista con stems vinculados
   fastify.post(
     '/sessions',
@@ -90,7 +156,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 2. GET /api/v1/multitrack/sessions/:sessionId - Obtener sesión y sus stems
+  // 2. GET /api/v1/multitrack/sessions/:sessionId - Obtener sesión y sus stems (con autorización a nivel de recurso)
   fastify.get(
     '/sessions/:sessionId',
     {
@@ -98,10 +164,12 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const user = request.user!;
-      await assertFreshActiveUser(user.sub, 'songs:read');
+      const freshUser = await assertFreshActiveUser(user.sub, 'songs:read');
 
       const { sessionId } = SessionIdParamSchema.parse(request.params);
       const session = await multitrackService.getSession(sessionId);
+
+      await assertSessionResourceAccess(session, user.sub, freshUser.role, 'read');
 
       return reply.status(200).send({
         data: session,
@@ -109,7 +177,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 3. GET /api/v1/multitrack/by-song/:songId - Listar sesiones multipista de una canción
+  // 3. GET /api/v1/multitrack/by-song/:songId - Listar sesiones multipista autorizadas de una canción
   fastify.get(
     '/by-song/:songId',
     {
@@ -117,18 +185,28 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const user = request.user!;
-      await assertFreshActiveUser(user.sub, 'songs:read');
+      const freshUser = await assertFreshActiveUser(user.sub, 'songs:read');
 
       const { songId } = SongIdParamSchema.parse(request.params);
-      const sessions = await multitrackService.getSessionsBySongId(songId);
+      const allSessions = await multitrackService.getSessionsBySongId(songId);
+
+      const authorizedSessions: any[] = [];
+      for (const s of allSessions) {
+        try {
+          await assertSessionResourceAccess(s, user.sub, freshUser.role, 'read');
+          authorizedSessions.push(s);
+        } catch {
+          // Omitir sesiones privadas de otros usuarios
+        }
+      }
 
       return reply.status(200).send({
-        data: sessions,
+        data: authorizedSessions,
       });
     }
   );
 
-  // 4. PATCH /api/v1/multitrack/sessions/:sessionId/tracks/:trackId - Modificar mezcla de una pista
+  // 4. PATCH /api/v1/multitrack/sessions/:sessionId/tracks/:trackId - Modificar mezcla de una pista (dueño o admin)
   fastify.patch(
     '/sessions/:sessionId/tracks/:trackId',
     {
@@ -136,10 +214,13 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const user = request.user!;
-      await assertFreshActiveUser(user.sub, 'songs:update_draft');
+      const freshUser = await assertFreshActiveUser(user.sub, 'songs:update_draft');
 
       const { sessionId, trackId } = TrackMixParamSchema.parse(request.params);
       const updates = UpdateTrackMixBodySchema.parse(request.body);
+
+      const session = await multitrackService.getSession(sessionId);
+      await assertSessionResourceAccess(session, user.sub, freshUser.role, 'modify');
 
       const updatedTrack = await multitrackService.updateTrackMix(sessionId, trackId, updates);
 
@@ -149,7 +230,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 5. DELETE /api/v1/multitrack/sessions/:sessionId - Eliminar sesión multipista
+  // 5. DELETE /api/v1/multitrack/sessions/:sessionId - Eliminar sesión multipista (dueño o admin)
   fastify.delete(
     '/sessions/:sessionId',
     {
@@ -157,9 +238,13 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const user = request.user!;
-      await assertFreshActiveUser(user.sub, 'songs:update_draft');
+      const freshUser = await assertFreshActiveUser(user.sub, 'songs:update_draft');
 
       const { sessionId } = SessionIdParamSchema.parse(request.params);
+
+      const session = await multitrackService.getSession(sessionId);
+      await assertSessionResourceAccess(session, user.sub, freshUser.role, 'delete');
+
       const deleted = await multitrackService.deleteSession(sessionId);
 
       if (!deleted) {
@@ -170,7 +255,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 6. GET /api/v1/multitrack/sessions/:sessionId/offline-status - Verificar completitud offline
+  // 6. GET /api/v1/multitrack/sessions/:sessionId/offline-status - Verificar completitud offline (recurso autorizado)
   fastify.get(
     '/sessions/:sessionId/offline-status',
     {
@@ -178,10 +263,13 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const user = request.user!;
-      await assertFreshActiveUser(user.sub, 'songs:read');
+      const freshUser = await assertFreshActiveUser(user.sub, 'songs:read');
 
       const { sessionId } = SessionIdParamSchema.parse(request.params);
       const query = OfflineStatusQuerySchema.parse(request.query);
+
+      const session = await multitrackService.getSession(sessionId);
+      await assertSessionResourceAccess(session, user.sub, freshUser.role, 'offline');
 
       const availableAssets = query.availableAssets
         ? query.availableAssets.split(',').map((id) => id.trim()).filter(Boolean)

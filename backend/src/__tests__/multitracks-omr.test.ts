@@ -60,6 +60,12 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
   let viewerUser: UserEntity;
   let leaderToken: string;
   let viewerToken: string;
+  let firstMusicianUser: UserEntity;
+  let secondMusicianUser: UserEntity;
+  let adminUser: UserEntity;
+  let firstMusicianToken: string;
+  let secondMusicianToken: string;
+  let adminToken: string;
 
   let testSong: SongEntity;
   let secondSong: SongEntity;
@@ -119,6 +125,51 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
       id: viewerUser.id,
       email: viewerUser.email,
       role: viewerUser.role,
+    }).token;
+
+    // 1c. Crear primer músico (propietario de sesión privada)
+    firstMusicianUser = await userRepo.create({
+      email: `musician-owner-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Guitarrista',
+      lastName: 'Primero',
+      role: 'MUSICIAN',
+    });
+    createdUserIds.add(firstMusicianUser.id);
+    firstMusicianToken = tokenService.signAccessToken({
+      id: firstMusicianUser.id,
+      email: firstMusicianUser.email,
+      role: firstMusicianUser.role,
+    }).token;
+
+    // 1d. Crear segundo músico (usuario distinto sin autorización sobre sesión privada)
+    secondMusicianUser = await userRepo.create({
+      email: `musician-other-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Bajista',
+      lastName: 'Segundo',
+      role: 'MUSICIAN',
+    });
+    createdUserIds.add(secondMusicianUser.id);
+    secondMusicianToken = tokenService.signAccessToken({
+      id: secondMusicianUser.id,
+      email: secondMusicianUser.email,
+      role: secondMusicianUser.role,
+    }).token;
+
+    // 1e. Crear administrador (para anulación administrativa legítima)
+    adminUser = await userRepo.create({
+      email: `multitrack-admin-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Administrador',
+      lastName: 'General',
+      role: 'ADMIN',
+    });
+    createdUserIds.add(adminUser.id);
+    adminToken = tokenService.signAccessToken({
+      id: adminUser.id,
+      email: adminUser.email,
+      role: adminUser.role,
     }).token;
 
     // 2. Crear canción canónica principal
@@ -934,6 +985,202 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.strictEqual(restored.tracks[0].name, 'Click Persistente');
     assert.strictEqual(restored.tracks[0].audioAssetId, testStemAsset1.id);
     assert.strictEqual(restored.createdByUserId, testUser.id);
+  });
+
+  // ==========================================================================
+  // D1.RESOURCE_AUTH: AUTORIZACIÓN A NIVEL DE RECURSO Y COMPARTICIÓN MULTI-USUARIO
+  // ==========================================================================
+
+  let privateSessionId: string;
+  let privateTrackId: string;
+  let sharedSessionId: string;
+  let sharedTrackId: string;
+
+  it('D1.11: should reject reading another user\'s private multitrack session (403 Forbidden)', async () => {
+    // 1. Primer Músico crea una sesión privada
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/multitrack/sessions',
+      headers: { authorization: `Bearer ${firstMusicianToken}` },
+      payload: {
+        songId: testSong.id,
+        title: 'Mezcla Privada de Guitarra — Primer Músico',
+        durationSeconds: 240,
+        bpm: 72,
+        tracks: [
+          {
+            name: 'Click Privado',
+            trackType: 'CLICK',
+            audioAssetId: testStemAsset1.id,
+            volume: 0.8,
+            pan: 0.0,
+          },
+        ],
+      },
+    });
+
+    assert.strictEqual(createRes.statusCode, 201);
+    const created = JSON.parse(createRes.payload).data;
+    privateSessionId = created.id;
+    privateTrackId = created.tracks[0].id;
+    assert.strictEqual(created.createdByUserId, firstMusicianUser.id);
+
+    // 2. Segundo Músico intenta leer la sesión privada del Primer Músico
+    const unauthorizedReadRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+
+    assert.strictEqual(unauthorizedReadRes.statusCode, 403);
+    const errBody = JSON.parse(unauthorizedReadRes.payload);
+    assert.match(errBody.error.message, /sesión multipista privada/);
+  });
+
+  it('D1.12: should reject modifying another user\'s multitrack session mix (403 Forbidden)', async () => {
+    // Segundo Músico intenta modificar el volumen de la pista del Primer Músico
+    const unauthorizedPatchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}/tracks/${privateTrackId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+      payload: {
+        volume: 0.2,
+      },
+    });
+
+    assert.strictEqual(unauthorizedPatchRes.statusCode, 403);
+    const errBody = JSON.parse(unauthorizedPatchRes.payload);
+    assert.match(errBody.error.message, /modificar una sesión multipista perteneciente a otro usuario/);
+  });
+
+  it('D1.13: should reject deleting another user\'s multitrack session (403 Forbidden)', async () => {
+    // Segundo Músico intenta eliminar la sesión del Primer Músico
+    const unauthorizedDeleteRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+
+    assert.strictEqual(unauthorizedDeleteRes.statusCode, 403);
+    const errBody = JSON.parse(unauthorizedDeleteRes.payload);
+    assert.match(errBody.error.message, /eliminar una sesión multipista perteneciente a otro usuario/);
+  });
+
+  it('D1.14: should reject accessing offline status for a session outside user\'s authorized scope (403 Forbidden)', async () => {
+    // Segundo Músico intenta consultar estado offline de la sesión privada
+    const unauthorizedOfflineRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}/offline-status`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+
+    assert.strictEqual(unauthorizedOfflineRes.statusCode, 403);
+    const errBody = JSON.parse(unauthorizedOfflineRes.payload);
+    assert.match(errBody.error.message, /consultar el estado offline de una sesión multipista privada/);
+  });
+
+  it('D1.15: should allow legitimate shared-session scenario for team while preventing non-owner mutation', async () => {
+    // 1. Director de Alabanza crea sesión compartida oficial del ministerio
+    const createSharedRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/multitrack/sessions',
+      headers: { authorization: `Bearer ${leaderToken}` },
+      payload: {
+        songId: testSong.id,
+        title: 'Sesión Oficial de Culto — Digno y Santo',
+        durationSeconds: 240,
+        bpm: 72,
+        tracks: [
+          {
+            name: 'Pista Oficial Click',
+            trackType: 'CLICK',
+            audioAssetId: testStemAsset1.id,
+            volume: 0.8,
+            pan: 0.0,
+          },
+        ],
+      },
+    });
+
+    assert.strictEqual(createSharedRes.statusCode, 201);
+    const sharedData = JSON.parse(createSharedRes.payload).data;
+    sharedSessionId = sharedData.id;
+    sharedTrackId = sharedData.tracks[0].id;
+
+    // 2. Segundo Músico PUEDE leer la sesión oficial compartida
+    const readSharedRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${sharedSessionId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(readSharedRes.statusCode, 200);
+    const readBody = JSON.parse(readSharedRes.payload).data;
+    assert.strictEqual(readBody.id, sharedSessionId);
+
+    // 3. Segundo Músico PUEDE consultar el estado offline de la sesión compartida
+    const offlineSharedRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${sharedSessionId}/offline-status?availableAssets=${testStemAsset1.id}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(offlineSharedRes.statusCode, 200);
+    assert.strictEqual(JSON.parse(offlineSharedRes.payload).data.isFullyAvailableOffline, true);
+
+    // 4. Segundo Músico NO puede modificar la sesión compartida del Director (solo dueño o admin)
+    const patchSharedRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/multitrack/sessions/${sharedSessionId}/tracks/${sharedTrackId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+      payload: { volume: 0.5 },
+    });
+    assert.strictEqual(patchSharedRes.statusCode, 403);
+
+    // 5. Segundo Músico NO puede eliminar la sesión compartida del Director
+    const deleteSharedRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/multitrack/sessions/${sharedSessionId}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(deleteSharedRes.statusCode, 403);
+
+    // 6. Listado por canción: Segundo Músico ve la sesión compartida, pero NO ve la sesión privada del Primer Músico
+    const listBySongRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/by-song/${testSong.id}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(listBySongRes.statusCode, 200);
+    const songSessions = JSON.parse(listBySongRes.payload).data;
+    const sessionIds = songSessions.map((s: any) => s.id);
+    assert.ok(sessionIds.includes(sharedSessionId), 'Debe incluir la sesión compartida');
+    assert.strictEqual(sessionIds.includes(privateSessionId), false, 'NO debe exponer la sesión privada del Primer Músico');
+  });
+
+  it('D1.16: should permit administrative override for ADMIN role on any session', async () => {
+    // 1. Administrador puede leer la sesión privada del Primer Músico
+    const adminReadRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert.strictEqual(adminReadRes.statusCode, 200);
+
+    // 2. Administrador puede modificar la mezcla de la sesión privada
+    const adminPatchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}/tracks/${privateTrackId}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { volume: 0.6 },
+    });
+    assert.strictEqual(adminPatchRes.statusCode, 200);
+
+    // 3. Administrador puede eliminar la sesión privada
+    const adminDeleteRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/multitrack/sessions/${privateSessionId}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert.strictEqual(adminDeleteRes.statusCode, 204);
   });
 
   it('D.EXCLUSION: should strictly verify zero physical pedal synchronization in Multitracks & OMR', () => {

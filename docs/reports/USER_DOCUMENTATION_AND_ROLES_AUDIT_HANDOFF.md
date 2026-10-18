@@ -2,32 +2,38 @@
 
 **Fecha de Entrega:** 18 de octubre de 2026  
 **Rama del Repositorio:** `main`  
-**Commit Base:** `e89f5a9`  
-**Estado:** AUDITORÍA COMPLETADA — GOBERNANZA DE ESTRICTA LECTURA (READ-ONLY)  
+**Commit HEAD Actual:** `dae46fad101ce9f50b6c967b97b9305fba0b0356` (idéntico a `origin/main`)  
+**Commit Previo:** `e89f5a920756260d4c5e5c5dbc5d03860821b5f3`  
+**Estado:** AUDITORÍA COMPLETADA Y RECONCILIADA — GOBERNANZA DE ESTRICTA LECTURA EN GIT  
 **Documentos Producidos:**
 1. [BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md](../user-guide/BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md) (Entregable A — Manual de Usuario en Español)
 2. [ROLE_IMPLEMENTATION_STATUS_AUDIT.md](ROLE_IMPLEMENTATION_STATUS_AUDIT.md) (Entregable B — Auditoría de Roles y Control de Acceso)
-3. [USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md](USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md) (Entregable C — Presente Informe de Entrega)
+3. [USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md](USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md) (Entregable C — Presente Informe de Entrega Reconciliado)
 
 ---
 
-## 1. Declaración de Cumplimiento de Gobernanza y Estado del Repositorio
+## 1. Declaración de Cumplimiento de Gobernanza, Reconciliación Git y Estado del Repositorio
 
-- **Condición de Solo Lectura:** Se ha cumplido de manera absoluta con la directriz de no modificar el código fuente de la aplicación, esquemas de bases de datos, migraciones, dependencias, variables de entorno ni lógica de negocio.
-- **Operaciones Git:** No se ha ejecutado ninguna operación de `git add`, `git commit`, `git push`, despliegue ni reescritura de historial.
-- **Hardware Excluido:** Ninguna integración con pedales físicos, Bluetooth, WebHID, WebUSB ni Gamepad ha sido implementada ni descrita como funcional en la documentación.
+- **Reconciliación de Historial Git (Prioridad 4):**
+  - **Commit `e89f5a920756260d4c5e5c5dbc5d03860821b5f3` (13:59:43):** Marcó el cierre formal del sprint de remediación R1-A.
+  - **Commit `dae46fad101ce9f50b6c967b97b9305fba0b0356` (14:48:35):** Registrado con el mensaje *"docs: manual de usuario y auditoria de roles"*, incorporó los 3 archivos de documentación iniciales y los 3 archivos de prueba WAV en `backend/storage/audio/` al repositorio remoto `origin/main`.
+  - **Aclaración de Discrepancia:** La redacción preliminar del handoff describió los archivos como no rastreados (*untracked*) reflejando el estado de trabajo previo a la consolidación del commit `dae46fa`. Este informe constata el estado definitivo sin reescribir la historia de Git ni eliminar archivos.
+- **Condición de Gobernanza:** Ningún comando de `git add`, `git commit`, `git push`, rebase, reset o fuerza ha sido ejecutado durante la remediación.
+- **Hardware Excluido:** Cero integración con pedales físicos, Bluetooth, WebHID, WebUSB ni Gamepad.
 - **No Aprobación de Producción:** No se declara el sistema como listo para producción (*production-ready*). La validación litúrgica humana en el templo por parte del Director de Alabanza permanece pendiente.
-- **Estado del Árbol de Trabajo:**
+- **Estado Actual del Árbol de Trabajo:**
   - **Rama:** `main`
-  - **Commit:** `e89f5a9` (idéntico al origen `origin/main`).
-  - **Archivos creados (sin rastrear / untracked):**
-    - `docs/user-guide/BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md`
-    - `docs/reports/ROLE_IMPLEMENTATION_STATUS_AUDIT.md`
-    - `docs/reports/USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md`
-  - **Archivos temporales no rastreados generados por pruebas previas:**
-    - `backend/storage/audio/837ce292-45ae-409e-92b6-0db0822a1540.wav`
-    - `backend/storage/audio/847cf04f-9098-4643-bab0-e7736daffc22.wav`
-    - `backend/storage/audio/adf91c4c-951a-4481-8dcb-a0fa716504e9.wav`
+  - **HEAD:** `dae46fad101ce9f50b6c967b97b9305fba0b0356`
+  - **Archivos Modificados en Árbol de Trabajo (Remediaciones Post-Documentación):**
+    - `backend/src/interfaces/http/routes/song.routes.ts` (Guardas RBAC en catálogo de canciones)
+    - `backend/src/interfaces/http/routes/multitrack.routes.ts` (Autorización a nivel de recurso en multipistas)
+    - `backend/src/__tests__/api-routes.test.ts` (Pruebas de integración RBAC de canciones)
+    - `backend/src/__tests__/multitracks-omr.test.ts` (Pruebas de aislamiento y propiedad multipista)
+    - `docs/user-guide/BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.md` (Calificaciones y aclaraciones)
+    - `docs/reports/ROLE_IMPLEMENTATION_STATUS_AUDIT.md` (Auditoría actualizada)
+    - `docs/reports/USER_DOCUMENTATION_AND_ROLES_AUDIT_HANDOFF.md` (Handoff reconciliado)
+  - **Archivos No Rastreables Generados:**
+    - `docs/user-guide/BETHESDA_WORSHIP_STUDIO_USER_GUIDE_ES.pdf` (Versión imprimible PDF generada a solicitud)
 
 ---
 
@@ -54,8 +60,8 @@ El servidor hace cumplir de manera estricta los **18 permisos** definidos en `RO
 - **En Repertorios Litúrgicos (`/api/v1/setlists`):** Valida `setlists:list`, `setlists:read`, `setlists:create`, `setlists:update`, `setlists:reorder`, `setlists:activate` y `setlists:delete`. En operaciones de mutación, el servidor ejecuta una consulta directa a PostgreSQL (`verifyDatabaseRole = true`) para comprobar en tiempo real que la cuenta no esté suspendida, bloqueada ni haya sufrido una degradación de rol posterior a la emisión del JWT.
 - **En Gestión de Usuarios (`/api/v1/users`):** Valida `users:list`, `users:invite`, `users:change_role` y `users:disable` con verificación obligatoria en base de datos.
 - **En Recursos de Audio (`/api/v1/audio`):** Valida `songs:create` para subida de audio y `songs:read` para streaming y descarga.
-- **En Sesiones Multipista (`/api/v1/multitrack`):** Valida `songs:update_draft` para creación de sesiones y pistas, y `songs:read` para lectura.
-- **Excepción / Hallazgo:** Los endpoints en `song.routes.ts` (`/api/v1/songs`) no tienen conectadas las guardas RBAC a nivel HTTP.
+- **En Sesiones Multipista (`/api/v1/multitrack`):** Valida `songs:update_draft` para creación de sesiones y pistas, `songs:read` para lectura, y hace cumplir autorización a nivel de recurso (privacidad inter-músicos, sesiones compartidas ministeriales, mutaciones solo por propietario y anulación administrativa).
+- **En Catálogo de Canciones (`/api/v1/songs`):** Valida `songs:read` en listado y detalle, `songs:create` con verificación obligatoria en tiempo real en base de datos en creación e importación de partituras, y `songs:update_draft` en creación de versiones de canciones. (Remediado y cubierto por 9 pruebas de integración).
 
 ### 4. ¿Qué puede hacer el usuario en la aplicación en este momento?
 Un usuario que ejecute la aplicación localmente puede realizar de inmediato las siguientes operaciones verificadas:

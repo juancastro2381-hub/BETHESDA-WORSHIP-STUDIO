@@ -25,7 +25,7 @@
 ## 2. Detalle de Suites Específicas de Remediación R1
 
 ### A. Suite de Flujo Litúrgico y Sesión en Vivo (`realtime-session.test.ts`)
-- **Archivo**: [`backend/src/__tests__/realtime-session.test.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/__tests__/realtime-session.test.ts)
+- **Archivo**: [`backend/src/__tests__/realtime-session.test.ts`](../../backend/src/__tests__/realtime-session.test.ts)
 - **Resultado**: **14/14 superadas (100% PASS)**
 
 | # | Nombre de Prueba | Duración | Estado | Validación R1 |
@@ -48,7 +48,7 @@
 ---
 
 ### B. Suite de Infraestructura de Audio, Streaming y Rangos (`audio-infrastructure.test.ts`)
-- **Archivo**: [`backend/src/__tests__/audio-infrastructure.test.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/__tests__/audio-infrastructure.test.ts)
+- **Archivo**: [`backend/src/__tests__/audio-infrastructure.test.ts`](../../backend/src/__tests__/audio-infrastructure.test.ts)
 - **Resultado**: **15/15 superadas (100% PASS)**
 
 | # | Nombre de Prueba | Duración | Estado | Validación R1 |
@@ -71,7 +71,7 @@
 ---
 
 ### C. Suite de Multipistas y Reconocimiento Óptico OMR (`multitracks-omr.test.ts`)
-- **Archivo**: [`backend/src/__tests__/multitracks-omr.test.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/__tests__/multitracks-omr.test.ts)
+- **Archivo**: [`backend/src/__tests__/multitracks-omr.test.ts`](../../backend/src/__tests__/multitracks-omr.test.ts)
 - **Resultado**: **15/15 superadas (100% PASS)**
 
 | # | Nombre de Prueba | Duración | Estado | Validación R1 |
@@ -95,7 +95,7 @@
 ---
 
 ### D. Suite de Almacenamiento Offline y Verificación Criptográfica (`offline-manager.test.ts`)
-- **Archivo**: [`frontend/src/core/offline/__tests__/offline-manager.test.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/offline/__tests__/offline-manager.test.ts)
+- **Archivo**: [`frontend/src/core/offline/__tests__/offline-manager.test.ts`](../../frontend/src/core/offline/__tests__/offline-manager.test.ts)
 - **Resultado**: **28/28 superadas (100% PASS)**
 
 Aspectos clave verificados:

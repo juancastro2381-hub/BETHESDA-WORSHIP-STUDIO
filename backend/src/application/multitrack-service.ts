@@ -147,6 +147,7 @@ export class MultitrackService {
         durationSeconds: Math.max(0, dto.durationSeconds),
         bpm: dto.bpm,
         tracks,
+        createdByUserId: _userId,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -250,6 +251,40 @@ export class MultitrackService {
       downloadedTracks: downloadedCount,
       missingAssetIds,
     };
+  }
+
+  /**
+   * Obtiene todas las sesiones multipista asociadas a una canción.
+   */
+  public async getSessionsBySongId(songId: string): Promise<MultitrackSession[]> {
+    const song = await this.songRepo.findById(songId);
+    if (!song) {
+      throw new NotFoundError('Canción', songId);
+    }
+
+    if (this.multitrackRepo) {
+      const persisted = await this.multitrackRepo.findBySongId(songId);
+      for (const s of persisted) {
+        this.sessions.set(s.id, s);
+      }
+      return persisted;
+    }
+
+    return Array.from(this.sessions.values()).filter((s) => s.songId === songId);
+  }
+
+  /**
+   * Elimina una sesión multipista y sus pistas asociadas de forma duradera.
+   */
+  public async deleteSession(sessionId: string): Promise<boolean> {
+    await this.getSession(sessionId);
+    this.sessions.delete(sessionId);
+
+    if (this.multitrackRepo) {
+      return await this.multitrackRepo.deleteSession(sessionId);
+    }
+
+    return true;
   }
 
   /**

@@ -518,6 +518,18 @@ export class BethesdaApiClient {
   }
 
   /**
+   * Obtiene los metadatos canónicos de un activo de audio por su ID.
+   */
+  public async getAudioMetadata(audioId: string): Promise<AudioAssetDTO> {
+    const res = await this.fetchWithAuth(`/audio/${audioId}`, { method: 'GET' });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
    * Retorna la URL de streaming base para un activo de audio.
    */
   public getAudioStreamUrl(audioId: string): string {

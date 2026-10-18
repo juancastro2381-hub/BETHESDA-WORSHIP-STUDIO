@@ -105,8 +105,28 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
       reply.header('Content-Length', file.fileSizeBytes);
       reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(file.filename)}"`);
       reply.header('Cache-Control', 'private, no-cache');
+      if (file.checksumSha256) {
+        reply.header('X-Checksum-Sha256', file.checksumSha256);
+        reply.header('ETag', `"${file.checksumSha256}"`);
+      }
 
       return reply.status(200).send(file.buffer);
+    }
+  );
+
+  // 3b. GET /api/v1/audio/:id - Metadatos de un activo de audio
+  fastify.get(
+    '/audio/:id',
+    {
+      preHandler: [authGuard.requirePermission('songs:read')],
+    },
+    async (request, reply) => {
+      const { id } = AudioIdParamSchema.parse(request.params);
+      const asset = await audioService.getAudioById(id);
+
+      return reply.status(200).send({
+        data: asset,
+      });
     }
   );
 

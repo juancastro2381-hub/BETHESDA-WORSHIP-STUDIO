@@ -31,6 +31,26 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const authGuard = new AuthGuard(tokenService, userRepo);
 
+  /**
+   * Valida en tiempo real la frescura de la autorización contra PostgreSQL (R1-A).
+   * Impide que usuarios suspendidos, dados de baja o con rol revocado utilicen tokens vigentes.
+   */
+  async function assertFreshActiveUser(userId: string) {
+    const dbUser = await userRepo.findById(userId);
+    if (!dbUser) {
+      throw new UnauthorizedError('Usuario no encontrado o dado de baja en la base de datos.');
+    }
+    if (dbUser.accountStatus !== 'ACTIVE') {
+      throw new ForbiddenError(
+        `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación litúrgica denegada.`
+      );
+    }
+    if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
+      throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
+    }
+    return dbUser;
+  }
+
   // ==========================================================================
   // 1. POST /api/v1/realtime/sessions - Crear o recuperar sesión en vivo
   // ==========================================================================
@@ -41,20 +61,22 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       const body = CreateRealtimeSessionBodySchema.parse(request.body);
       const user = request.user!;
 
-      // Validar que el setlist exista en Postgres
+      // 1. Validación de frescura en base de datos autoritativa (R1-A)
+      const dbUser = await assertFreshActiveUser(user.sub);
+
+      // 2. Validar que el setlist exista en Postgres
       const setlist = await setlistRepo.findById(body.setlistId);
       if (!setlist) {
         throw new NotFoundError('Setlist', body.setlistId);
       }
 
-      // Validar autorización de anfitrión/creador litúrgico (R1-P0):
-      // Solo WORSHIP_LEADER, ADMIN, SUPER_ADMIN o el usuario designado como director del setlist
-      // pueden iniciar la sesión o asumir privilegios de anfitrión.
+      // 3. Validar autorización de anfitrión litúrgico usando el rol AUTORITATIVO de PostgreSQL (R1-A):
+      // Si el usuario fue degradado en DB (ej. a MUSICIAN o VIEWER), se rechaza de inmediato.
       const isLeaderOrAdmin =
-        user.role === 'ADMIN' ||
-        user.role === 'SUPER_ADMIN' ||
-        user.role === 'WORSHIP_LEADER';
-      const isDesignatedDirector = setlist.directorUserId === user.sub;
+        dbUser.role === 'ADMIN' ||
+        dbUser.role === 'SUPER_ADMIN' ||
+        dbUser.role === 'WORSHIP_LEADER';
+      const isDesignatedDirector = setlist.directorUserId === dbUser.id;
 
       if (!isLeaderOrAdmin && !isDesignatedDirector) {
         throw new ForbiddenError(
@@ -63,9 +85,9 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const hostUser = {
-        id: user.sub,
-        name: user.email.split('@')[0],
-        role: user.role,
+        id: dbUser.id,
+        name: dbUser.email.split('@')[0],
+        role: dbUser.role,
       };
 
       const session = globalRealtimeSessionManager.createOrGetSession(
@@ -89,8 +111,14 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     { preHandler: authGuard.requirePermission('setlists:read', false) },
     async (request, reply) => {
       const { setlistId } = request.params as { setlistId: string };
-      const session = globalRealtimeSessionManager.getSessionBySetlistId(setlistId);
+      await assertFreshActiveUser(request.user!.sub);
 
+      const setlist = await setlistRepo.findById(setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist', setlistId);
+      }
+
+      const session = globalRealtimeSessionManager.getSessionBySetlistId(setlistId);
       if (!session) {
         throw new NotFoundError('Sesión en vivo para setlist', setlistId);
       }
@@ -109,7 +137,15 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     { preHandler: authGuard.requirePermission('setlists:read', false) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
+      await assertFreshActiveUser(request.user!.sub);
+
       const session = globalRealtimeSessionManager.getSession(sessionId);
+
+      // Validar acceso y existencia del setlist subyacente
+      const setlist = await setlistRepo.findById(session.setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist de la sesión', session.setlistId);
+      }
 
       return reply.status(200).send({
         data: session.toSnapshot(),
@@ -126,11 +162,18 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
+      const dbUser = await assertFreshActiveUser(user.sub);
+
+      const session = globalRealtimeSessionManager.getSession(sessionId);
+      const setlist = await setlistRepo.findById(session.setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist de la sesión', session.setlistId);
+      }
 
       const snapshot = globalRealtimeSessionManager.joinSession(sessionId, {
-        id: user.sub,
-        name: user.email.split('@')[0],
-        role: user.role,
+        id: dbUser.id,
+        name: dbUser.email.split('@')[0],
+        role: dbUser.role,
       });
 
       return reply.status(200).send({
@@ -166,6 +209,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
+      await assertFreshActiveUser(user.sub);
 
       const result = globalRealtimeSessionManager.heartbeat(sessionId, user.sub);
 
@@ -184,9 +228,19 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       const action = RealtimeActionBodySchema.parse(request.body);
       const user = request.user!;
 
+      // Validación autoritativa en Postgres: rol y estado fresco (R1-A)
+      const dbUser = await assertFreshActiveUser(user.sub);
+
+      const session = globalRealtimeSessionManager.getSession(sessionId);
+      const setlist = await setlistRepo.findById(session.setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist de la sesión', session.setlistId);
+      }
+
+      // Despachar acción utilizando el rol autoritativo en base de datos
       const result = globalRealtimeSessionManager.dispatchAction(
         sessionId,
-        { id: user.sub, role: user.role },
+        { id: dbUser.id, role: dbUser.role },
         action
       );
 
@@ -206,11 +260,21 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
 
+      // 1. Validar frescura del usuario en base de datos (R1-A)
+      const dbUser = await assertFreshActiveUser(user.sub);
+
+      // 2. Validar que la sesión exista
       const session = globalRealtimeSessionManager.getSession(sessionId);
 
+      // 3. Validar que el setlist exista y sea accesible
+      const setlist = await setlistRepo.findById(session.setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist de la sesión', session.setlistId);
+      }
+
       const ticket = globalStreamTicketService.issueTicket({
-        userId: user.sub,
-        role: user.role,
+        userId: dbUser.id,
+        role: dbUser.role,
         resourceId: session.sessionId,
         purpose: 'SSE_STREAM',
       });
@@ -260,7 +324,14 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
+      // Validar frescura y vigencia autoritativa del usuario en PostgreSQL (R1-A)
+      await assertFreshActiveUser(authenticatedUserId);
+
       const session = globalRealtimeSessionManager.getSession(sessionId);
+      const setlist = await setlistRepo.findById(session.setlistId);
+      if (!setlist) {
+        throw new NotFoundError('Setlist de la sesión', session.setlistId);
+      }
 
       // Configurar encabezados HTTP estándar para Server-Sent Events
       reply.raw.writeHead(200, {

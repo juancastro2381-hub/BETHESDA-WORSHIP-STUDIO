@@ -13,12 +13,12 @@
 
 ## 1. Resumen Ejecutivo de la Remediación
 
-Durante el Sprint de Remediación R1 se resolvieron de forma exhaustiva, rigurosa y verificable todas las no conformidades, vulnerabilidades de seguridad y limitaciones arquitectónicas identificadas en el informe preflight ([`WS_REMEDIATION_R1_PREFLIGHT.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_PREFLIGHT.md)).
+Durante el Sprint de Remediación R1 se resolvieron de forma exhaustiva, rigurosa y verificable todas las no conformidades, vulnerabilidades de seguridad y limitaciones arquitectónicas identificadas en el informe preflight ([`WS_REMEDIATION_R1_PREFLIGHT.md`](./WS_REMEDIATION_R1_PREFLIGHT.md)).
 
 Las correcciones abarcan tres niveles de prioridad:
 1. **Prioridad P0 (Seguridad Crítica)**: Control de privilegios de anfitrión en sesiones en vivo, eliminación de la exposición de JWT en streams SSE mediante tickets efímeros de un solo uso, y autenticación robusta para streaming de audio HTML5 y descargas offline.
 2. **Prioridad P1 (Integridad de Datos y Fiabilidad)**: Validación real de bytes criptográficos SHA-256 en almacenamiento offline, erradicación de notas fabricadas en OMR con estado veraz y traducción a entidades canónicas, persistencia relacional PostgreSQL de sesiones multitrack con aislamiento IDOR entre canciones, e inspección de bytes mágicos en audio junto con soporte completo de rangos HTTP RFC 7233/9110.
-3. **Prioridad P2 (Gobernanza y Documentación)**: Reconciliación de compuertas en [`README.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/README.md) y documentación técnica de transferencia.
+3. **Prioridad P2 (Gobernanza y Documentación)**: Reconciliación de compuertas en [`README.md`](../../README.md) y documentación técnica de transferencia.
 
 ---
 
@@ -31,7 +31,7 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: El endpoint `POST /api/v1/realtime/sessions` permitía a cualquier usuario autenticado (incluyendo roles de sólo lectura como `VIEWER` o músicos `MUSICIAN`) crear una sesión en vivo para cualquier setlist y auto-asignarse como anfitrión/host de la transmisión litúrgica.
 - **Causa Raíz**: Ausencia de verificación de permisos específicos de dirección litúrgica (`setlists:activate` / `setlists:update`) y falta de comprobación de identidad respecto al `directorUserId` asignado en el setlist.
 - **Archivos Modificados**:
-  - [`backend/src/interfaces/http/routes/realtime.routes.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/routes/realtime.routes.ts)
+  - [`backend/src/interfaces/http/routes/realtime.routes.ts`](../../backend/src/interfaces/http/routes/realtime.routes.ts)
 - **Acción Correctiva**:
   Se incorporó una guarda estricta de autorización antes de instanciar o asociar la sesión:
   ```typescript
@@ -56,11 +56,11 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: La conexión Server-Sent Events (`GET /api/v1/realtime/sessions/:sessionId/stream?token=...`) requería el JWT de acceso persistente en la URL de consulta. Esto exponía el token en logs de servidores web, proxies inversos, historial de navegación y encabezados `Referer`. Además, el middleware global `authenticate()` aceptaba `?token=` en cualquier ruta HTTP.
 - **Causa Raíz**: Limitación de la API estándar de navegadores `EventSource`, que no permite inyectar encabezados personalizados (`Authorization: Bearer <token>`).
 - **Archivos Modificados**:
-  - [`backend/src/application/stream-ticket-service.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP STUDIO/backend/src/application/stream-ticket-service.ts) (Nuevo servicio)
-  - [`backend/src/interfaces/http/middlewares/auth-middleware.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/middlewares/auth-middleware.ts)
-  - [`backend/src/interfaces/http/routes/realtime.routes.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/routes/realtime.routes.ts)
-  - [`backend/src/interfaces/http/schemas/realtime.schemas.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/schemas/realtime.schemas.ts)
-  - [`frontend/src/core/realtime/realtime-client.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/realtime/realtime-client.ts)
+  - [`backend/src/application/stream-ticket-service.ts`](../../backend/src/application/stream-ticket-service.ts) (Nuevo servicio)
+  - [`backend/src/interfaces/http/middlewares/auth-middleware.ts`](../../backend/src/interfaces/http/middlewares/auth-middleware.ts)
+  - [`backend/src/interfaces/http/routes/realtime.routes.ts`](../../backend/src/interfaces/http/routes/realtime.routes.ts)
+  - [`backend/src/interfaces/http/schemas/realtime.schemas.ts`](../../backend/src/interfaces/http/schemas/realtime.schemas.ts)
+  - [`frontend/src/core/realtime/realtime-client.ts`](../../frontend/src/core/realtime/realtime-client.ts)
 - **Acción Correctiva**:
   1. Se eliminó la extracción de `?token=` de `auth-middleware.ts`; todas las rutas API estándar exigen estrictamente el encabezado `Authorization: Bearer <token>`.
   2. Se diseñó el patrón de **Tickets de Transmisión Efímeros de Un Solo Uso**:
@@ -81,10 +81,10 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: La etiqueta HTML5 `<audio>` no puede adjuntar encabezados `Authorization: Bearer`, dejando el streaming desprotegido o dependiendo de tokens expuestos en la URL. Asimismo, la descarga en `OfflineManager.downloadAudio` no inyectaba credenciales Bearer en las peticiones `fetch`.
 - **Causa Raíz**: Falta de un mecanismo de streaming seguro adaptado a elementos multimedia nativos del navegador y omisión del encabezado de autorización en el cliente offline.
 - **Archivos Modificados**:
-  - [`backend/src/interfaces/http/routes/audio.routes.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/routes/audio.routes.ts)
-  - [`frontend/src/core/api/api-client.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/api/api-client.ts)
-  - [`frontend/src/components/workspace/AudioPlayerBar.tsx`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/components/workspace/AudioPlayerBar.tsx)
-  - [`frontend/src/core/offline/offline-manager.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/offline/offline-manager.ts)
+  - [`backend/src/interfaces/http/routes/audio.routes.ts`](../../backend/src/interfaces/http/routes/audio.routes.ts)
+  - [`frontend/src/core/api/api-client.ts`](../../frontend/src/core/api/api-client.ts)
+  - [`frontend/src/components/workspace/AudioPlayerBar.tsx`](../../frontend/src/components/workspace/AudioPlayerBar.tsx)
+  - [`frontend/src/core/offline/offline-manager.ts`](../../frontend/src/core/offline/offline-manager.ts)
 - **Acción Correctiva**:
   1. Se implementó el endpoint `POST /api/v1/audio/:id/ticket` para emitir un ticket de reproducción efímero (60 segundos).
   2. En `GET /api/v1/audio/:id/stream?ticket=...`, el ticket permite múltiples peticiones de búsqueda de rangos (`Range: bytes=...`) dentro de su ventana de validez de 60 segundos antes de expirar, permitiendo al reproductor multimedia navegar fluidamente por la línea de tiempo.
@@ -103,8 +103,8 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: La verificación de integridad en `OfflineManager` no calculaba el hash criptográfico sobre los bytes binarios reales descargados, sino que confiaba en strings de metadatos o realizaba una verificación superficial. Un archivo de audio corrupto o truncado durante la descarga se almacenaba en IndexedDB y fallaba en silencio durante el culto.
 - **Causa Raíz**: Falta de una rutina de hash criptográfico binario compatible con Web Crypto API para `ArrayBuffer` / `Uint8Array`.
 - **Archivos Modificados**:
-  - [`frontend/src/core/offline/offline-manager.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/offline/offline-manager.ts)
-  - [`frontend/src/components/workspace/AudioPlayerBar.tsx`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/components/workspace/AudioPlayerBar.tsx)
+  - [`frontend/src/core/offline/offline-manager.ts`](../../frontend/src/core/offline/offline-manager.ts)
+  - [`frontend/src/components/workspace/AudioPlayerBar.tsx`](../../frontend/src/components/workspace/AudioPlayerBar.tsx)
 - **Acción Correctiva**:
   1. Se implementó la función exportada:
      ```typescript
@@ -131,8 +131,8 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: `OmrService` contenía una rutina de respaldo denominada `createReferenceSongFixture()` que sintetizaba una escala de Do mayor con notas ficticias ante fallos o ausencia de motor de IA. Además, la persistencia canónica de la propuesta aprobada no traducía los compases de la propuesta a entidades del modelo canónico (`Measure`, `Voice`, `Note`, `ChordEvent`, `LyricSyllable`).
 - **Causa Raíz**: Uso de mocks de desarrollo en rutas de producción y ausencia del conversor propuesta $\to$ modelo canónico.
 - **Archivos Modificados**:
-  - [`backend/src/domain/omr/omr-provider.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/domain/omr/omr-provider.ts)
-  - [`backend/src/application/omr-service.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/application/omr-service.ts)
+  - [`backend/src/domain/omr/omr-provider.ts`](../../backend/src/domain/omr/omr-provider.ts)
+  - [`backend/src/application/omr-service.ts`](../../backend/src/application/omr-service.ts)
 - **Acción Correctiva**:
   1. Se eliminó por completo `createReferenceSongFixture()`.
   2. En `StandardOmrProvider`, cuando no hay un motor OMR real configurado en el entorno y no se pasa una opción explícita de pruebas, se devuelve un resultado veraz con `measures: []`, `status: 'FAILED'` y un mensaje explícito indicando que el motor no está configurado.
@@ -154,11 +154,11 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: Las sesiones multitrack se almacenaban únicamente en un mapa volátil en memoria (`Map<string, MultitrackSession>`). Al reiniciar el servicio backend, todas las sesiones, mezclas y configuraciones de pistas desaparecían. Asimismo, no existía validación de que los stems pertenecieran a la misma canción (`songId`), permitiendo la asociación cruzada de audio de distintas canciones.
 - **Causa Raíz**: Persistencia transaccional no implementada y ausencia de chequeo de pertenencia de clave foránea.
 - **Archivos Modificados**:
-  - [`backend/src/db/migrations/0006_multitrack_sessions.sql`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/db/migrations/0006_multitrack_sessions.sql) (Nueva migración)
-  - [`backend/src/db/migrations/meta/_journal.json`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/db/migrations/meta/_journal.json) (Registro en journal)
-  - [`backend/src/db/schema.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/db/schema.ts) (Tablas `multitrackSessions` y `multitrackTracks`)
-  - [`backend/src/repositories/multitrack-repository.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/repositories/multitrack-repository.ts) (Nuevo repositorio Drizzle)
-  - [`backend/src/application/multitrack-service.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/application/multitrack-service.ts)
+  - [`backend/src/db/migrations/0006_multitrack_sessions.sql`](../../backend/src/db/migrations/0006_multitrack_sessions.sql) (Nueva migración)
+  - [`backend/src/db/migrations/meta/_journal.json`](../../backend/src/db/migrations/meta/_journal.json) (Registro en journal)
+  - [`backend/src/db/schema.ts`](../../backend/src/db/schema.ts) (Tablas `multitrackSessions` y `multitrackTracks`)
+  - [`backend/src/repositories/multitrack-repository.ts`](../../backend/src/repositories/multitrack-repository.ts) (Nuevo repositorio Drizzle)
+  - [`backend/src/application/multitrack-service.ts`](../../backend/src/application/multitrack-service.ts)
 - **Acción Correctiva**:
   1. Se crearon las tablas relacionales:
      - `multitrack_sessions`: Claves foráneas a `songs` y `users` (`created_by`), nombre de sesión, estado (`ACTIVE`, `DRAFT`, `ARCHIVED`).
@@ -185,9 +185,9 @@ Las correcciones abarcan tres niveles de prioridad:
   2. El manejador de rangos HTTP no calculaba correctamente los rangos sufijo (`bytes=-N`) y, ante rangos fuera de los límites del archivo, respondía de manera no conforme a la especificación RFC 7233 / RFC 9110.
 - **Causa Raíz**: Ausencia de análisis de cabeceras binarias y cálculo de rangos incompleto en el servicio de streaming.
 - **Archivos Modificados**:
-  - [`backend/src/domain/errors.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/domain/errors.ts) (`RangeNotSatisfiableError`)
-  - [`backend/src/interfaces/http/error-handler.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/error-handler.ts)
-  - [`backend/src/application/audio-service.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/application/audio-service.ts)
+  - [`backend/src/domain/errors.ts`](../../backend/src/domain/errors.ts) (`RangeNotSatisfiableError`)
+  - [`backend/src/interfaces/http/error-handler.ts`](../../backend/src/interfaces/http/error-handler.ts)
+  - [`backend/src/application/audio-service.ts`](../../backend/src/application/audio-service.ts)
 - **Acción Correctiva**:
   1. Se implementó `validateAudioMagicBytes(buffer, mimeType)` comprobando los bytes mágicos de:
      - WAV: `RIFF` ... `WAVE`
@@ -214,8 +214,8 @@ Las correcciones abarcan tres niveles de prioridad:
 - **Comportamiento Original**: El archivo `README.md` y documentos históricos conservaban directivas obsoletas ("HOLD DE GOBERNANZA", "Fases 3B y 3C estrictamente no autorizadas") que contradecían las autorizaciones posteriores y el Sprint de Remediación R1, generando desalineación documental.
 - **Causa Raíz**: Retención de estados históricos sin actualizar la compuerta general del proyecto.
 - **Archivos Modificados**:
-  - [`README.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/README.md)
-  - Expedientes en [`docs/reports/`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/)
+  - [`README.md`](../../README.md)
+  - Expedientes en [`docs/reports/`](./)
 - **Acción Correctiva**:
   Se actualizó el `README.md` distinguiendo claramente:
   - Fases 0 a 2C cerradas.
@@ -263,4 +263,4 @@ Las correcciones abarcan tres niveles de prioridad:
 
 1. **Dependencia de Proveedor OMR Externo**: El sistema cuenta con la arquitectura completa, contratos y compuerta de aprobación humana para OMR. Sin embargo, en ausencia de credenciales para un motor OMR comercial o modelo local ejecutándose, el sistema reportará verazmente que el motor no está configurado (`unrecognizedRegions: []`, `measures: []`). Esto es el comportamiento correcto y no genera notas artificiales.
 2. **Ambiente de Almacenamiento Local de Audio**: En el entorno de desarrollo actual, el almacenamiento de audio utiliza `LocalFileSystemAudioStorageProvider` apuntando a `backend/storage/audio`. Para un despliegue en clúster de alta disponibilidad en producción, se recomienda configurar un volumen persistente compartido (NFS/EFS) o implementar un adaptador S3 compatible con la interfaz `IAudioStorageProvider`.
-3. **Validación Manual Requerida**: La validación automatizada es completa ($100\%$ pruebas exitosas). La validación litúrgica en vivo debe ser realizada por el equipo ministerial siguiendo la [`Guía de Validación Manual`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md).
+3. **Validación Manual Requerida**: La validación automatizada es completa ($100\%$ pruebas exitosas). La validación litúrgica en vivo debe ser realizada por el equipo ministerial siguiendo la [`Guía de Validación Manual`](./WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md).

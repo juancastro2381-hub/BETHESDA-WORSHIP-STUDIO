@@ -1083,5 +1083,207 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('29. should verify and accept audio when trusted checksum is supplied via X-Checksum-Sha256 HTTP header', async () => {
+    const audioBytes = new Uint8Array([82, 73, 70, 70, 11, 22, 33, 44]);
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+    const headerChecksum = await computeBinarySha256(audioBytes);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(new Blob([audioBytes], { type: 'audio/wav' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/wav',
+          'X-Checksum-Sha256': headerChecksum,
+        },
+      });
+    };
+
+    try {
+      manager = new BethesdaOfflineManager(storage);
+      manager.isOnline = () => true;
+
+      // Se omite expectedChecksumSha256 en llamada para verificar que lo toma del header HTTP
+      const result = await manager.downloadAudio(
+        'audio_header_01',
+        'https://api.bethesda.test/audio/audio_header_01/download',
+        'Pista con Header Checksum',
+        'user_david'
+      );
+
+      assert.strictEqual(result.success, true);
+      const record = await storage.getAudioRecord('audio_header_01');
+      assert.ok(record !== null);
+      assert.strictEqual(record?.metadata.checksumSha256, headerChecksum);
+      assert.strictEqual(record?.metadata.checksumVerifiedAuthoritatively, true);
+      assert.strictEqual(record?.metadata.status, 'AVAILABLE_OFFLINE');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('30. should reject download when X-Checksum-Sha256 HTTP header mismatches downloaded bytes', async () => {
+    const audioBytes = new Uint8Array([82, 73, 70, 70, 55, 66, 77, 88]);
+    const mismatchedHeaderChecksum = '0000000000000000000000000000000000000000000000000000000000000000';
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(new Blob([audioBytes], { type: 'audio/wav' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/wav',
+          'X-Checksum-Sha256': mismatchedHeaderChecksum,
+        },
+      });
+    };
+
+    try {
+      manager = new BethesdaOfflineManager(storage);
+      manager.isOnline = () => true;
+
+      const result = await manager.downloadAudio(
+        'audio_header_mismatch_01',
+        'https://api.bethesda.test/audio/audio_header_mismatch_01/download',
+        'Pista Mismatch Header'
+      );
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.status, 'FAILED');
+      assert.ok(result.error?.includes('Fallo de integridad criptográfica'));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('31. should handle absent checksum metadata gracefully (stores local checksum, flags non-authoritative)', async () => {
+    const audioBytes = new Uint8Array([82, 73, 70, 70, 99, 88, 77, 66]);
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+    const localCalculatedHash = await computeBinarySha256(audioBytes);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(new Blob([audioBytes], { type: 'audio/wav' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/wav',
+          // Sin X-Checksum-Sha256 ni ETag
+        },
+      });
+    };
+
+    try {
+      manager = new BethesdaOfflineManager(storage);
+      manager.isOnline = () => true;
+
+      const result = await manager.downloadAudio(
+        'audio_no_checksum_01',
+        'https://api.bethesda.test/audio/audio_no_checksum_01/download',
+        'Pista Sin Checksum'
+      );
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.status, 'AVAILABLE_OFFLINE');
+
+      const record = await storage.getAudioRecord('audio_no_checksum_01');
+      assert.ok(record !== null);
+      assert.strictEqual(record?.metadata.checksumSha256, localCalculatedHash);
+      assert.strictEqual(record?.metadata.checksumVerifiedAuthoritatively, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('32. should detect corrupted stored bytes in IndexedDB upon playback verification and mark record FAILED', async () => {
+    const realBytes = new Uint8Array([82, 73, 70, 70, 10, 20, 30, 40]);
+    const corruptedStoredBytes = new Uint8Array([82, 73, 70, 70, 99, 99, 99, 99]); // Bytes alterados en almacenamiento local
+
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+    const realChecksum = await computeBinarySha256(realBytes);
+
+    manager = new BethesdaOfflineManager(storage);
+
+    // Guardar registro inicialmente válido
+    const nowIso = new Date().toISOString();
+    await storage.saveAudioRecord({
+      id: 'audio_disk_corrupted_01',
+      metadata: {
+        id: 'audio_disk_corrupted_01',
+        resourceType: 'AUDIO',
+        title: 'Pista Local Corrupta',
+        versionNumber: 1,
+        ownerUserId: 'user_david',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: nowIso,
+        lastValidatedAt: nowIso,
+        byteSize: corruptedStoredBytes.length,
+        checksumSha256: realChecksum, // Hash original
+        checksumVerifiedAuthoritatively: true,
+      },
+      blob: new Blob([corruptedStoredBytes], { type: 'audio/wav' }),
+      mimeType: 'audio/wav',
+    });
+
+    // Intentar reproducir con verificación de integridad habilitada
+    await assert.rejects(
+      async () => {
+        await manager.getAudioObjectUrl('audio_disk_corrupted_01', true);
+      },
+      (err: any) => {
+        return (
+          err instanceof OfflineStorageError &&
+          err.code === 'CORRUPTED_RESOURCE' &&
+          err.message.includes('corrupta o fue modificada')
+        );
+      }
+    );
+
+    // Verificar que el registro en IndexedDB fue degradado a FAILED
+    const meta = await storage.getMetadata('audio_disk_corrupted_01');
+    assert.ok(meta !== null);
+    assert.strictEqual(meta?.status, 'FAILED');
+    assert.ok(meta?.errorMessage?.includes('Integridad local comprometida'));
+  });
+
+  it('33. should generate object URL for offline playback when stored bytes are valid and uncorrupted', async () => {
+    const validBytes = new Uint8Array([82, 73, 70, 70, 15, 25, 35, 45]);
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+    const validChecksum = await computeBinarySha256(validBytes);
+
+    manager = new BethesdaOfflineManager(storage);
+
+    // Mock createObjectURL if running in Node.js
+    const originalCreateObjectURL = (URL as any).createObjectURL;
+    (URL as any).createObjectURL = (blob: Blob) => `blob:bethesda-offline-test://${blob.size}`;
+
+    try {
+      const nowIso = new Date().toISOString();
+      await storage.saveAudioRecord({
+        id: 'audio_playback_valid_01',
+        metadata: {
+          id: 'audio_playback_valid_01',
+          resourceType: 'AUDIO',
+          title: 'Pista Válida para Playback',
+          versionNumber: 1,
+          ownerUserId: 'user_david',
+          status: 'AVAILABLE_OFFLINE',
+          downloadedAt: nowIso,
+          lastValidatedAt: nowIso,
+          byteSize: validBytes.length,
+          checksumSha256: validChecksum,
+          checksumVerifiedAuthoritatively: true,
+        },
+        blob: new Blob([validBytes], { type: 'audio/wav' }),
+        mimeType: 'audio/wav',
+      });
+
+      const objectUrl = await manager.getAudioObjectUrl('audio_playback_valid_01', true);
+      assert.ok(objectUrl !== null);
+      assert.ok(objectUrl.startsWith('blob:bethesda-offline-test://'));
+    } finally {
+      (URL as any).createObjectURL = originalCreateObjectURL;
+    }
+  });
 });
+
 

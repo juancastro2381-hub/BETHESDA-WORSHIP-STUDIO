@@ -22,7 +22,7 @@ export interface OfflineContextType {
   storageUsage: { usedBytes: number; quotaBytes?: number };
   downloadSong: (songId: string) => Promise<OfflineDownloadResult>;
   downloadSetlist: (setlistId: string, options?: DownloadSetlistOptions) => Promise<OfflineDownloadResult>;
-  downloadAudio: (audioId: string, url: string, title: string) => Promise<OfflineDownloadResult>;
+  downloadAudio: (audioId: string, url: string, title: string, expectedChecksumSha256?: string | null) => Promise<OfflineDownloadResult>;
   deleteLocalResource: (resourceId: string) => Promise<void>;
   refreshInventory: () => Promise<void>;
   getAudioUrl: (audioId: string) => Promise<string | null>;
@@ -120,8 +120,19 @@ export const OfflineProvider: React.FC<{ children: ReactNode }> = ({ children })
 
   // 5. Descargar Audio
   const downloadAudio = useCallback(
-    async (audioId: string, url: string, title: string): Promise<OfflineDownloadResult> => {
-      const result = await offlineManager.downloadAudio(audioId, url, title, user?.id);
+    async (
+      audioId: string,
+      url: string,
+      title: string,
+      expectedChecksumSha256?: string | null
+    ): Promise<OfflineDownloadResult> => {
+      const result = await offlineManager.downloadAudio(
+        audioId,
+        url,
+        title,
+        user?.id,
+        expectedChecksumSha256
+      );
       await refreshInventory();
       return result;
     },

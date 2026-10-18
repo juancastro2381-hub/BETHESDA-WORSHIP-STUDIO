@@ -46,6 +46,8 @@ export interface OfflineResourceMetadata {
   readonly byteSize: number;
   /** Hash criptográfico SHA-256 de integridad del payload */
   readonly checksumSha256: string;
+  /** Indica si el checksum fue verificado autoritativamente contra el servidor en la descarga */
+  readonly checksumVerifiedAuthoritatively?: boolean | undefined;
   /** Mensaje de error descriptivo en caso de estado FAILED */
   readonly errorMessage?: string | undefined;
   /** Para SETLIST: lista de IDs de canciones que componen el repertorio */

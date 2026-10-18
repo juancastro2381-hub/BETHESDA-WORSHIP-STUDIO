@@ -475,16 +475,29 @@ export class BethesdaOfflineManager {
         throw new OfflineStorageError('CORRUPTED_RESOURCE', 'El archivo de audio descargado está vacío (0 bytes).');
       }
 
-      // 4. Verificación de integridad binaria real sobre los bytes descargados (R1-P1)
+      // 4. Verificación de integridad binaria real sobre los bytes descargados (R1-P1 / R1-A)
       const buffer = await blob.arrayBuffer();
       const checksumSha256 = await computeBinarySha256(buffer);
 
-      // Si el servidor o llamador proveyó un checksum esperado confiable, validarlo estrictamente
-      if (expectedChecksumSha256 && expectedChecksumSha256.trim().length > 0) {
-        if (checksumSha256.toLowerCase() !== expectedChecksumSha256.trim().toLowerCase()) {
+      // Determinar checksum autoritativo del servidor:
+      // Prioridad 1: expectedChecksumSha256 explícito (proveniente del contrato API de metadatos o llamador)
+      // Prioridad 2: Cabecera HTTP X-Checksum-Sha256 o ETag de la respuesta de descarga
+      const headerChecksum = res.headers.get('x-checksum-sha256') || 
+                             res.headers.get('etag')?.replace(/^"|"$/g, '');
+      const authoritativeChecksum = (expectedChecksumSha256 && expectedChecksumSha256.trim().length > 0)
+        ? expectedChecksumSha256.trim()
+        : (headerChecksum && headerChecksum.trim().length > 0)
+          ? headerChecksum.trim()
+          : null;
+
+      const checksumVerifiedAuthoritatively = Boolean(authoritativeChecksum);
+
+      // Si existe un checksum autoritativo confiable (vía parámetro o cabecera), validarlo estrictamente
+      if (authoritativeChecksum) {
+        if (checksumSha256.toLowerCase() !== authoritativeChecksum.toLowerCase()) {
           throw new OfflineStorageError(
             'CORRUPTED_RESOURCE',
-            `Fallo de integridad criptográfica: el hash de los bytes descargados (${checksumSha256.slice(0, 12)}...) no coincide con el checksum esperado (${expectedChecksumSha256.slice(0, 12)}...).`
+            `Fallo de integridad criptográfica: el hash de los bytes descargados (${checksumSha256.slice(0, 12)}...) no coincide con el checksum esperado (${authoritativeChecksum.slice(0, 12)}...).`
           );
         }
       }
@@ -502,6 +515,7 @@ export class BethesdaOfflineManager {
         lastValidatedAt: nowIso,
         byteSize: blob.size,
         checksumSha256,
+        checksumVerifiedAuthoritatively,
         audioMimeType: blob.type || 'audio/mpeg',
       };
 

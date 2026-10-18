@@ -93,11 +93,11 @@ En estricta observancia de las reglas de operación obligatorias del Sprint R1:
 
 ## 4. Índice del Paquete Documental Entregado en `docs/reports/`
 
-1. [`docs/reports/WS_REMEDIATION_R1_PREFLIGHT.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_PREFLIGHT.md): Inspección exhaustiva pre-modificación contra el commit base, matriz de no conformidades y plan de ejecución P0/P1/P2.
-2. [`docs/reports/WS_REMEDIATION_R1_IMPLEMENTATION_REPORT.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_IMPLEMENTATION_REPORT.md): Informe técnico detallado de cada hallazgo remediado, causa raíz, archivos modificados, código de solución y consideraciones arquitectónicas.
-3. [`docs/reports/WS_REMEDIATION_R1_TEST_EVIDENCE.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_TEST_EVIDENCE.md): Registro exhaustivo de la verificación automatizada (608 pruebas ejecutadas, 100% de éxito, 0 errores TypeScript).
-4. [`docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md): Instructivo paso a paso para la validación funcional en escenario por el equipo ministerial de alabanza.
-5. [`docs/reports/WS_REMEDIATION_R1_FINAL_HANDOFF.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_FINAL_HANDOFF.md): Presente documento formal de transferencia técnica, resumen de riesgos y acta de entrega.
+1. [`docs/reports/WS_REMEDIATION_R1_PREFLIGHT.md`](./WS_REMEDIATION_R1_PREFLIGHT.md): Inspección exhaustiva pre-modificación contra el commit base, matriz de no conformidades y plan de ejecución P0/P1/P2.
+2. [`docs/reports/WS_REMEDIATION_R1_IMPLEMENTATION_REPORT.md`](./WS_REMEDIATION_R1_IMPLEMENTATION_REPORT.md): Informe técnico detallado de cada hallazgo remediado, causa raíz, archivos modificados, código de solución y consideraciones arquitectónicas.
+3. [`docs/reports/WS_REMEDIATION_R1_TEST_EVIDENCE.md`](./WS_REMEDIATION_R1_TEST_EVIDENCE.md): Registro exhaustivo de la verificación automatizada (608 pruebas ejecutadas, 100% de éxito, 0 errores TypeScript).
+4. [`docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md`](./WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md): Instructivo paso a paso para la validación funcional en escenario por el equipo ministerial de alabanza.
+5. [`docs/reports/WS_REMEDIATION_R1_FINAL_HANDOFF.md`](./WS_REMEDIATION_R1_FINAL_HANDOFF.md): Presente documento formal de transferencia técnica, resumen de riesgos y acta de entrega.
 
 ---
 
@@ -106,6 +106,6 @@ En estricta observancia de las reglas de operación obligatorias del Sprint R1:
 El Sprint de Remediación R1 ha subsanado la totalidad de las vulnerabilidades y limitaciones identificadas. El código es seguro, robusto, fuertemente tipado y respaldado por 608 pruebas automatizadas.
 
 **Acciones Recomendadas para el Propietario del Proyecto**:
-1. Ejecutar el protocolo descrito en la [`Guía de Validación Manual`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md) en un entorno de ensayo litúrgico.
+1. Ejecutar el protocolo descrito en la [`Guía de Validación Manual`](./WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md) en un entorno de ensayo litúrgico.
 2. Completar la tabla de sign-off ministerial tras la comprobación en atriles físicos.
 3. Una vez aprobada la validación manual, proceder con el versionado formal (`git add`, `git commit` y etiquetado de versión) bajo el gobierno del Propietario.

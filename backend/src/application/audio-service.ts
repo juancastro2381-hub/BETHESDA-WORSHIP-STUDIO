@@ -32,6 +32,7 @@ export interface AudioDownloadResponse {
   readonly filename: string;
   readonly mimeType: string;
   readonly fileSizeBytes: number;
+  readonly checksumSha256: string;
 }
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -358,6 +359,7 @@ export class AudioService {
       filename: asset.filename,
       mimeType: asset.mimeType,
       fileSizeBytes: asset.fileSizeBytes,
+      checksumSha256: asset.checksumSha256,
     };
   }
 

@@ -34,6 +34,7 @@ export interface MultitrackSession {
   durationSeconds: number;
   bpm: number;
   tracks: MultitrackTrack[];
+  createdByUserId?: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -12,6 +12,7 @@ export interface DownloadActionButtonProps {
   readonly resourceType: OfflineResourceType;
   readonly title: string;
   readonly audioUrl?: string;
+  readonly expectedChecksum?: string | null;
   readonly onDownloaded?: () => void;
   readonly className?: string;
   readonly compact?: boolean;
@@ -22,6 +23,7 @@ export const DownloadActionButton: React.FC<DownloadActionButtonProps> = ({
   resourceType,
   title,
   audioUrl,
+  expectedChecksum,
   onDownloaded,
   className = '',
   compact = false,
@@ -77,8 +79,8 @@ export const DownloadActionButton: React.FC<DownloadActionButtonProps> = ({
         if (!res.success) {
           setErrorMsg(res.error ?? 'Fallo al descargar repertorio.');
         }
-      } else if (resourceType === 'AUDIO' && audioUrl) {
-        const res = await downloadAudio(resourceId, audioUrl, title);
+      } else if (resourceType === 'AUDIO') {
+        const res = await downloadAudio(resourceId, audioUrl ?? '', title, expectedChecksum);
         if (!res.success) {
           setErrorMsg(res.error ?? 'Fallo al descargar audio.');
         }
@@ -93,22 +95,6 @@ export const DownloadActionButton: React.FC<DownloadActionButtonProps> = ({
       setLoading(false);
     }
   };
-
-  // En caso de audio, marcar explícitamente como bloqueado (Resultado C de auditoría)
-  if (resourceType === 'AUDIO') {
-    return (
-      <button
-        type="button"
-        className={`btn-offline-action audio-blocked ${className}`}
-        disabled
-        title="Descarga de audio no disponible: falta infraestructura de backend (bloqueado según Resultado C de auditoría)."
-        id={`btn-offline-${resourceId}`}
-      >
-        <span aria-hidden="true">🚫</span>
-        {!compact && ' Audio Bloqueado'}
-      </button>
-    );
-  }
 
   // Renderizado según estado verificado
   if (loading) {

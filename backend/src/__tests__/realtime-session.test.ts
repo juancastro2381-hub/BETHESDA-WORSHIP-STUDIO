@@ -417,5 +417,114 @@ describe('Workstream C — Phase 3B Realtime Liturgical Flow Suite', () => {
 
     assert.equal(res.statusCode, 401, 'Debe rechazar conexión anónima a SSE');
   });
+
+  it('15. should immediately block privileged operations when user role is downgraded in DB despite having unexpired JWT token (R1-A Freshness)', async () => {
+    // 1. Crear director de alabanza y generar su token JWT
+    const downgradedUser = await userRepo.create({
+      email: `downgrade_test_${Date.now()}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Director',
+      lastName: 'Degradado',
+      role: 'WORSHIP_LEADER',
+    });
+    createdUserIds.add(downgradedUser.id);
+
+    const staleLeaderToken = tokenService.signAccessToken({
+      id: downgradedUser.id,
+      email: downgradedUser.email,
+      role: 'WORSHIP_LEADER', // El token declara que es WORSHIP_LEADER
+    }).token;
+
+    // 2. Administrador degrada su rol en PostgreSQL a VIEWER
+    await userRepo.updateRole(downgradedUser.id, 'VIEWER');
+
+    // 3. El usuario intenta crear una sesión con su token anterior vigente: debe ser rechazado inmediatamente
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/realtime/sessions',
+      headers: {
+        authorization: `Bearer ${staleLeaderToken}`,
+      },
+      payload: {
+        setlistId: testSetlist.id,
+        initialItemIndex: 0,
+      },
+    });
+
+    assert.equal(res.statusCode, 403, 'Rol degradado en BD debe bloquear operaciones privilegiadas');
+    const body = JSON.parse(res.payload);
+    assert.ok(
+      body.error.message.includes('privilegios suficientes') ||
+      body.error.message.includes('denegada')
+    );
+  });
+
+  it('16. should immediately block all realtime operations when user account is SUSPENDED or LOCKED in DB (R1-A Freshness)', async () => {
+    // 1. Crear usuario activo
+    const suspendedUser = await userRepo.create({
+      email: `suspended_test_${Date.now()}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Músico',
+      lastName: 'Suspendido',
+      role: 'MUSICIAN',
+    });
+    createdUserIds.add(suspendedUser.id);
+
+    const token = tokenService.signAccessToken({
+      id: suspendedUser.id,
+      email: suspendedUser.email,
+      role: 'MUSICIAN',
+    }).token;
+
+    // 2. Suspender cuenta en la base de datos
+    await userRepo.updateStatus(suspendedUser.id, 'SUSPENDED');
+
+    // 3. Intentar unirse o solicitar ticket para una sesión
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/ticket`,
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    });
+
+    assert.equal(res.statusCode, 403, 'Cuenta suspendida debe ser bloqueada inmediatamente');
+    const body = JSON.parse(res.payload);
+    assert.ok(body.error.message.includes('SUSPENDED'));
+  });
+
+  it('17. should reject session creation for non-existent setlist (404 Not Found)', async () => {
+    const nonExistentSetlistId = crypto.randomUUID();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/realtime/sessions',
+      headers: {
+        authorization: `Bearer ${leaderToken}`,
+      },
+      payload: {
+        setlistId: nonExistentSetlistId,
+        initialItemIndex: 0,
+      },
+    });
+
+    assert.equal(res.statusCode, 404, 'Setlist inexistente debe retornar 404');
+    const body = JSON.parse(res.payload);
+    assert.ok(body.error.message.includes('Setlist') || body.error.message.includes('no encontrado'));
+  });
+
+  it('18. should reject cross-scope ticket issuance or access to non-existent session (404 Not Found)', async () => {
+    const nonExistentSessionId = crypto.randomUUID();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/realtime/sessions/${nonExistentSessionId}/ticket`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+      },
+    });
+
+    assert.equal(res.statusCode, 404, 'Sesión no existente debe retornar 404 Not Found');
+  });
 });
 

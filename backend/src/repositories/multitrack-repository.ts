@@ -163,6 +163,7 @@ export class DrizzleMultitrackRepository implements IMultitrackRepository {
       durationSeconds: session.durationSeconds,
       bpm: session.bpm,
       tracks: tracks.map((t) => this.mapTrackToDomain(t)),
+      createdByUserId: session.createdByUserId,
       createdAt: session.createdAt.toISOString(),
       updatedAt: session.updatedAt.toISOString(),
     };

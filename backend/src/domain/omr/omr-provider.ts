@@ -32,6 +32,10 @@ export interface StandardOmrProviderOptions {
    * En producción debe permanecer false a menos que se configure un motor OMR real.
    */
   readonly enableTestFixture?: boolean;
+  /**
+   * Proveedor o adaptador de motor OMR real (ej. Audiveris CLI, servicio Cloud OMR).
+   */
+  readonly realEngineProvider?: (input: OmrRecognitionInput) => Promise<OmrProposal>;
 }
 
 /**
@@ -120,105 +124,110 @@ export class StandardOmrProvider implements IOmrProvider {
     const hash = crypto.createHash('sha256').update(input.buffer).digest('hex');
     const proposalId = crypto.randomUUID();
 
-    // 5. Verificación de motor OMR real configurado en infraestructura
-    const isEngineActive =
-      process.env.OMR_ENGINE_ENABLED === 'true' ||
-      this.options?.enableTestFixture === true;
+    // 5. Invocación de motor real si existe un adaptador configurado
+    if (this.options?.realEngineProvider) {
+      return await this.options.realEngineProvider(input);
+    }
 
-    if (!isEngineActive) {
-      // Estado explícito y verídico: el motor no está configurado (R1-P1).
-      // CERO invención de notas, acordes, métricas o confianzas simuladas.
+    // 6. Si se solicita explícitamente el fixture de prueba en contextos automatizados de test (R1-A)
+    const isExplicitTestFixture = this.options?.enableTestFixture === true;
+    if (isExplicitTestFixture) {
+      const detectedMeasures = [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          keySignature: 'G',
+          chordsDetected: [{ chord: 'G', beat: 1, confidence: 0.94 }],
+          notesDetected: [
+            { step: 'G', octave: 4, duration: 'half', confidence: 0.92 },
+            { step: 'B', octave: 4, duration: 'half', confidence: 0.89 },
+          ],
+          lyricsDetected: [{ text: 'Gra-', confidence: 0.88 }],
+          measureConfidence: 0.91,
+        },
+        {
+          measureNumber: 2,
+          chordsDetected: [{ chord: 'C', beat: 1, confidence: 0.91 }],
+          notesDetected: [
+            { step: 'C', octave: 5, duration: 'whole', confidence: 0.93 },
+          ],
+          lyricsDetected: [{ text: 'cia', confidence: 0.85 }],
+          measureConfidence: 0.89,
+        },
+        {
+          measureNumber: 3,
+          chordsDetected: [{ chord: 'Em', beat: 1, confidence: 0.86 }],
+          notesDetected: [
+            { step: 'E', octave: 4, duration: 'quarter', confidence: 0.84 },
+            { step: 'G', octave: 4, duration: 'quarter', confidence: 0.82 },
+            { step: 'B', octave: 4, duration: 'half', confidence: 0.85 },
+          ],
+          lyricsDetected: [{ text: 'su-', confidence: 0.79 }],
+          measureConfidence: 0.84,
+        },
+        {
+          measureNumber: 4,
+          chordsDetected: [{ chord: 'D', beat: 1, confidence: 0.89 }],
+          notesDetected: [
+            { step: 'D', octave: 4, duration: 'whole', confidence: 0.88 },
+          ],
+          lyricsDetected: [{ text: 'blime', confidence: 0.82 }],
+          measureConfidence: 0.86,
+        },
+      ];
+
+      const unrecognizedRegions = [
+        {
+          page: 1,
+          boundingBox: [120, 450, 80, 40] as [number, number, number, number],
+          reason: 'Mancha de tinta o resolución baja en el tercer sistema; compás 5 omitido de la propuesta para revisión humana.',
+        },
+      ];
+
       return {
         proposalId,
         sourceFilename: input.filename,
         sourceHash: hash,
-        detectedTitle: null,
+        detectedTitle: 'Gracia Sublime Es (Propuesta Reconocida)',
         detectedArtist: null,
-        detectedKey: null,
-        detectedBpm: null,
-        detectedTimeSignature: null,
-        overallConfidence: 0.0,
+        detectedKey: 'G',
+        detectedBpm: 104,
+        detectedTimeSignature: '4/4',
+        overallConfidence: 0.875,
         isAiDraft: true,
         reviewStatus: 'PENDING_REVIEW',
-        measures: [], // Cero notas inventadas
-        unrecognizedRegions: [
-          {
-            page: 1,
-            reason:
-              'Motor de reconocimiento OMR no configurado en este servidor. Se requiere instalar y configurar un motor OMR real (ej. Audiveris o Cloud OMR) para extraer partituras automáticamente.',
-          },
-        ],
+        measures: detectedMeasures,
+        unrecognizedRegions,
         createdAt: new Date().toISOString(),
       };
     }
 
-    // Análisis de compases para entorno de prueba explícitamente autorizado
-    const detectedMeasures = [
-      {
-        measureNumber: 1,
-        timeSignature: '4/4',
-        keySignature: 'G',
-        chordsDetected: [{ chord: 'G', beat: 1, confidence: 0.94 }],
-        notesDetected: [
-          { step: 'G', octave: 4, duration: 'half', confidence: 0.92 },
-          { step: 'B', octave: 4, duration: 'half', confidence: 0.89 },
-        ],
-        lyricsDetected: [{ text: 'Gra-', confidence: 0.88 }],
-        measureConfidence: 0.91,
-      },
-      {
-        measureNumber: 2,
-        chordsDetected: [{ chord: 'C', beat: 1, confidence: 0.91 }],
-        notesDetected: [
-          { step: 'C', octave: 5, duration: 'whole', confidence: 0.93 },
-        ],
-        lyricsDetected: [{ text: 'cia', confidence: 0.85 }],
-        measureConfidence: 0.89,
-      },
-      {
-        measureNumber: 3,
-        chordsDetected: [{ chord: 'Em', beat: 1, confidence: 0.86 }],
-        notesDetected: [
-          { step: 'E', octave: 4, duration: 'quarter', confidence: 0.84 },
-          { step: 'G', octave: 4, duration: 'quarter', confidence: 0.82 },
-          { step: 'B', octave: 4, duration: 'half', confidence: 0.85 },
-        ],
-        lyricsDetected: [{ text: 'su-', confidence: 0.79 }],
-        measureConfidence: 0.84,
-      },
-      {
-        measureNumber: 4,
-        chordsDetected: [{ chord: 'D', beat: 1, confidence: 0.89 }],
-        notesDetected: [
-          { step: 'D', octave: 4, duration: 'whole', confidence: 0.88 },
-        ],
-        lyricsDetected: [{ text: 'blime', confidence: 0.82 }],
-        measureConfidence: 0.86,
-      },
-    ];
-
-    const unrecognizedRegions = [
-      {
-        page: 1,
-        boundingBox: [120, 450, 80, 40] as [number, number, number, number],
-        reason: 'Mancha de tinta o resolución baja en el tercer sistema; compás 5 omitido de la propuesta para revisión humana.',
-      },
-    ];
+    // 7. En producción o sin motor real (incluso si OMR_ENGINE_ENABLED=true):
+    // CERO invención de compases, notas o confianzas simuladas. Retornar estado explícito no disponible (R1-A).
+    const isEnvFlagEnabled = process.env.OMR_ENGINE_ENABLED === 'true';
+    const reasonMessage = isEnvFlagEnabled
+      ? 'Variable OMR_ENGINE_ENABLED activada, pero no hay un motor OMR ejecutable/servicio real (ej. Audiveris o Cloud OMR) integrado en este entorno. Se devuelven 0 compases para garantizar cero invención de notas.'
+      : 'Motor de reconocimiento OMR no configurado en este servidor. Se requiere instalar y configurar un motor OMR real para extraer partituras automáticamente.';
 
     return {
       proposalId,
       sourceFilename: input.filename,
       sourceHash: hash,
-      detectedTitle: 'Gracia Sublime Es (Propuesta Reconocida)',
+      detectedTitle: null,
       detectedArtist: null,
-      detectedKey: 'G',
-      detectedBpm: 104,
-      detectedTimeSignature: '4/4',
-      overallConfidence: 0.875,
+      detectedKey: null,
+      detectedBpm: null,
+      detectedTimeSignature: null,
+      overallConfidence: 0.0,
       isAiDraft: true,
       reviewStatus: 'PENDING_REVIEW',
-      measures: detectedMeasures,
-      unrecognizedRegions,
+      measures: [], // Cero notas inventadas
+      unrecognizedRegions: [
+        {
+          page: 1,
+          reason: reasonMessage,
+        },
+      ],
       createdAt: new Date().toISOString(),
     };
   }

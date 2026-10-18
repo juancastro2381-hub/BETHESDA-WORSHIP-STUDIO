@@ -166,4 +166,48 @@ describe('WP-04 — Session Isolation & Logout Security Suite', () => {
     const purgeResult = await manager.purgeSessionData('any_user');
     assert.strictEqual(purgeResult.success, true);
   });
+
+  it('6. should recover from pending cleanup tombstone during storage init() (Decision U-05)', async () => {
+    // 1. Save data for user_charlie
+    await storage.saveMetadata({
+      id: 'song_charlie_abandoned',
+      resourceType: 'SONG',
+      title: 'Charlie Song',
+      versionNumber: 1,
+      ownerUserId: 'user_charlie',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: new Date().toISOString(),
+      lastValidatedAt: new Date().toISOString(),
+      byteSize: 500,
+      checksumSha256: 'sha_charlie',
+    });
+
+    // 2. Simulate incomplete cleanup by planting the tombstone key in localStorage
+    const mockStorageMap = new Map<string, string>();
+    mockStorageMap.set(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY, 'user_charlie');
+    const originalLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k: string) => mockStorageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => mockStorageMap.set(k, v),
+      removeItem: (k: string) => mockStorageMap.delete(k),
+      clear: () => mockStorageMap.clear(),
+      key: () => null,
+      length: mockStorageMap.size,
+    } as any;
+
+    try {
+      // 3. Re-initialize storage (as happens on next application boot)
+      const bootStorage = new BethesdaOfflineStorage();
+      await bootStorage.init();
+
+      // 4. Verify user_charlie data was purged on boot
+      const itemCheck = await bootStorage.getMetadata('song_charlie_abandoned');
+      assert.strictEqual(itemCheck, null, 'Charlie abandoned data must be purged on boot');
+
+      // 5. Verify tombstone was cleared
+      assert.strictEqual(mockStorageMap.has(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY), false);
+    } finally {
+      globalThis.localStorage = originalLocalStorage;
+    }
+  });
 });

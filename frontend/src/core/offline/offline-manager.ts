@@ -107,6 +107,30 @@ export class BethesdaOfflineManager {
     }
   }
 
+  /**
+   * Valida la cuota de almacenamiento disponible antes de autorizar una descarga (Decisión U-03).
+   * Si navigator.storage.estimate() no está disponible o falla, opera con tolerancia sin bloquear.
+   * Si la cuota proyectada supera el 85% (MAX_STORAGE_QUOTA_USAGE_RATIO), rechaza la operación.
+   */
+  public async assertStorageQuotaAvailable(projectedBytes: number = 0): Promise<void> {
+    try {
+      const usage = await this.storage.getStorageUsage();
+      if (usage.quotaBytes && usage.quotaBytes > 0) {
+        const totalProjected = usage.usedBytes + projectedBytes;
+        const ratio = totalProjected / usage.quotaBytes;
+        if (ratio >= OFFLINE_POLICIES.MAX_STORAGE_QUOTA_USAGE_RATIO) {
+          throw new OfflineStorageError(
+            'STORAGE_QUOTA_EXCEEDED',
+            `Cuota de almacenamiento casi agotada (${(ratio * 100).toFixed(1)}% utilizado). Límite de seguridad: 85%. Libere espacio antes de descargar nuevos recursos.`
+          );
+        }
+      }
+    } catch (err) {
+      if (err instanceof OfflineStorageError) throw err;
+      // Tolerancia: si navigator.storage.estimate() falla o no está soportado, permitir descarga
+    }
+  }
+
   // ==========================================================================
   // DESCARGA Y VALIDACIÓN DE CANCIONES (SONGS)
   // ==========================================================================
@@ -122,6 +146,9 @@ export class BethesdaOfflineManager {
     this.activeAbortControllers.set(songId, abortController);
 
     try {
+      // 0. Validar cuota antes de iniciar
+      await this.assertStorageQuotaAvailable(50 * 1024);
+
       this.activeProgress.set(songId, {
         resourceId: songId,
         resourceType: 'SONG',
@@ -252,6 +279,9 @@ export class BethesdaOfflineManager {
     this.activeAbortControllers.set(setlistId, abortController);
 
     try {
+      // 0. Validar cuota antes de iniciar
+      await this.assertStorageQuotaAvailable(100 * 1024);
+
       this.activeProgress.set(setlistId, {
         resourceId: setlistId,
         resourceType: 'SETLIST',
@@ -360,6 +390,9 @@ export class BethesdaOfflineManager {
     this.activeAbortControllers.set(audioId, abortController);
 
     try {
+      // 0. Validar cuota de almacenamiento disponible antes de iniciar
+      await this.assertStorageQuotaAvailable(5 * 1024 * 1024);
+
       this.activeProgress.set(audioId, {
         resourceId: audioId,
         resourceType: 'AUDIO',
@@ -378,9 +411,18 @@ export class BethesdaOfflineManager {
         throw new OfflineStorageError('NETWORK_ERROR', `Error al descargar audio: HTTP ${res.status}`);
       }
 
+      // 2. Validación de tipo MIME: debe ser audio/* (rechaza páginas HTML de error o JSON de fallo)
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.toLowerCase().startsWith('audio/')) {
+        throw new OfflineStorageError(
+          'CORRUPTED_RESOURCE',
+          `El tipo de contenido retornado ('${contentType}') no es un formato de audio válido (ej. audio/mpeg, audio/wav).`
+        );
+      }
+
       const blob = await res.blob();
 
-      // 2. Validación de tamaño (Decisión U-03: Max 50MB)
+      // 3. Validación de tamaño estricta contra bytes reales descargados (Decisión U-03: Max 50MB)
       if (blob.size > OFFLINE_POLICIES.MAX_SINGLE_RESOURCE_SIZE_BYTES) {
         throw new OfflineStorageError(
           'STORAGE_QUOTA_EXCEEDED',
@@ -389,7 +431,7 @@ export class BethesdaOfflineManager {
       }
 
       if (blob.size === 0) {
-        throw new OfflineStorageError('CORRUPTED_RESOURCE', 'El archivo de audio descargado está vacío.');
+        throw new OfflineStorageError('CORRUPTED_RESOURCE', 'El archivo de audio descargado está vacío (0 bytes).');
       }
 
       const nowIso = new Date().toISOString();
@@ -459,11 +501,21 @@ export class BethesdaOfflineManager {
 
   /**
    * Genera una URL de objeto (blob URL) para reproducir localmente un audio sin conexión.
+   * Si la autorización expiró y el cliente está offline, bloquea la reproducción (Decisión U-01).
    */
   public async getAudioObjectUrl(audioId: string): Promise<string | null> {
     const record = await this.storage.getAudioRecord(audioId);
     if (!record || !record.blob) {
       return null;
+    }
+
+    if (this.isAuthorizationExpired(record.metadata)) {
+      if (!this.isOnline()) {
+        throw new OfflineStorageError(
+          'UNAUTHORIZED_SESSION',
+          `La autorización sin conexión de la pista de audio '${record.metadata.title}' ha expirado (límite de 7 días sin revalidar con el servidor).`
+        );
+      }
     }
 
     if (typeof URL !== 'undefined' && URL.createObjectURL) {
@@ -564,55 +616,138 @@ export class BethesdaOfflineManager {
   // ==========================================================================
 
   /**
-   * Evalúa si la autorización offline ha expirado según la política de 7 días (Decisión U-01).
+   * Evalúa si la autorización offline ha expirado según la política aprobada de 7 días (Decisión U-01).
+   * REGLA DE SEGURIDAD AUDITADA:
+   * 1. Utiliza estrictamente la fecha de la última revalidación exitosa con el servidor (lastValidatedAt),
+   *    recurriendo a downloadedAt solo si lastValidatedAt no está definido.
+   * 2. Calcula el límite exacto de 7 días (7 * 24 * 60 * 60 * 1000 ms).
+   * 3. Detecta anomalías o atrasos deliberados del reloj del cliente (> 5 minutos en el pasado)
+   *    marcando el recurso como expirado por seguridad.
    */
   public isAuthorizationExpired(metadata: OfflineResourceMetadata): boolean {
-    if (!metadata.downloadedAt) return false;
-    const downloadedTime = new Date(metadata.downloadedAt).getTime();
+    const authTimestamp = metadata.lastValidatedAt || metadata.downloadedAt;
+    if (!authTimestamp) return true;
+
+    const authTime = new Date(authTimestamp).getTime();
+    if (Number.isNaN(authTime)) return true;
+
     const now = Date.now();
-    const daysElapsed = (now - downloadedTime) / (1000 * 60 * 60 * 24);
-    return daysElapsed > OFFLINE_POLICIES.MAX_OFFLINE_DAYS_GRACE_PERIOD;
+    const elapsedMs = now - authTime;
+
+    // Protección contra alteración o atraso malicioso del reloj del cliente (> 5 minutos en el pasado)
+    if (elapsedMs < -300000) {
+      console.warn(`⚠️ Posible alteración de reloj detectada para el recurso '${metadata.id}'. Marcando como expirado.`);
+      return true;
+    }
+
+    const gracePeriodMs = OFFLINE_POLICIES.MAX_OFFLINE_DAYS_GRACE_PERIOD * 24 * 60 * 60 * 1000;
+    return elapsedMs >= gracePeriodMs;
+  }
+
+  /**
+   * Obtiene la carga útil de una canción garantizando la vigencia de autorización offline.
+   * Si la autorización expiró y el cliente está offline, BLOQUEA la lectura arrojando UNAUTHORIZED_SESSION.
+   * Si está en línea, revalida la autorización contra el servidor.
+   */
+  public async getAuthorizedSongPayload(songId: string): Promise<OfflineSongPayload | null> {
+    const payload = await this.storage.getSongPayload(songId);
+    if (!payload) return null;
+
+    if (this.isAuthorizationExpired(payload.metadata)) {
+      if (!this.isOnline()) {
+        throw new OfflineStorageError(
+          'UNAUTHORIZED_SESSION',
+          `La autorización sin conexión de la obra '${payload.metadata.title}' ha expirado tras superar el período de gracia de 7 días sin revalidar con el servidor. Debe conectarse a internet para revalidar el acceso.`
+        );
+      }
+
+      // Si está en línea, revalidar contra el servidor
+      try {
+        const response = await this.apiClient.getSong(songId);
+        const nowIso = new Date().toISOString();
+        const updatedMeta: OfflineResourceMetadata = {
+          ...payload.metadata,
+          lastValidatedAt: nowIso,
+          versionNumber: response.version.versionNumber,
+          status: 'AVAILABLE_OFFLINE',
+        };
+        await this.storage.saveMetadata(updatedMeta);
+        return {
+          ...payload,
+          metadata: updatedMeta,
+        };
+      } catch (err: any) {
+        if (err?.statusCode === 401 || err?.statusCode === 403) {
+          await this.storage.deleteResource(songId);
+          throw new OfflineStorageError(
+            'UNAUTHORIZED_SESSION',
+            `El acceso a la canción '${payload.metadata.title}' fue revocado por el servidor.`
+          );
+        }
+        throw new OfflineStorageError(
+          'UNAUTHORIZED_SESSION',
+          `No se pudo revalidar la autorización de '${payload.metadata.title}' con el servidor.`
+        );
+      }
+    }
+
+    return payload;
   }
 
   /**
    * Compara los recursos locales con el catálogo online del servidor para detectar versiones más recientes.
    * INVARIANTE: Preserva la copia local válida anterior hasta que se complete una actualización exitosa.
+   * Actualiza lastValidatedAt solo tras una confirmación exitosa del servidor.
+   * Si el servidor responde 401/403 o el recurso fue retirado, revoca la autorización local.
    */
-  public async checkForUpdates(): Promise<{ updatedCount: number }> {
+  public async checkForUpdates(): Promise<{ updatedCount: number; revokedCount: number }> {
     if (!this.isOnline()) {
-      return { updatedCount: 0 };
+      return { updatedCount: 0, revokedCount: 0 };
     }
 
     let updatedCount = 0;
+    let revokedCount = 0;
     try {
       const serverSongs = await this.apiClient.listSongs({ limit: 100 });
       const localSongs = (await this.storage.listMetadata()).filter((m) => m.resourceType === 'SONG');
 
       const serverMap = new Map<string, number>();
       for (const s of serverSongs.items) {
-        // En BackendSongItem, la versión actual es un identificador o número
         serverMap.set(s.id, 1);
       }
 
       for (const local of localSongs) {
         if (serverMap.has(local.id)) {
-          // Si el servidor reporta una versión más alta, marcar UPDATE_AVAILABLE
-          // Por ahora, si existe en el servidor se mantiene disponible o se valida
+          // Revalidación exitosa con el servidor: actualizar lastValidatedAt
           const meta = await this.storage.getMetadata(local.id);
           if (meta && meta.status === 'AVAILABLE_OFFLINE') {
-            // Actualizar lastValidatedAt
             await this.storage.saveMetadata({
               ...meta,
               lastValidatedAt: new Date().toISOString(),
             });
           }
+        } else {
+          // El recurso ya no está en el catálogo del servidor (acceso revocado o eliminado)
+          revokedCount++;
+          const meta = await this.storage.getMetadata(local.id);
+          if (meta) {
+            await this.storage.saveMetadata({
+              ...meta,
+              status: 'FAILED',
+              errorMessage: 'Autorización revocada o recurso retirado del catálogo del servidor.',
+            });
+          }
         }
       }
-    } catch (err) {
-      console.warn('⚠️ No se pudo comprobar actualizaciones:', err);
+    } catch (err: any) {
+      if (err?.statusCode === 401 || err?.statusCode === 403) {
+        console.warn('⚠️ Sesión no autorizada en el servidor durante la comprobación de actualizaciones.');
+      } else {
+        console.warn('⚠️ No se pudo comprobar actualizaciones:', err);
+      }
     }
 
-    return { updatedCount };
+    return { updatedCount, revokedCount };
   }
 
   // ==========================================================================

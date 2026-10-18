@@ -94,6 +94,22 @@ export const DownloadActionButton: React.FC<DownloadActionButtonProps> = ({
     }
   };
 
+  // En caso de audio, marcar explícitamente como bloqueado (Resultado C de auditoría)
+  if (resourceType === 'AUDIO') {
+    return (
+      <button
+        type="button"
+        className={`btn-offline-action audio-blocked ${className}`}
+        disabled
+        title="Descarga de audio no disponible: falta infraestructura de backend (bloqueado según Resultado C de auditoría)."
+        id={`btn-offline-${resourceId}`}
+      >
+        <span aria-hidden="true">🚫</span>
+        {!compact && ' Audio Bloqueado'}
+      </button>
+    );
+  }
+
   // Renderizado según estado verificado
   if (loading) {
     return (

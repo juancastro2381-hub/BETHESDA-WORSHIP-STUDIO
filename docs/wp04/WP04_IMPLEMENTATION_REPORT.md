@@ -1,19 +1,22 @@
 # Bethesda Worship Studio — WP-04 Implementation Report: PWA Offline
 
 **Document Identifier:** `WP04_IMPLEMENTATION_REPORT.md`  
-**Version:** 1.0.0  
-**Date:** 2026-10-16  
-**Status:** IMPLEMENTED & VERIFIED (Pending Project Owner Review)  
+**Version:** 1.1.0 (Audited & Reconciled)  
+**Date:** 2026-10-18  
+**Status:** WP-04 CORE COMPLETE — AUDIO BLOCKED  
 **Governance Scope:** WP-04 (PWA Offline) Authorized Only. WP-05, Phase 3B, and Phase 3C remain Strictly Unauthorized.  
 **Target Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO`  
-**Base Commit:** `47a764b2142ed0f75bd3d1a1bf36d15c6cc82cb5`  
+**Base Implementation Commit:** `47a764b2142ed0f75bd3d1a1bf36d15c6cc82cb5`  
 
 ---
 
 ## 1. Executive Summary
-This report documents the completed implementation of **Work Package 04 (WP-04) — PWA Offline** for Bethesda Worship Studio, strictly complying with the approved technical baseline (`BETHESDA_WORSHIP_STUDIO_WP04_PWA_OFFLINE_TECHNICAL_SPEC_REVIEW.md`, v0.1) and all governance constraints established by the Project Owner.
+This report documents the verified implementation and closure audit of **Work Package 04 (WP-04) — PWA Offline** for Bethesda Worship Studio, strictly complying with the approved technical baseline (`BETHESDA_WORSHIP_STUDIO_WP04_PWA_OFFLINE_TECHNICAL_SPEC_REVIEW.md`, v0.1) and all governance constraints established by the Project Owner.
 
-WP-04 transforms Bethesda Worship Studio into an installable, resilient Progressive Web Application (PWA) capable of loading its minimal application shell, inspecting downloaded songs, chord sheets, interactive notation/scores, setlists, and guide audio tracks completely offline without an active internet connection. Offline operation is strictly **read-only**, enforcing total canonical immutability without mutation replay queues. Session isolation and device-sharing protection ensure that previous sessions' private liturgical data is purged and invalidated upon logout.
+WP-04 delivers an installable, resilient Progressive Web Application (PWA) capable of loading its minimal application shell, inspecting downloaded songs, chord sheets, interactive notation/scores, and setlists completely offline without an active internet connection. Offline operation is strictly **read-only**, enforcing total canonical immutability without mutation replay queues. Session isolation and device-sharing protection ensure that previous sessions' private liturgical data is purged and invalidated upon logout.
+
+**Audio Delivery Finding (Outcome C — No Real Source Exists):**  
+A comprehensive repository audit confirmed that the current Fastify backend contains **0 audio models, 0 database tables, 0 audio delivery/streaming routes, and no audio storage provider**. In the frontend UI, audio downloads have been explicitly disabled and marked as blocked (`Audio Bloqueado`). The core offline subsystem for songs and setlists is complete and fully verified, while audio delivery is honestly reported as **BLOCKED** pending future backend audio infrastructure.
 
 ---
 
@@ -35,10 +38,17 @@ WP-04 transforms Bethesda Worship Studio into an installable, resilient Progress
   3. `setlist_payloads`: Stores `OfflineSetlistPayload` containing `FrontendSetlistDetail` with all ordered items (songs and liturgical service moments).
   4. `audio_blobs`: Stores `OfflineAudioRecord` containing binary audio `Blob` data and MIME types.
 - **Node.js Memory Fallback:** Includes a transparent in-memory Map fallback used when running within Node.js native test environments where browser `window.indexedDB` is absent.
+- **Tombstone Boot Recovery (`recoverPendingCleanupTombstone()`):**
+  - Executed on every `storage.init()` call.
+  - Inspects `localStorage.getItem('bethesda_offline_purge_pending')`. If a pending purge from an interrupted previous logout is detected, storage immediately executes a preventive wipe of that user's data before granting any access, resolving the key once verified clean.
 
 ### 2.3 Central Offline Orchestrator: `BethesdaOfflineManager` (`offline-manager.ts`)
 - **Connectivity Detection (`isOnline()`):** Monitors `navigator.onLine` and emits events for transitions.
 - **Read-Only Mutation Guard (`assertCanMutateServer()`):** Throws `OfflineStorageError('UNAUTHORIZED_SESSION')` if a user attempts a server mutation while offline, preventing accidental data loss or unauthorized mutation attempts.
+- **Storage Quota Pre-Check (`assertStorageQuotaAvailable()`):**
+  - Verifies available browser storage quota via `navigator.storage.estimate()` before authorizing downloads.
+  - Safely falls back if `estimate()` is unavailable or rejects.
+  - Rejects with `STORAGE_QUOTA_EXCEEDED` if projected utilization exceeds 85% (`MAX_STORAGE_QUOTA_USAGE_RATIO = 0.85`).
 - **Song Download & Integrity Validation (`downloadSong()`):**
   - Fetches the song and its current version from the API.
   - Validates the payload structure against `CanonicalModelValidator.validate()`. Rejects corrupt or structurally malformed data immediately.
@@ -49,28 +59,27 @@ WP-04 transforms Bethesda Worship Studio into an installable, resilient Progress
   - Automatically verifies or downloads song dependencies.
   - If any song dependency cannot be resolved, marks `missingSongIds` in metadata. The setlist status remains `AVAILABLE_OFFLINE` with an explicit incomplete dependency flag (`isComplete = false`).
   - Handles `SERVICE_MOMENT` items (prayer, preaching, announcements) natively without requiring song dependencies.
-- **Single-Track Audio Download & Playback (`downloadAudio()`, `getAudioUrl()`):**
-  - Downloads reference and guide audio tracks using fetch streams.
-  - Enforces the 50MB per-file quota (`OFFLINE_POLICIES.MAX_SINGLE_RESOURCE_SIZE_BYTES`).
-  - Stores binary audio Blobs in IndexedDB.
-  - Creates and manages volatile HTML5 `URL.createObjectURL(blob)` instances, systematically tracking them to revoke on cleanup or logout.
+- **Owner-Approved 7-Day Expiry Policy (`isAuthorizationExpired()` & `getAuthorizedSongPayload()`):**
+  - Uses the timestamp of the last successful server authorization revalidation (`lastValidatedAt`), falling back to `downloadedAt` only if unvalidated.
+  - Computes exact 7-day boundary: `7 * 24 * 60 * 60 * 1000` ms (604,800,000 ms).
+  - Detects client clock skew or backward tampering (> 5 minutes into the past/future) and treats content as expired for safety.
+  - **Active Content Blocking:** Stale content is strictly blocked from view in `getAuthorizedSongPayload()` and `getAudioObjectUrl()` when offline, throwing `OfflineStorageError('UNAUTHORIZED_SESSION')`. When online, automatically revalidates with server; if server returns HTTP 401/403, local cached copy is immediately purged.
+- **Audio Download Hardening & Outcome C (`downloadAudio()`, `getAudioObjectUrl()`):**
+  - Validates response `content-type` starts with `audio/` (rejecting HTML error pages and JSON responses).
+  - Validates actual downloaded binary blob size (`blob.size > 0` and `blob.size <= 50MB`).
+  - Blocks expired audio playback offline.
+  - Since backend audio delivery does not exist, the feature is marked BLOCKED and disabled in UI.
 - **Update Detection (`checkForUpdates()`):**
-  - On network reconnection, queries server catalog versions and flags local copies as `UPDATE_AVAILABLE` when newer revisions exist.
+  - On network reconnection, queries server catalog versions and updates `lastValidatedAt` upon successful confirmation.
+  - If a resource is missing from the server catalog, marks status as `FAILED` (revoked).
   - Invariant: Retains previous valid offline copy until the new update is fully downloaded and verified.
 
 ### 2.4 User Experience & UI Components
-- **`OfflineStatusBar.tsx`:** Floating, accessible, non-intrusive status bar indicating whether the system is connected to the server or operating in offline read-only atril mode. Provides quick access to the offline inventory modal.
-- **`DownloadActionButton.tsx`:** State-aware button integrated into song headers, database song modal rows, and setlist rows. Accurately renders states: `Guardar Offline`, `Descargando...`, `Disponible Offline`, `Actualizar Copia`, `Reintentar`. Supports selective local deletion without mutating the server.
-- **`OfflineInventoryModal.tsx`:** Comprehensive modal dialog allowing musicians and directors to:
-  - Browse downloaded songs, setlists, and audio recordings.
-  - Inspect storage utilization with a visual usage meter and byte counts.
-  - Identify incomplete setlists with missing song warning badges.
-  - Play back downloaded guide audio using an integrated HTML5 player.
-  - Selectively remove local offline copies.
+- **`OfflineStatusBar.tsx`:** Floating, accessible status bar indicating online or offline read-only mode, with direct link to the inventory modal.
+- **`DownloadActionButton.tsx`:** State-aware button integrated into song headers, database song modal rows, and setlist rows. Accurately renders states: `Guardar Offline`, `Descargando...`, `Disponible Offline`, `Actualizar Copia`, `Reintentar`. When `resourceType === 'AUDIO'`, renders `🚫 Audio Bloqueado` with descriptive tooltip.
+- **`OfflineInventoryModal.tsx`:** Comprehensive modal dialog allowing musicians and directors to browse downloaded songs, setlists, and audio recordings. Displays an explicit notice on the "Audios" tab informing users that audio is blocked pending backend infrastructure. Flags expired items with `Expirado (7 días)` and blocks opening/playing when offline.
 - **Workspace Offline Fallback Integration (`MusicalWorkspace.tsx`, `DatabaseSongsModal.tsx`, `SetlistsModal.tsx`):**
-  - When network is offline, `DatabaseSongsModal` reads directly from `offlineStorage.listMetadata('SONG')`.
-  - `SetlistsModal` falls back to `offlineStorage.listMetadata('SETLIST')`, presenting downloaded cultos and identifying missing dependencies.
-  - Selecting a song or setlist item while offline fetches the canonical payload from `offlineStorage.getSongPayload(songId)` and renders it seamlessly in the atril viewport.
+  - Integrates `offlineManager.getAuthorizedSongPayload(songId)` ensuring stale songs cannot be loaded offline after 7 days without server revalidation.
 
 ---
 
@@ -79,20 +88,20 @@ WP-04 transforms Bethesda Worship Studio into an installable, resilient Progress
 | Decision ID | Topic | Resolution / Implemented Policy |
 | :--- | :--- | :--- |
 | **P-01** | Offline Mode Read-Only | **ENFORCED.** All mutation actions (saving arrangements, altering setlists, editing songs) are disabled when offline via `assertCanMutateServer()`. No deferred sync queue. |
-| **P-02** | Downloadable Content Types | **SUPPORTED.** Songs, chord sheets, interactive notation/scores, setlists, and single guide audio tracks. |
-| **P-03** | Device Sharing & Logout Cleanup | **ENFORCED.** Multi-tier session isolation purges user-owned offline content on logout, revokes Object URLs, and sets an emergency tombstone key. |
+| **P-02** | Downloadable Content Types | **PARTIALLY SUPPORTED.** Songs, chord sheets, interactive notation/scores, and setlists are fully supported. Audio tracks are BLOCKED pending backend audio infrastructure. |
+| **P-03** | Device Sharing & Logout Cleanup | **ENFORCED.** Multi-tier session isolation purges user-owned offline content on logout, revokes Object URLs, and sets an emergency tombstone key recovered on boot. |
 | **P-04** | Server Canonical Authority | **PRESERVED.** Local deletion affects only client storage; server data is untouched. Server remains the sole source of truth. |
-| **U-01** | Offline Grace Period | **RESOLVED (7 Days).** Set to 7 days (`MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`). Content older than 7 days without server revalidation is flagged as stale. |
-| **U-02** | Audio Download Grouping | **RESOLVED (Explicit Opt-In).** Audio tracks are downloaded individually or selectively with setlists (`options.includeAudio: false` by default). Multitrack stems remain strictly Phase 3C (unauthorized). |
-| **U-03** | Per-File & Quota Limits | **RESOLVED (50MB Cap).** Single file cap of 50MB (`MAX_SINGLE_RESOURCE_SIZE_BYTES`). Storage quota alert and rejection at 85% capacity. |
+| **U-01** | Offline Grace Period | **RESOLVED & VERIFIED (7 Days).** Set to 7 days (`MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`). Evaluates `lastValidatedAt || downloadedAt`. Stale content is actively blocked from view/playback offline. |
+| **U-02** | Audio Download Grouping | **BLOCKED (Outcome C).** Audio source does not exist in backend. Marked BLOCKED in acceptance matrix; disabled in UI. |
+| **U-03** | Per-File & Quota Limits | **RESOLVED (50MB Cap & 85% Quota Guard).** Single file cap of 50MB (`MAX_SINGLE_RESOURCE_SIZE_BYTES`). Storage quota alert and rejection at 85% capacity via `assertStorageQuotaAvailable()`. |
 | **U-04** | Target Browser Support | **RESOLVED.** Baseline: Chromium >= 100, Safari >= 15.4 (iOS / macOS), Firefox >= 100. |
-| **U-05** | Logout Verification Failure | **RESOLVED (Double-Layer + Tombstone).** Volatile purge + IndexedDB delete + `bethesda_offline_purge_pending` localStorage tombstone to guard next user. |
+| **U-05** | Logout Verification Failure | **RESOLVED (Double-Layer + Boot Tombstone Recovery).** Volatile purge + IndexedDB delete + `bethesda_offline_purge_pending` localStorage tombstone recovered automatically in `storage.init()`. |
 
 ---
 
 ## 4. File Inventory
 
-### 4.1 Created Files (WP-04 Core & Testing)
+### 4.1 Created Files (WP-04 Core & Documentation)
 ```
 frontend/
 ├── public/
@@ -101,7 +110,7 @@ frontend/
 ├── src/
 │   ├── components/
 │   │   └── offline/
-│   │       ├── DownloadActionButton.tsx                   # Multi-state download & delete button
+│   │       ├── DownloadActionButton.tsx                   # Multi-state download & delete button (with audio block)
 │   │       ├── OfflineInventoryModal.tsx                  # Complete offline inventory & audio player modal
 │   │       ├── OfflineStatusBar.tsx                       # Status bar with connectivity indicator
 │   │       └── index.ts                                   # Barrel export
@@ -109,11 +118,11 @@ frontend/
 │       └── offline/
 │           ├── __tests__/
 │           │   ├── indexeddb-storage.test.ts              # Unit tests for storage engine & CRUD
-│           │   ├── offline-manager.test.ts                # Unit tests for orchestration & read-only guard
+│           │   ├── offline-manager.test.ts                # Unit tests for orchestration, 7-day expiry & quota
 │           │   ├── setlist-packager.test.ts               # Unit tests for setlist packaging & dependencies
-│           │   └── session-isolation.test.ts              # Unit tests for logout purge & device sharing
+│           │   └── session-isolation.test.ts              # Unit tests for logout purge, device sharing & tombstone
 │           ├── storage/
-│           │   └── indexeddb-storage.ts                   # Strongly-typed IndexedDB storage wrapper
+│           │   └── indexeddb-storage.ts                   # Strongly-typed IndexedDB storage wrapper with boot tombstone
 │           ├── index.ts                                   # Core offline module barrel
 │           ├── offline-context.tsx                        # React Context & Provider for offline state
 │           ├── offline-manager.ts                         # Central orchestrator & lifecycle coordinator
@@ -125,7 +134,8 @@ docs/
     ├── WP04_PREFLIGHT_TECHNICAL_REPORT.md                 # Preflight technical discovery report
     ├── WP04_IMPLEMENTATION_REPORT.md                      # This document
     ├── WP04_TEST_AND_ACCEPTANCE_REPORT.md                 # Test matrix & verification evidence
-    └── WP04_SECURITY_AND_SESSION_ISOLATION_REPORT.md      # Security & session isolation report
+    ├── WP04_SECURITY_AND_SESSION_ISOLATION_REPORT.md      # Security & session isolation report
+    └── WP04_CLOSURE_AUDIT_AND_REMEDIATION_REPORT.md       # Closure audit and remediation report
 ```
 
 ### 4.2 Modified Files (Integration Seams)
@@ -133,9 +143,9 @@ docs/
 2. `frontend/src/main.tsx`: Added secure browser hook to register `/sw.js` on window load.
 3. `frontend/src/App.tsx`: Wrapped component tree in `<OfflineProvider>`, rendered `<OfflineStatusBar />`.
 4. `frontend/src/core/auth/auth-context.tsx`: Injected `offlineManager.purgeSessionData(currentUserId)` call in `logout()` lifecycle before tokens and user state are cleared.
-5. `frontend/src/components/workspace/MusicalWorkspace.tsx`: Added offline fallback to load canonical song payload directly from IndexedDB when disconnected; wired `persistedSongId` to `SongHeader`.
+5. `frontend/src/components/workspace/MusicalWorkspace.tsx`: Added offline fallback to load canonical song payload directly from IndexedDB via `getAuthorizedSongPayload()`; wired `persistedSongId` to `SongHeader`.
 6. `frontend/src/components/workspace/SongHeader.tsx`: Integrated `DownloadActionButton` for active song.
-7. `frontend/src/components/workspace/DatabaseSongsModal.tsx`: Added offline fallback to query downloaded songs from IndexedDB; added `DownloadActionButton` per song row.
+7. `frontend/src/components/workspace/DatabaseSongsModal.tsx`: Added offline fallback to query downloaded songs from IndexedDB; integrated `getAuthorizedSongPayload()` to enforce 7-day revalidation; added `DownloadActionButton` per song row.
 8. `frontend/src/components/workspace/SetlistsModal.tsx`: Added offline fallback to query downloaded setlists from IndexedDB; added `⚠️ Incompleto` badge for missing dependencies; added `DownloadActionButton` per setlist row.
 9. `frontend/src/index.css`: Added responsive styles for status bar, download buttons, modal inventory, and audio player controls.
 
@@ -143,31 +153,13 @@ docs/
 
 ## 5. Security & Isolation Considerations
 1. **Zero Credential Storage:** IndexedDB stores only musical domain data (`CanonicalMusicPayloadJSON`, `FrontendSetlistDetail`) and audio Blobs. Under no circumstances are JWT access tokens, refresh tokens, passwords, or session secrets stored locally.
-2. **Device Sharing Boundary:** `purgeSessionData()` deletes all records associated with `ownerUserId`. A subsequent user logging in on the same browser cannot inspect or query the previous user's private songs or setlists.
+2. **Device Sharing Boundary:** `purgeSessionData()` deletes all records associated with `ownerUserId` and orphan unauthenticated records. A subsequent user logging in on the same browser cannot inspect or query the previous user's private songs or setlists.
 3. **Cache API Isolation:** Authenticated API requests (`/api/v1/*`) are explicitly excluded from the Service Worker Cache API.
-4. **Tombstone Resilience:** If browser storage encounters an unexpected I/O lock during logout, an emergency tombstone key (`bethesda_offline_purge_pending`) persists in `localStorage` to lock access until a clean purge completes.
+4. **Tombstone Resilience:** If browser storage encounters an unexpected I/O lock during logout, an emergency tombstone key (`bethesda_offline_purge_pending`) persists in `localStorage` and is proactively cleared/wiped on subsequent `storage.init()`.
 
 ---
 
 ## 6. Known Limitations & Target Browser Realities
-1. **iOS Safari Background Audio:** WebKit on iOS terminates or suspends audio playback when a PWA is backgrounded or the screen is locked, unless native media session attributes are continually refreshed. Offline audio playback is verified for active in-app foreground sessions.
-2. **Backend Audio Endpoints:** The existing Fastify backend does not currently have native audio streaming or HTTP Range header support. Offline audio operates using direct binary Blob storage in client-side IndexedDB.
+1. **Backend Audio Infrastructure Missing (Outcome C):** The existing backend has no audio tables, delivery routes, or storage bucket integrations. Full audio download and streaming remain blocked until backend audio infrastructure is scheduled and implemented.
+2. **iOS Safari Background Audio:** WebKit on iOS suspends audio playback when a PWA is backgrounded or the screen is locked, unless native media session attributes are continually refreshed.
 3. **Multitracks & OMR:** Multitrack stem mixing and Optical Music Recognition (OMR) are strictly Phase 3C features and were not implemented.
-
----
-
-## 7. Rollback Instructions
-If rollback of WP-04 is required:
-1. Revert modified files:
-   ```bash
-   git checkout -- frontend/index.html frontend/src/App.tsx frontend/src/main.tsx \
-     frontend/src/core/auth/auth-context.tsx frontend/src/components/workspace/MusicalWorkspace.tsx \
-     frontend/src/components/workspace/SongHeader.tsx frontend/src/components/workspace/DatabaseSongsModal.tsx \
-     frontend/src/components/workspace/SetlistsModal.tsx frontend/src/index.css
-   ```
-2. Remove created files and directories:
-   ```bash
-   rm frontend/public/manifest.webmanifest frontend/public/sw.js
-   rm -rf frontend/src/components/offline/ frontend/src/core/offline/ docs/wp04/
-   ```
-3. Re-run `npm run build` in `frontend/` to produce the clean original bundle.

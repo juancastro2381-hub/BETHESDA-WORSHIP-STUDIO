@@ -39,7 +39,7 @@ import { DatabaseSongsModal } from './DatabaseSongsModal.tsx';
 import { SetlistsModal } from './SetlistsModal.tsx';
 import { SetlistNavigationToolbar } from './SetlistNavigationToolbar.tsx';
 import { ServiceMomentCard } from './ServiceMomentCard.tsx';
-import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
+import { offlineManager } from '../../core/offline/offline-manager.ts';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -172,8 +172,8 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
       } else {
         // 2. Cargar bajo demanda: consultar primero el almacenamiento offline local en IndexedDB (WP-04)
         setSongLoading(true);
-        offlineStorage
-          .getSongPayload(songId)
+        offlineManager
+          .getAuthorizedSongPayload(songId)
           .then((localPayload) => {
             if (localPayload) {
               const canonical = CanonicalMusicPayload.fromJSON(localPayload.canonicalPayload);

@@ -31,6 +31,8 @@ export const STORES = {
 export class BethesdaOfflineStorage {
   private db: IDBDatabase | null = null;
   private isMemoryFallback = false;
+  private isInitialized = false;
+  private isRecoveringTombstone = false;
 
   // Almacenes en memoria para entornos Node.js o navegadores que bloquean IndexedDB
   private memoryMetadata = new Map<string, OfflineResourceMetadata>();
@@ -49,7 +51,11 @@ export class BethesdaOfflineStorage {
    * Inicializa la conexión y crea los object stores e índices.
    */
   public async init(): Promise<void> {
+    if (this.isInitialized) return;
+    this.isInitialized = true;
+
     if (this.isMemoryFallback) {
+      await this.recoverPendingCleanupTombstone();
       return;
     }
 
@@ -57,7 +63,7 @@ export class BethesdaOfflineStorage {
       return;
     }
 
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve) => {
       try {
         const request = indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -104,6 +110,39 @@ export class BethesdaOfflineStorage {
         resolve();
       }
     });
+
+    await this.recoverPendingCleanupTombstone();
+  }
+
+  /**
+   * Inspecciona y recupera limpiezas incompletas de sesiones previas usando la marca Tombstone (Decisión U-05).
+   */
+  public async recoverPendingCleanupTombstone(): Promise<void> {
+    if (this.isRecoveringTombstone) return;
+    this.isRecoveringTombstone = true;
+    try {
+      if (typeof localStorage === 'undefined') return;
+      const tombstonedUserId = localStorage.getItem(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY);
+      if (tombstonedUserId) {
+        console.warn(`⚠️ Detectado Tombstone pendiente de purga de sesión para el usuario '${tombstonedUserId}'. Ejecutando limpieza preventiva.`);
+        if (tombstonedUserId === '__ALL__') {
+          await this.purgeAll();
+        } else {
+          await this.purgeUserData(tombstonedUserId);
+        }
+        // Verificar que no queden datos del usuario tombstoned
+        const remaining = (await this.listMetadata()).filter(
+          (m) => m.ownerUserId === tombstonedUserId || m.ownerUserId === null
+        );
+        if (remaining.length === 0) {
+          localStorage.removeItem(OFFLINE_POLICIES.CLEANUP_TOMBSTONE_KEY);
+        }
+      }
+    } catch (err) {
+      console.error('❌ Error al resolver Tombstone pendiente de limpieza:', err);
+    } finally {
+      this.isRecoveringTombstone = false;
+    }
   }
 
   // ==========================================================================
@@ -428,11 +467,11 @@ export class BethesdaOfflineStorage {
    * Garantiza que el siguiente usuario del mismo dispositivo no pueda acceder al material previo.
    */
   public async purgeUserData(userId: string): Promise<{ deletedCount: number }> {
-    const userItems = await this.listMetadata(userId);
+    const allItems = await this.listMetadata();
     let deletedCount = 0;
 
-    for (const item of userItems) {
-      if (item.ownerUserId === userId) {
+    for (const item of allItems) {
+      if (item.ownerUserId === userId || item.ownerUserId === null) {
         await this.deleteResource(item.id);
         deletedCount++;
       }

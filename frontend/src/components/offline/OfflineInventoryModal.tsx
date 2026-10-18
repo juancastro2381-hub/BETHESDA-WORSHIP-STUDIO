@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect, useId } from 'react';
 import { useOffline } from '../../core/offline/use-offline.ts';
+import { offlineManager } from '../../core/offline/offline-manager.ts';
 import type { OfflineResourceMetadata, OfflineResourceType } from '../../core/offline/types.ts';
 
 export interface OfflineInventoryModalProps {
@@ -78,12 +79,16 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
       return;
     }
 
-    const url = await getAudioUrl(audioId);
-    if (url) {
-      setPlayingAudioId(audioId);
-      setPlayingAudioUrl(url);
-    } else {
-      alert('No se pudo cargar el audio local. El archivo podría estar corrupto.');
+    try {
+      const url = await getAudioUrl(audioId);
+      if (url) {
+        setPlayingAudioId(audioId);
+        setPlayingAudioUrl(url);
+      } else {
+        alert('No se pudo cargar el audio local. El archivo podría estar corrupto.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error al reproducir audio local.');
     }
   };
 
@@ -201,6 +206,29 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
           </button>
         </div>
 
+        {/* Notificación informativa si se selecciona Pistas de Audio (Resultado C de auditoría) */}
+        {activeTab === 'AUDIO' && (
+          <div
+            className="audio-blocked-banner"
+            role="status"
+            style={{
+              margin: '12px 16px',
+              padding: '10px 14px',
+              background: '#3b2505',
+              border: '1px solid #d97706',
+              borderRadius: '6px',
+              color: '#fef3c7',
+              fontSize: '0.85rem',
+            }}
+          >
+            ⚠️ <strong>Pistas de Audio: Bloqueado (Resultado C de auditoría)</strong>
+            <p style={{ margin: '4px 0 0 0' }}>
+              El backend actual no cuenta con modelos, tablas, endpoints de streaming ni almacenamiento de audio.
+              La funcionalidad se activará cuando se implemente la infraestructura de audio correspondiente.
+            </p>
+          </div>
+        )}
+
         {/* Reproductor de Audio Activo si hay uno seleccionado */}
         {playingAudioUrl && (
           <div className="offline-audio-player-bar" role="region" aria-label="Reproductor de audio offline">
@@ -247,13 +275,19 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                         : '🎧'}
                     </span>
                     <strong className="item-title">{item.title}</strong>
-                    <span className={`status-pill ${item.status.toLowerCase()}`}>
-                      {item.status === 'AVAILABLE_OFFLINE'
-                        ? 'Disponible'
-                        : item.status === 'UPDATE_AVAILABLE'
-                        ? 'Actualización'
-                        : item.status}
-                    </span>
+                    {offlineManager.isAuthorizationExpired(item) ? (
+                      <span className="status-pill expired" style={{ background: '#7f1d1d', color: '#fca5a5' }}>
+                        Expirado (7 días)
+                      </span>
+                    ) : (
+                      <span className={`status-pill ${item.status.toLowerCase()}`}>
+                        {item.status === 'AVAILABLE_OFFLINE'
+                          ? 'Disponible'
+                          : item.status === 'UPDATE_AVAILABLE'
+                          ? 'Actualización'
+                          : item.status}
+                      </span>
+                    )}
                   </div>
 
                   <div className="item-meta-row">
@@ -286,8 +320,15 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action play"
+                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
                       onClick={() => handlePlayAudio(item.id)}
-                      title={playingAudioId === item.id ? 'Detener' : 'Reproducir'}
+                      title={
+                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                          ? 'Autorización offline expirada. Conéctese a internet para renovar.'
+                          : playingAudioId === item.id
+                          ? 'Detener'
+                          : 'Reproducir'
+                      }
                     >
                       {playingAudioId === item.id ? '⏹️ Detener' : '▶️ Reproducir'}
                     </button>
@@ -298,11 +339,16 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action open"
+                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
                       onClick={() => {
                         onSelectSong(item.id);
                         onClose();
                       }}
-                      title="Abrir en Atril Digital"
+                      title={
+                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                          ? 'Autorización offline expirada (7 días). Conéctese a internet para revalidar.'
+                          : 'Abrir en Atril Digital'
+                      }
                     >
                       📖 Abrir
                     </button>
@@ -313,11 +359,16 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action open"
+                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
                       onClick={() => {
                         onSelectSetlist(item.id);
                         onClose();
                       }}
-                      title="Cargar Repertorio en Atril"
+                      title={
+                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                          ? 'Autorización offline expirada (7 días). Conéctese a internet para revalidar.'
+                          : 'Cargar Repertorio en Atril'
+                      }
                     >
                       📋 Cargar
                     </button>

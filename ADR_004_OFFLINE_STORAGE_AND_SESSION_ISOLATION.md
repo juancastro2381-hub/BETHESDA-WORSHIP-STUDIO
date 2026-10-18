@@ -1,14 +1,14 @@
 # Architectural Decision Record: ADR-004 — Offline Persistence, Audio Caching, and Session Isolation (WP-04)
 
-**Status:** APPROVED (Implemented within authorized WP-04 scope)  
-**Date:** 2026-10-16  
+**Status:** APPROVED (Audited & Reconciled within authorized WP-04 scope)  
+**Date:** 2026-10-18  
 **Scope:** Work Package 04 (WP-04) — PWA Offline  
 **Authors:** Bethesda Worship Studio Architecture & Core Engineering  
 
 ---
 
 ## 1. Context and Problem Statement
-Bethesda Worship Studio operates in worship sanctuaries, rehearsal spaces, and churches where network connectivity is intermittent, degraded, or entirely absent. Musicians and worship leaders require dependable, read-only access to songs, chord sheets, interactive notation/scores, setlists, and guide audio tracks during services and rehearsals.
+Bethesda Worship Studio operates in worship sanctuaries, rehearsal spaces, and churches where network connectivity is intermittent, degraded, or entirely absent. Musicians and worship leaders require dependable, read-only access to songs, chord sheets, interactive notation/scores, and setlists during services and rehearsals.
 
 At the same time, the system enforces multi-tenant liturgical boundaries and role-based access control. In church environments, mobile devices (e.g., shared ministry iPads, sanctuary tablets) are frequently handed off between different worship leaders and musicians. A naive offline caching solution risks leaking confidential or unreleased setlists, songs, and private arrangements to subsequent users of the same device.
 
@@ -17,12 +17,15 @@ Furthermore, Service Worker Cache API strategies that indiscriminately cache API
 - Token and header leakage in browser cache logs.
 - Cross-user cache contamination on shared tablets.
 
+---
+
 ## 2. Decision Drivers
 1. **Strict Read-Only Guarantee:** Offline users must never be allowed to create or mutate canonical server data. No asynchronous mutation replay queue is permitted.
 2. **Device Sharing & Session Isolation:** Logging out must guarantee that private offline material cannot be accessed by a subsequent user of the same device.
-3. **Audio Support within Browser Realities:** Support single-track reference/guide audio offline without requiring server-side streaming infrastructure or violating copyright/DRM.
-4. **App Shell vs. Domain Data Separation:** Static assets belong in the Service Worker Cache API; structured liturgical domain data and binary audio belong in IndexedDB under user-keyed storage.
+3. **Accurate Audio Infrastructure Reality:** Audio delivery must not be claimed as available when the backend lacks audio models, endpoints, and storage.
+4. **App Shell vs. Domain Data Separation:** Static assets belong in the Service Worker Cache API; structured liturgical domain data belongs in IndexedDB under user-keyed storage.
 5. **Deterministic Integrity:** Payloads must undergo canonical domain validation and cryptographic SHA-256 integrity verification before being marked as offline available.
+6. **Enforced 7-Day Grace Period:** Stale material must be actively blocked from viewing or playback after 7 days without server revalidation.
 
 ---
 
@@ -36,12 +39,12 @@ Furthermore, Service Worker Cache API strategies that indiscriminately cache API
 ### Option B: LocalStorage / SessionStorage for Offline Data
 - **Description:** Serialize all songs and setlists into `localStorage`.
 - **Pros:** Synchronous API, simple integration.
-- **Cons:** Strictly limited to 5MB storage quota. Audio Blobs and complex JSON scores cannot be stored. Blocking main thread on parsing large canonical scores.
+- **Cons:** Strictly limited to 5MB storage quota. Complex JSON scores cannot fit. Blocking main thread on parsing large canonical scores.
 
-### Option C: Two-Tier Storage Architecture (IndexedDB + App Shell Cache API + Purge Tombstone) — **SELECTED**
+### Option C: Two-Tier Storage Architecture (IndexedDB + App Shell Cache API + Boot Tombstone Recovery) — **SELECTED**
 - **Tier 1 (Service Worker Cache API):** Strictly limited to immutable, unauthenticated static App Shell assets (`/`, `/index.html`, `/manifest.webmanifest`, CSS, JS bundles, icons). **Zero authenticated `/api/v1/*` endpoints are ever cached in Cache API**. Any API request made offline returns a controlled JSON HTTP 503 error.
 - **Tier 2 (IndexedDB `bethesda_worship_studio_offline_db`):** Strongly typed local database with 4 isolated object stores (`offline_metadata`, `song_payloads`, `setlist_payloads`, `audio_blobs`). All records are explicitly tagged with `ownerUserId`.
-- **Session Purge & Tombstone:** On logout, `BethesdaOfflineManager.purgeSessionData(userId)` purges all stores, revokes in-memory Object URLs, and sets an atomic `bethesda_offline_purge_pending` tombstone in `localStorage` until storage verification confirms 0 lingering records.
+- **Session Purge & Boot Tombstone:** On logout, `BethesdaOfflineManager.purgeSessionData(userId)` purges all stores, revokes in-memory Object URLs, and sets an atomic `bethesda_offline_purge_pending` tombstone in `localStorage` until storage verification confirms 0 lingering records. If an abnormal browser crash or lock occurs, `storage.init()` inspects this tombstone on next boot and resolves the pending purge.
 
 ---
 
@@ -79,11 +82,11 @@ if (url.pathname.startsWith('/api/v1/')) {
 ```
 
 ### 4.3 Policy Closures for Unresolved Decisions
-- **U-01 (Offline Grace Period):** Fixed at **7 days** (`OFFLINE_POLICIES.MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`). Content older than 7 days without server revalidation is flagged as stale.
-- **U-02 (Audio Grouping):** Explicit opt-in. Audio tracks are downloaded individually or selectively with setlists (`options.includeAudio: false` by default). Multitrack stems remain strictly Phase 3C (unauthorized).
-- **U-03 (Size & Quota Limits):** Single track max **50MB** (`OFFLINE_POLICIES.MAX_SINGLE_RESOURCE_SIZE_BYTES = 50 * 1024 * 1024`). Storage usage capped at 85% of browser quota.
+- **U-01 (Offline Grace Period):** Fixed at **7 days** (`OFFLINE_POLICIES.MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`). Evaluates `lastValidatedAt || downloadedAt` with clock skew protections. Stale content is actively blocked from view/playback offline, requiring online server revalidation.
+- **U-02 (Audio Delivery Status):** Classified as **Outcome C (Blocked)**. The backend contains 0 audio models, tables, routes, or storage providers. Audio download buttons in the UI are disabled and marked blocked. Full audio delivery is blocked pending future backend audio infrastructure.
+- **U-03 (Size & Quota Limits):** Single track max **50MB** (`OFFLINE_POLICIES.MAX_SINGLE_RESOURCE_SIZE_BYTES = 50 * 1024 * 1024`). Storage usage capped at 85% of browser quota via `assertStorageQuotaAvailable()`.
 - **U-04 (Browser Compatibility):** Target baseline is Chromium >= 100, Safari >= 15.4 (iOS / macOS), and Firefox >= 100.
-- **U-05 (Logout Verification Failure):** Double-layer protection. Volatile memory purge + IndexedDB delete + `localStorage` tombstone key (`bethesda_offline_purge_pending`). Subsequent app initialization inspects this tombstone and blocks access until purge succeeds.
+- **U-05 (Logout Verification Failure):** Double-layer protection with boot recovery. Volatile memory purge + IndexedDB delete + `localStorage` tombstone key (`bethesda_offline_purge_pending`). On subsequent app initialization, `storage.init()` inspects this tombstone and forces a wipe before granting access.
 
 ---
 
@@ -92,7 +95,8 @@ if (url.pathname.startsWith('/api/v1/')) {
   - Zero cross-user or cross-tenant cache contamination.
   - Immune to stale authentication headers in Service Worker caches.
   - Safe, predictable offline atril operation for musicians.
+  - Active blocking of unauthorized content after 7 days without server validation.
   - Full backward compatibility with existing Fastify backend and React workspace.
 - **Negative / Trade-offs:**
-  - Background audio sync and Lock Screen MediaSession playback are limited on iOS Safari due to Apple WebKit PWA audio lifecycle restrictions.
-  - Initial download requires explicit user action (no silent pre-caching of the entire 10,000-song catalog).
+  - Full audio playback is currently blocked pending backend audio models and streaming endpoints.
+  - Initial download requires explicit user action (no silent pre-caching of the entire song catalog).

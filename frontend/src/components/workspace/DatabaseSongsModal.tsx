@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { BethesdaApiClient, type BackendSongItem } from '../../core/api/api-client.ts';
 import { CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
-import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
+import { offlineManager } from '../../core/offline/offline-manager.ts';
 import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 
 export interface DatabaseSongsModalProps {
@@ -44,7 +44,7 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
       // Fallback a canciones guardadas en almacenamiento offline IndexedDB (WP-04)
       setIsOfflineMode(true);
       try {
-        const localMeta = (await offlineStorage.listMetadata()).filter((m) => m.resourceType === 'SONG');
+        const localMeta = (await offlineManager.getInventory()).filter((m) => m.resourceType === 'SONG');
         const fallbackItems: BackendSongItem[] = localMeta.map((m) => ({
           id: m.id,
           title: m.title,
@@ -78,8 +78,8 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     setLoading(true);
     setError(null);
     try {
-      // 1. Verificar primero si existe en IndexedDB local
-      const localSong = await offlineStorage.getSongPayload(songId);
+      // 1. Verificar primero si existe en IndexedDB local con autorización vigente
+      const localSong = await offlineManager.getAuthorizedSongPayload(songId);
       if (localSong) {
         const canonical = CanonicalMusicPayload.fromJSON(localSong.canonicalPayload);
         onSelectSong(canonical, {

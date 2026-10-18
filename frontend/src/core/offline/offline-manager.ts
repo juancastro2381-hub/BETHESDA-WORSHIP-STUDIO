@@ -504,9 +504,25 @@ export class BethesdaOfflineManager {
    * Si la autorización expiró y el cliente está offline, bloquea la reproducción (Decisión U-01).
    */
   public async getAudioObjectUrl(audioId: string): Promise<string | null> {
+    const meta = await this.storage.getMetadata(audioId);
+    if (meta && meta.status === 'FAILED') {
+      throw new OfflineStorageError(
+        'UNAUTHORIZED_SESSION',
+        `El acceso a la pista de audio '${meta.title}' fue revocado por el servidor.`
+      );
+    }
+
     const record = await this.storage.getAudioRecord(audioId);
     if (!record || !record.blob) {
       return null;
+    }
+
+    // Guard de seguridad contra audio revocado o en estado FAILED
+    if (record.metadata.status === 'FAILED') {
+      throw new OfflineStorageError(
+        'UNAUTHORIZED_SESSION',
+        `El acceso a la pista de audio '${record.metadata.title}' fue revocado por el servidor.`
+      );
     }
 
     if (this.isAuthorizationExpired(record.metadata)) {
@@ -590,17 +606,17 @@ export class BethesdaOfflineManager {
    * Elimina selectivamente un recurso del almacenamiento local.
    * INVARIANTE: NUNCA afecta la base de datos ni los datos del servidor.
    */
-  public async deleteLocalResource(resourceId: string): Promise<void> {
-    await this.storage.deleteResource(resourceId);
-
-    // Si se eliminó una canción, actualizar los repertorios que dependían de ella
+  /**
+   * Actualiza los repertorios locales que dependían de una canción que fue eliminada o revocada.
+   */
+  private async updateSetlistsMissingSong(songId: string): Promise<void> {
     const setlists = (await this.storage.listMetadata()).filter((m) => m.resourceType === 'SETLIST');
     for (const sl of setlists) {
-      if (sl.associatedSongIds && sl.associatedSongIds.includes(resourceId)) {
+      if (sl.associatedSongIds && sl.associatedSongIds.includes(songId)) {
         const payload = await this.storage.getSetlistPayload(sl.id);
         if (payload) {
           const currentMissing = new Set(sl.missingSongIds ?? []);
-          currentMissing.add(resourceId);
+          currentMissing.add(songId);
           const updatedMeta: OfflineResourceMetadata = {
             ...sl,
             missingSongIds: Array.from(currentMissing),
@@ -609,6 +625,15 @@ export class BethesdaOfflineManager {
         }
       }
     }
+  }
+
+  /**
+   * Elimina selectivamente un recurso del almacenamiento local.
+   * INVARIANTE: NUNCA afecta la base de datos ni los datos del servidor.
+   */
+  public async deleteLocalResource(resourceId: string): Promise<void> {
+    await this.storage.deleteResource(resourceId);
+    await this.updateSetlistsMissingSong(resourceId);
   }
 
   // ==========================================================================
@@ -648,10 +673,27 @@ export class BethesdaOfflineManager {
    * Obtiene la carga útil de una canción garantizando la vigencia de autorización offline.
    * Si la autorización expiró y el cliente está offline, BLOQUEA la lectura arrojando UNAUTHORIZED_SESSION.
    * Si está en línea, revalida la autorización contra el servidor.
+   * Si el recurso está en estado FAILED o revocado, BLOQUEA incondicionalmente la lectura.
    */
   public async getAuthorizedSongPayload(songId: string): Promise<OfflineSongPayload | null> {
+    const meta = await this.storage.getMetadata(songId);
+    if (meta && meta.status === 'FAILED') {
+      throw new OfflineStorageError(
+        'UNAUTHORIZED_SESSION',
+        `El acceso a la canción '${meta.title}' fue revocado por el servidor o no está disponible.`
+      );
+    }
+
     const payload = await this.storage.getSongPayload(songId);
     if (!payload) return null;
+
+    // Guard de seguridad contra contenido revocado o en estado FAILED
+    if (payload.metadata.status === 'FAILED') {
+      throw new OfflineStorageError(
+        'UNAUTHORIZED_SESSION',
+        `El acceso a la canción '${payload.metadata.title}' fue revocado por el servidor o no está disponible.`
+      );
+    }
 
     if (this.isAuthorizationExpired(payload.metadata)) {
       if (!this.isOnline()) {
@@ -698,13 +740,14 @@ export class BethesdaOfflineManager {
 
   /**
    * Compara los recursos locales con el catálogo online del servidor para detectar versiones más recientes.
-   * INVARIANTE (Finding C):
+   * INVARIANTE (Finding C & Revocation Read-Path Audit):
    * 1. Pagina exhaustivamente el catálogo del servidor sin truncar en 100 elementos.
    * 2. NUNCA infiere revocación por ausencia en respuestas parciales o errores de red.
    * 3. Compara números de versión reales (serverVersionNumber vs localVersionNumber) marcando UPDATE_AVAILABLE.
    * 4. Si la versión es igual o anterior, actualiza lastValidatedAt como revalidación exitosa.
    * 5. Para canciones ausentes del catálogo completo, realiza verificación dirigida con getSong(id);
-   *    solo marca FAILED si el servidor responde explícitamente 404 (eliminado) o 401/403 (revocado).
+   *    si el servidor responde 401/403 o 404, purga la carga útil de STORES.SONG_PAYLOADS, marca FAILED en metadatos,
+   *    y actualiza los repertorios dependientes para que el contenido revocado no permanezca accesible.
    * 6. Preserva la copia local válida intacta ante errores transitorios.
    */
   public async checkForUpdates(): Promise<{ updatedCount: number; revokedCount: number }> {
@@ -772,6 +815,8 @@ export class BethesdaOfflineManager {
 
             if (isUnauthorized) {
               revokedCount++;
+              // Purgar carga útil de la canción revocada para que no quede accesible en disco
+              await this.storage.deleteSongPayload(local.id);
               const meta = await this.storage.getMetadata(local.id);
               if (meta) {
                 await this.storage.saveMetadata({
@@ -780,6 +825,7 @@ export class BethesdaOfflineManager {
                   errorMessage: 'Autorización revocada por el servidor.',
                 });
               }
+              await this.updateSetlistsMissingSong(local.id);
             } else {
               // Falla transitoria: preservar la copia local válida y no extender lastValidatedAt
               console.warn(`⚠️ Error de red o transitorio al consultar versión de '${local.id}'. Preservando copia local.`);
@@ -821,6 +867,8 @@ export class BethesdaOfflineManager {
 
             if (isRevokedOrRemoved) {
               revokedCount++;
+              // Purgar carga útil de la canción retirada/revocada para que no quede accesible en disco
+              await this.storage.deleteSongPayload(local.id);
               const meta = await this.storage.getMetadata(local.id);
               if (meta) {
                 await this.storage.saveMetadata({
@@ -829,6 +877,7 @@ export class BethesdaOfflineManager {
                   errorMessage: 'Autorización revocada o recurso retirado del catálogo del servidor.',
                 });
               }
+              await this.updateSetlistsMissingSong(local.id);
             } else {
               // Inconcluso por fallo de red: preservar la copia local válida
               console.warn(`⚠️ Verificación inconclusa para canción ausente '${local.id}'. Preservando copia local.`);

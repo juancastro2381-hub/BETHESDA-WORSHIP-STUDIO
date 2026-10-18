@@ -275,7 +275,11 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                         : '🎧'}
                     </span>
                     <strong className="item-title">{item.title}</strong>
-                    {offlineManager.isAuthorizationExpired(item) ? (
+                    {item.status === 'FAILED' ? (
+                      <span className="status-pill failed" style={{ background: '#7f1d1d', color: '#fca5a5' }} title={item.errorMessage ?? 'Revocado o no disponible'}>
+                        Revocado / Error
+                      </span>
+                    ) : offlineManager.isAuthorizationExpired(item) ? (
                       <span className="status-pill expired" style={{ background: '#7f1d1d', color: '#fca5a5' }}>
                         Expirado (7 días)
                       </span>
@@ -320,10 +324,12 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action play"
-                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
+                      disabled={item.status === 'FAILED' || (offlineManager.isAuthorizationExpired(item) && !isOnline)}
                       onClick={() => handlePlayAudio(item.id)}
                       title={
-                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                        item.status === 'FAILED'
+                          ? `Pista revocada o no disponible: ${item.errorMessage ?? 'Error de autorización'}`
+                          : offlineManager.isAuthorizationExpired(item) && !isOnline
                           ? 'Autorización offline expirada. Conéctese a internet para renovar.'
                           : playingAudioId === item.id
                           ? 'Detener'
@@ -339,13 +345,15 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action open"
-                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
+                      disabled={item.status === 'FAILED' || (offlineManager.isAuthorizationExpired(item) && !isOnline)}
                       onClick={() => {
                         onSelectSong(item.id);
                         onClose();
                       }}
                       title={
-                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                        item.status === 'FAILED'
+                          ? `Contenido revocado o no disponible: ${item.errorMessage ?? 'Error de autorización'}`
+                          : offlineManager.isAuthorizationExpired(item) && !isOnline
                           ? 'Autorización offline expirada (7 días). Conéctese a internet para revalidar.'
                           : 'Abrir en Atril Digital'
                       }
@@ -359,13 +367,15 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     <button
                       type="button"
                       className="btn-item-action open"
-                      disabled={offlineManager.isAuthorizationExpired(item) && !isOnline}
+                      disabled={item.status === 'FAILED' || (offlineManager.isAuthorizationExpired(item) && !isOnline)}
                       onClick={() => {
                         onSelectSetlist(item.id);
                         onClose();
                       }}
                       title={
-                        offlineManager.isAuthorizationExpired(item) && !isOnline
+                        item.status === 'FAILED'
+                          ? `Repertorio revocado o no disponible: ${item.errorMessage ?? 'Error de autorización'}`
+                          : offlineManager.isAuthorizationExpired(item) && !isOnline
                           ? 'Autorización offline expirada (7 días). Conéctese a internet para revalidar.'
                           : 'Cargar Repertorio en Atril'
                       }

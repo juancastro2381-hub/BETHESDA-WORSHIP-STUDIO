@@ -13,8 +13,15 @@ import { CanonicalMusicPayload } from '../../canonical-model/canonical-music-pay
 import { Timeline } from '../../canonical-model/timeline.ts';
 import { TempoMap } from '../../canonical-model/tempo-map.ts';
 import { CANONICAL_TPQN } from '../../canonical-model/types.ts';
-import { OFFLINE_POLICIES, OfflineStorageError } from '../types.ts';
+import {
+  OFFLINE_POLICIES,
+  OfflineStorageError,
+  type OfflineResourceMetadata,
+  type OfflineSongPayload,
+  type OfflineSetlistPayload,
+} from '../types.ts';
 import type { BackendSongResponse } from '../../api/api-client.ts';
+import type { FrontendSetlistDetail } from '../../api/setlist-types.ts';
 
 describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
   let storage: BethesdaOfflineStorage;
@@ -636,5 +643,342 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
     const meta = await storage.getMetadata(songId);
     assert.strictEqual(meta?.status, 'AVAILABLE_OFFLINE', 'Status must remain AVAILABLE_OFFLINE');
     assert.strictEqual(meta?.lastValidatedAt, originalDate, 'Authorization timestamp must NOT be modified');
+  });
+
+  it('14. should purge cached payload and block getAuthorizedSongPayload when server revokes via 401/403 in checkForUpdates (even with fresh 7-day timestamp)', async () => {
+    const revokedSongId = 'song_revoked_401';
+    const freshTimestamp = new Date(Date.now() - 3600 * 1000).toISOString(); // 1 hour old, well within 7 days
+
+    const meta: OfflineResourceMetadata = {
+      id: revokedSongId,
+      resourceType: 'SONG',
+      title: 'Revoked Song 401',
+      versionNumber: 1,
+      ownerUserId: 'user_alice',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: freshTimestamp,
+      lastValidatedAt: freshTimestamp,
+      byteSize: 1024,
+      checksumSha256: 'hash_rev_401',
+    };
+
+    const payload: OfflineSongPayload = {
+      id: revokedSongId,
+      canonicalPayload: defaultCanonicalJson,
+      metadata: meta,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+    };
+
+    await storage.saveSongPayload(payload);
+
+    // Also create a dependent setlist
+    const setlistId = 'setlist_dep_1';
+    const mockDetail: FrontendSetlistDetail = {
+      id: setlistId,
+      title: 'Sunday Service',
+      scheduledDateTime: '2026-10-20T10:00:00Z',
+      directorUserId: 'user_alice',
+      status: 'ACTIVE',
+      notes: null,
+      createdAt: freshTimestamp,
+      updatedAt: freshTimestamp,
+      items: [
+        {
+          id: 'item_1',
+          setlistId,
+          sequenceOrder: 0,
+          itemType: 'SONG',
+          songId: revokedSongId,
+          targetKey: 'C',
+          musicalKey: 'C',
+          targetBpm: 120,
+          transitionType: null,
+          momentTitle: null,
+          durationMinutes: null,
+          notesForTeam: null,
+          createdAt: freshTimestamp,
+          updatedAt: freshTimestamp,
+          song: null,
+        },
+      ],
+    };
+
+    await storage.saveSetlistPayload({
+      id: setlistId,
+      setlistDetail: mockDetail,
+      metadata: {
+        id: setlistId,
+        resourceType: 'SETLIST',
+        title: 'Sunday Service',
+        versionNumber: 1,
+        ownerUserId: 'user_alice',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: freshTimestamp,
+        lastValidatedAt: freshTimestamp,
+        byteSize: 500,
+        checksumSha256: 'hash_sl_1',
+        associatedSongIds: [revokedSongId],
+        missingSongIds: [],
+      },
+    });
+
+    const mockRevokeApiClient: any = {
+      listSongs: async () => ({
+        items: [{ id: revokedSongId, title: 'Revoked Song 401' }],
+        total: 1,
+      }),
+      getSong: async () => {
+        const err: any = new Error('HTTP 403 Forbidden');
+        err.statusCode = 403;
+        throw err;
+      },
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockRevokeApiClient);
+    manager.isOnline = () => true;
+
+    // Verify before checkForUpdates: song payload exists in storage
+    const beforePayload = await storage.getSongPayload(revokedSongId);
+    assert.ok(beforePayload !== null, 'Song payload must exist before check');
+
+    // Run checkForUpdates()
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 1, 'Should report 1 revoked resource');
+
+    // Invariant: local payload in song_payloads MUST be purged
+    const afterPayload = await storage.getSongPayload(revokedSongId);
+    assert.strictEqual(afterPayload, null, 'Cached payload must be deleted from song_payloads store');
+
+    // Invariant: metadata is marked FAILED
+    const afterMeta = await storage.getMetadata(revokedSongId);
+    assert.strictEqual(afterMeta?.status, 'FAILED');
+    assert.ok(afterMeta?.errorMessage?.includes('Autorización revocada'));
+
+    // Invariant: read-path getAuthorizedSongPayload rejects with UNAUTHORIZED_SESSION even though timestamp is fresh
+    await assert.rejects(
+      async () => {
+        await manager.getAuthorizedSongPayload(revokedSongId);
+      },
+      (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
+    );
+
+    // Invariant: dependent setlist reflects missingSongIds
+    const updatedSetlist = await storage.getSetlistPayload(setlistId);
+    assert.ok(updatedSetlist?.metadata.missingSongIds?.includes(revokedSongId), 'Dependent setlist must flag revoked song as missing');
+  });
+
+  it('15. should purge cached payload and block getAuthorizedSongPayload when server confirms 404 removal of song absent from catalog', async () => {
+    const absentSongId = 'song_removed_404';
+    const freshTimestamp = new Date(Date.now() - 7200 * 1000).toISOString(); // 2 hours old
+
+    const meta: OfflineResourceMetadata = {
+      id: absentSongId,
+      resourceType: 'SONG',
+      title: 'Removed Song 404',
+      versionNumber: 1,
+      ownerUserId: 'user_alice',
+      status: 'AVAILABLE_OFFLINE',
+      downloadedAt: freshTimestamp,
+      lastValidatedAt: freshTimestamp,
+      byteSize: 1024,
+      checksumSha256: 'hash_rem_404',
+    };
+
+    await storage.saveSongPayload({
+      id: absentSongId,
+      canonicalPayload: defaultCanonicalJson,
+      metadata: meta,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+    });
+
+    const mock404ApiClient: any = {
+      listSongs: async () => ({
+        items: [], // absent from complete catalog
+        total: 0,
+      }),
+      getSong: async (id: string) => {
+        const err: any = new Error(`HTTP 404 Not Found: ${id}`);
+        err.statusCode = 404;
+        throw err;
+      },
+    };
+
+    manager = new BethesdaOfflineManager(storage, mock404ApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 1);
+
+    // Payload deleted
+    assert.strictEqual(await storage.getSongPayload(absentSongId), null);
+
+    // Read path rejects even with fresh timestamp
+    await assert.rejects(
+      async () => {
+        await manager.getAuthorizedSongPayload(absentSongId);
+      },
+      (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
+    );
+  });
+
+  it('16. should block getAuthorizedSongPayload if payload or metadata status is FAILED even if 7-day timestamp is fresh and client is offline', async () => {
+    manager = new BethesdaOfflineManager(storage);
+    manager.isOnline = () => false; // offline!
+
+    const failedSongId = 'song_explicit_failed';
+    const freshTimestamp = new Date(Date.now() - 3600 * 1000).toISOString(); // 1 hour old
+
+    const meta: OfflineResourceMetadata = {
+      id: failedSongId,
+      resourceType: 'SONG',
+      title: 'Failed Song Fresh Time',
+      versionNumber: 1,
+      ownerUserId: 'user_alice',
+      status: 'FAILED',
+      errorMessage: 'Revocación explícita por política de seguridad',
+      downloadedAt: freshTimestamp,
+      lastValidatedAt: freshTimestamp,
+      byteSize: 1024,
+      checksumSha256: 'hash_failed_fresh',
+    };
+
+    await storage.saveSongPayload({
+      id: failedSongId,
+      canonicalPayload: defaultCanonicalJson,
+      metadata: meta,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+    });
+
+    // Invariant: getAuthorizedSongPayload must NOT return the payload merely because timestamp is within 7 days!
+    await assert.rejects(
+      async () => {
+        await manager.getAuthorizedSongPayload(failedSongId);
+      },
+      (err: any) => err instanceof OfflineStorageError && err.code === 'UNAUTHORIZED_SESSION'
+    );
+  });
+
+  it('17. cross-user isolation: revoking Alice song does not affect Bob song or unowned (ownerUserId === null) resources', async () => {
+    const aliceSongId = 'song_alice_revoked';
+    const bobSongId = 'song_bob_valid';
+    const unownedSongId = 'song_unowned_valid';
+    const freshTimestamp = new Date().toISOString();
+
+    await storage.saveSongPayload({
+      id: aliceSongId,
+      canonicalPayload: defaultCanonicalJson,
+      defaultKey: 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+      metadata: {
+        id: aliceSongId,
+        resourceType: 'SONG',
+        title: 'Alice Song',
+        versionNumber: 1,
+        ownerUserId: 'user_alice',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: freshTimestamp,
+        lastValidatedAt: freshTimestamp,
+        byteSize: 1024,
+        checksumSha256: 'hash_alice',
+      },
+    });
+
+    await storage.saveSongPayload({
+      id: bobSongId,
+      canonicalPayload: defaultCanonicalJson,
+      defaultKey: 'D',
+      defaultBpm: 110,
+      timeSignature: '4/4',
+      metadata: {
+        id: bobSongId,
+        resourceType: 'SONG',
+        title: 'Bob Song',
+        versionNumber: 1,
+        ownerUserId: 'user_bob',
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: freshTimestamp,
+        lastValidatedAt: freshTimestamp,
+        byteSize: 1024,
+        checksumSha256: 'hash_bob',
+      },
+    });
+
+    await storage.saveSongPayload({
+      id: unownedSongId,
+      canonicalPayload: defaultCanonicalJson,
+      defaultKey: 'E',
+      defaultBpm: 100,
+      timeSignature: '4/4',
+      metadata: {
+        id: unownedSongId,
+        resourceType: 'SONG',
+        title: 'Unowned Song',
+        versionNumber: 1,
+        ownerUserId: null,
+        status: 'AVAILABLE_OFFLINE',
+        downloadedAt: freshTimestamp,
+        lastValidatedAt: freshTimestamp,
+        byteSize: 1024,
+        checksumSha256: 'hash_unowned',
+      },
+    });
+
+    const mockIsolationApiClient: any = {
+      listSongs: async () => ({
+        items: [
+          { id: aliceSongId, title: 'Alice Song' },
+          { id: bobSongId, title: 'Bob Song' },
+          { id: unownedSongId, title: 'Unowned Song' },
+        ],
+        total: 3,
+      }),
+      getSong: async (id: string) => {
+        if (id === aliceSongId) {
+          const err: any = new Error('HTTP 403 Forbidden for Alice');
+          err.statusCode = 403;
+          throw err;
+        }
+        return {
+          song: { id, title: `Title ${id}` },
+          version: { versionNumber: 1, canonicalPayload: defaultCanonicalJson },
+        };
+      },
+    };
+
+    manager = new BethesdaOfflineManager(storage, mockIsolationApiClient);
+    manager.isOnline = () => true;
+
+    const result = await manager.checkForUpdates();
+    assert.strictEqual(result.revokedCount, 1, 'Only Alice song should be revoked');
+
+    // Alice song is purged & FAILED
+    assert.strictEqual(await storage.getSongPayload(aliceSongId), null);
+    const aliceMeta = await storage.getMetadata(aliceSongId);
+    assert.strictEqual(aliceMeta?.status, 'FAILED');
+
+    // Bob song is completely intact and accessible
+    const bobPayload = await storage.getSongPayload(bobSongId);
+    assert.ok(bobPayload !== null, 'Bob song payload must NOT be deleted');
+    const bobAuthorized = await manager.getAuthorizedSongPayload(bobSongId);
+    assert.strictEqual(bobAuthorized?.id, bobSongId);
+    const bobMeta = await storage.getMetadata(bobSongId);
+    assert.strictEqual(bobMeta?.status, 'AVAILABLE_OFFLINE');
+    assert.strictEqual(bobMeta?.ownerUserId, 'user_bob');
+
+    // Unowned song is completely intact and accessible
+    const unownedPayload = await storage.getSongPayload(unownedSongId);
+    assert.ok(unownedPayload !== null, 'Unowned song payload must NOT be deleted');
+    const unownedAuthorized = await manager.getAuthorizedSongPayload(unownedSongId);
+    assert.strictEqual(unownedAuthorized?.id, unownedSongId);
+    const unownedMeta = await storage.getMetadata(unownedSongId);
+    assert.strictEqual(unownedMeta?.status, 'AVAILABLE_OFFLINE');
+    assert.strictEqual(unownedMeta?.ownerUserId, null);
   });
 });

@@ -342,4 +342,80 @@ describe('Workstream C — Phase 3B Realtime Liturgical Flow Suite', () => {
     assert.equal(snapshot.data.participantsCount, 1);
     assert.equal(snapshot.data.participants[0].userId, leaderUser.id);
   });
+
+  it('11. should reject session creation by read-only user or musician without host privileges (403 Forbidden)', async () => {
+    // Un músico ordinario que no es el director del setlist intenta crear la sesión en vivo
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/realtime/sessions',
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+      },
+      payload: {
+        setlistId: testSetlist.id,
+        initialItemIndex: 0,
+      },
+    });
+
+    assert.equal(res.statusCode, 403, 'Músico lector no puede crear ni asumir host de sesión');
+    const body = JSON.parse(res.payload);
+    assert.ok(body.error.message.includes('privilegios suficientes') || body.error.message.includes('director de alabanza'));
+  });
+
+  it('12. should issue single-use stream ticket for authorized participant', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/ticket`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+      },
+    });
+
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.payload);
+    assert.ok(body.data.ticket, 'Debe emitir un ticket');
+    assert.equal(body.data.expiresInSeconds, 60);
+  });
+
+  it('13. should consume SSE ticket and reject ticket reuse (single-use burned ticket)', async () => {
+    // 1. Emitir ticket
+    const ticketRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/ticket`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+      },
+    });
+    const { ticket } = JSON.parse(ticketRes.payload).data;
+
+    // 2. Primera conexión con el ticket: debe quemar el ticket y responder SSE (200 text/event-stream)
+    const streamRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/stream?ticket=${ticket}`,
+      headers: {
+        'x-test-close': 'true',
+      },
+    });
+
+    assert.equal(streamRes.statusCode, 200);
+    assert.ok(streamRes.headers['content-type']?.includes('text/event-stream'));
+
+    // 3. Segunda conexión con el mismo ticket: debe ser rechazada con 401 por haber sido ya consumido
+    const reusedRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/stream?ticket=${ticket}`,
+    });
+
+    assert.equal(reusedRes.statusCode, 401, 'Ticket ya consumido debe ser rechazado inmediatamente');
+  });
+
+  it('14. should reject SSE connection without credentials or invalid ticket', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/realtime/sessions/${activeSessionId}/stream`,
+    });
+
+    assert.equal(res.statusCode, 401, 'Debe rechazar conexión anónima a SSE');
+  });
 });
+

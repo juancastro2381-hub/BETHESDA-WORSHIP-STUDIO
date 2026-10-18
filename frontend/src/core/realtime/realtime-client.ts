@@ -51,7 +51,7 @@ export class RealtimeClient {
   /**
    * Conecta el atril a la transmisión en tiempo real de una sesión litúrgica.
    */
-  public connect(sessionId: string, token: string): void {
+  public async connect(sessionId: string, token: string): Promise<void> {
     this.disconnect();
 
     this.currentSessionId = sessionId;
@@ -65,7 +65,26 @@ export class RealtimeClient {
     }
 
     try {
-      const streamUrl = `${this.baseUrl}/api/v1/realtime/sessions/${sessionId}/stream?token=${encodeURIComponent(token)}`;
+      // Solicitar ticket de transmisión seguro y de corta duración (R1-P0)
+      const ticketRes = await fetch(`${this.baseUrl}/api/v1/realtime/sessions/${sessionId}/ticket`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!ticketRes.ok) {
+        throw new Error(`Fallo al obtener ticket de transmisión SSE (HTTP ${ticketRes.status}).`);
+      }
+
+      const ticketJson = await ticketRes.json();
+      const ticket = ticketJson.data?.ticket;
+
+      if (!ticket) {
+        throw new Error('Respuesta inválida del servidor al solicitar ticket SSE.');
+      }
+
+      const streamUrl = `${this.baseUrl}/api/v1/realtime/sessions/${sessionId}/stream?ticket=${encodeURIComponent(ticket)}`;
       this.eventSource = new EventSource(streamUrl);
 
       this.eventSource.onopen = () => {

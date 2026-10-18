@@ -1,14 +1,15 @@
 /**
  * @file audio-service.ts
- * @description Servicio de aplicación para la gestión del ciclo de vida de audio (Workstream A).
- * Orquesta validaciones de MIME, cuotas, almacenamiento físico, persistencia en BD y streaming con soporte Range.
+ * @description Servicio de aplicación para la gestión del ciclo de vida de audio (Workstream A / R1).
+ * Orquesta validaciones de MIME, verificación de magic bytes binarios, cuotas, almacenamiento físico,
+ * persistencia en BD y streaming conforme con soporte estricto de HTTP Range (RFC 7233 / 9110).
  */
 
 import { type IAudioRepository } from '../repositories/audio-repository.ts';
 import { type IAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { type ISongRepository } from '../repositories/song-repository.ts';
 import { type AudioAsset } from '../db/schema.ts';
-import { ValidationError, NotFoundError } from '../domain/errors.ts';
+import { ValidationError, NotFoundError, RangeNotSatisfiableError } from '../domain/errors.ts';
 
 export interface UploadAudioParams {
   readonly songId: string;
@@ -48,6 +49,98 @@ const ALLOWED_MIME_TYPES = new Set([
   'audio/flac',
 ]);
 
+/**
+ * Valida la firma binaria ("magic bytes") del archivo para prevenir falsificación MIME.
+ */
+export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void {
+  if (!buffer || buffer.length < 4) {
+    throw new ValidationError('El archivo es demasiado pequeño para contener una cabecera de audio válida.');
+  }
+
+  const normalized = mimeType.toLowerCase().trim();
+
+  // 1. WAV: Comienza con 'RIFF' o 'RIFX' y contiene 'WAVE' en los primeros bytes
+  if (normalized === 'audio/wav' || normalized === 'audio/wave' || normalized === 'audio/x-wav') {
+    const isRiff =
+      buffer.subarray(0, 4).toString('ascii') === 'RIFF' ||
+      buffer.subarray(0, 4).toString('ascii') === 'RIFX';
+    const hasWave = buffer.subarray(0, 32).includes(Buffer.from('WAVE'));
+    if (!isRiff || !hasWave) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio WAV (falta encabezado RIFF/WAVE). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  // 2. MP3 / MPEG: ID3v2 ('ID3') o Frame Sync (0xFF seguido de bits 111xxxxx)
+  if (normalized === 'audio/mpeg' || normalized === 'audio/mp3') {
+    const isId3 = buffer.subarray(0, 3).toString('ascii') === 'ID3';
+    const isSync = buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xe0) === 0xe0;
+    if (!isId3 && !isSync) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio MP3 (falta cabecera ID3 o sincronización de tramas MPEG). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  // 3. OGG: 'OggS'
+  if (normalized === 'audio/ogg') {
+    const isOgg = buffer.subarray(0, 4).toString('ascii') === 'OggS';
+    if (!isOgg) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio OGG (falta encabezado OggS). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  // 4. FLAC: 'fLaC'
+  if (normalized === 'audio/flac') {
+    const isFlac = buffer.subarray(0, 4).toString('ascii') === 'fLaC';
+    if (!isFlac) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio FLAC (falta encabezado fLaC). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  // 5. MP4 / M4A / AAC: caja 'ftyp' o sync ADTS (0xFFF)
+  if (
+    normalized === 'audio/mp4' ||
+    normalized === 'audio/m4a' ||
+    normalized === 'audio/x-m4a' ||
+    normalized === 'audio/aac'
+  ) {
+    const hasFtyp =
+      (buffer.length >= 8 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') ||
+      buffer.subarray(0, 4).toString('ascii') === 'ftyp';
+    const isAdts = buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xf6) === 0xf0;
+    if (!hasFtyp && !isAdts) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio MP4/M4A/AAC (falta contenedor ftyp o tramas ADTS). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  // 6. WebM: EBML header (0x1A 0x45 0xDF 0xA3)
+  if (normalized === 'audio/webm') {
+    const isEbml =
+      buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3;
+    if (!isEbml) {
+      throw new ValidationError(
+        'El archivo no posee una firma válida de audio WebM (falta encabezado EBML). Posible falsificación MIME.'
+      );
+    }
+    return;
+  }
+
+  throw new ValidationError(`Tipo MIME de audio no reconocido para validación de firma: ${mimeType}`);
+}
+
 export class AudioService {
   public constructor(
     private readonly audioRepo: IAudioRepository,
@@ -58,6 +151,7 @@ export class AudioService {
 
   /**
    * Sube y registra un nuevo activo de audio asociado a una canción.
+   * Valida existencia de la canción, cuota de tamaño, tipo MIME y magic bytes binarios.
    */
   public async uploadAudio(params: UploadAudioParams): Promise<AudioAsset> {
     const { songId, title, filename, mimeType, buffer, durationSeconds, uploadedByUserId } = params;
@@ -68,7 +162,7 @@ export class AudioService {
       throw new NotFoundError(`Canción con ID ${songId} no encontrada.`);
     }
 
-    // 2. Validar tipo MIME
+    // 2. Validar tipo MIME permitido
     const normalizedMime = mimeType.toLowerCase().trim();
     if (!ALLOWED_MIME_TYPES.has(normalizedMime)) {
       throw new ValidationError(`Formato de audio no permitido o inválido: "${mimeType}".`);
@@ -85,10 +179,13 @@ export class AudioService {
       );
     }
 
-    // 4. Guardar archivo físico en el storage provider seguro
+    // 4. Validar firma binaria (magic bytes) para prevenir falsificación MIME
+    validateAudioMagicBytes(buffer, normalizedMime);
+
+    // 5. Guardar archivo físico en el storage provider seguro
     const saveResult = await this.storageProvider.save(filename, buffer);
 
-    // 5. Persistir metadatos en la base de datos
+    // 6. Persistir metadatos en la base de datos
     const created = await this.audioRepo.create({
       songId,
       title: title.trim() || filename,
@@ -127,7 +224,8 @@ export class AudioService {
   }
 
   /**
-   * Genera un stream de audio con soporte de cabecera HTTP Range (para streaming 206 en <audio>).
+   * Genera un stream de audio con soporte de cabecera HTTP Range conforme a RFC 7233 / RFC 9110.
+   * Maneja rangos cerrados (start-end), abiertos (start-) y sufijos (-N), retornando 206 o 416.
    */
   public async streamAudio(audioId: string, rangeHeader?: string): Promise<AudioStreamResponse> {
     const asset = await this.getAudioById(audioId);
@@ -137,22 +235,85 @@ export class AudioService {
     let end = totalSize - 1;
     let isRangeRequest = false;
 
-    if (rangeHeader && rangeHeader.startsWith('bytes=')) {
-      const parts = rangeHeader.replace(/bytes=/, '').split('-');
+    if (rangeHeader) {
+      if (!rangeHeader.startsWith('bytes=')) {
+        throw new RangeNotSatisfiableError(
+          `Unidad de rango no soportada: ${rangeHeader}`,
+          totalSize
+        );
+      }
+
+      // Solicitud de múltiples rangos no soportada para streams directos de audio
+      if (rangeHeader.includes(',')) {
+        throw new RangeNotSatisfiableError(
+          'Solicitud de múltiples rangos no soportada.',
+          totalSize
+        );
+      }
+
+      const rangeSpec = rangeHeader.slice('bytes='.length).trim();
+      const parts = rangeSpec.split('-');
+      if (parts.length !== 2) {
+        throw new RangeNotSatisfiableError(
+          `Formato de rango no satisfacible: ${rangeHeader}`,
+          totalSize
+        );
+      }
+
       const rawStart = parts[0]?.trim();
       const rawEnd = parts[1]?.trim();
 
-      if (rawStart) {
+      if (rawStart === '' && rawEnd === '') {
+        throw new RangeNotSatisfiableError(
+          `Rango vacío o malformado: ${rangeHeader}`,
+          totalSize
+        );
+      }
+
+      // Caso A: Suffix range, e.g. bytes=-500 (los últimos 500 bytes del archivo)
+      if (rawStart === '' && rawEnd !== '') {
+        const suffixLength = parseInt(rawEnd, 10);
+        if (isNaN(suffixLength) || suffixLength <= 0) {
+          throw new RangeNotSatisfiableError(
+            `Longitud de sufijo inválida: ${rawEnd}`,
+            totalSize
+          );
+        }
+        start = Math.max(0, totalSize - suffixLength);
+        end = totalSize - 1;
+      }
+      // Caso B: Prefix range, e.g. bytes=500- (desde 500 hasta el final)
+      else if (rawStart !== '' && rawEnd === '') {
         start = parseInt(rawStart, 10);
+        if (isNaN(start) || start < 0) {
+          throw new RangeNotSatisfiableError(
+            `Posición de inicio inválida: ${rawStart}`,
+            totalSize
+          );
+        }
+        end = totalSize - 1;
       }
-      if (rawEnd) {
+      // Caso C: Closed range, e.g. bytes=100-200
+      else {
+        start = parseInt(rawStart, 10);
         end = parseInt(rawEnd, 10);
+        if (isNaN(start) || isNaN(end) || start < 0) {
+          throw new RangeNotSatisfiableError(
+            `Valores de rango inválidos: ${rangeHeader}`,
+            totalSize
+          );
+        }
       }
 
-      if (isNaN(start) || isNaN(end) || start > end || start >= totalSize) {
-        throw new Error(`Rango insatisfactorio: Range: ${rangeHeader} sobre tamaño total ${totalSize}`);
+      // Validar límites según RFC 7233
+      if (start >= totalSize || start > end) {
+        throw new RangeNotSatisfiableError(
+          `Rango fuera de los límites del archivo (${totalSize} bytes): ${rangeHeader}`,
+          totalSize
+        );
       }
 
+      // Clamping del extremo final si supera el tamaño total
       end = Math.min(end, totalSize - 1);
       isRangeRequest = true;
     }

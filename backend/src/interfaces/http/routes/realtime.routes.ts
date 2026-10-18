@@ -22,7 +22,8 @@ import { DrizzleSetlistRepository } from '../../../repositories/setlist-reposito
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
-import { NotFoundError } from '../../../domain/errors.ts';
+import { NotFoundError, ForbiddenError, UnauthorizedError } from '../../../domain/errors.ts';
+import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 
 export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   const setlistRepo = new DrizzleSetlistRepository();
@@ -44,6 +45,21 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       const setlist = await setlistRepo.findById(body.setlistId);
       if (!setlist) {
         throw new NotFoundError('Setlist', body.setlistId);
+      }
+
+      // Validar autorización de anfitrión/creador litúrgico (R1-P0):
+      // Solo WORSHIP_LEADER, ADMIN, SUPER_ADMIN o el usuario designado como director del setlist
+      // pueden iniciar la sesión o asumir privilegios de anfitrión.
+      const isLeaderOrAdmin =
+        user.role === 'ADMIN' ||
+        user.role === 'SUPER_ADMIN' ||
+        user.role === 'WORSHIP_LEADER';
+      const isDesignatedDirector = setlist.directorUserId === user.sub;
+
+      if (!isLeaderOrAdmin && !isDesignatedDirector) {
+        throw new ForbiddenError(
+          'No posee privilegios suficientes para iniciar o dirigir una sesión litúrgica en vivo (requiere ser director de alabanza o administrador).'
+        );
       }
 
       const hostUser = {
@@ -181,14 +197,68 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   // ==========================================================================
-  // 8. GET /api/v1/realtime/sessions/:sessionId/stream - Canal SSE en vivo
+  // 8. POST /api/v1/realtime/sessions/:sessionId/ticket - Emitir ticket SSE seguro
   // ==========================================================================
-  fastify.get(
-    '/sessions/:sessionId/stream',
+  fastify.post(
+    '/sessions/:sessionId/ticket',
     { preHandler: authGuard.requirePermission('setlists:read', false) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
-      RealtimeStreamQuerySchema.parse(request.query);
+      const user = request.user!;
+
+      const session = globalRealtimeSessionManager.getSession(sessionId);
+
+      const ticket = globalStreamTicketService.issueTicket({
+        userId: user.sub,
+        role: user.role,
+        resourceId: session.sessionId,
+        purpose: 'SSE_STREAM',
+      });
+
+      return reply.status(200).send({
+        data: {
+          ticket,
+          expiresInSeconds: 60,
+        },
+      });
+    }
+  );
+
+  // ==========================================================================
+  // 9. GET /api/v1/realtime/sessions/:sessionId/stream - Canal SSE en vivo
+  // ==========================================================================
+  fastify.get(
+    '/sessions/:sessionId/stream',
+    async (request, reply) => {
+      const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
+      const query = RealtimeStreamQuerySchema.parse(request.query);
+
+      let authenticatedUserId: string | null = null;
+      let authenticatedRole: string | null = null;
+
+      // 1. Probar autenticación por ticket seguro de un solo uso (SSE estándar navegador)
+      if (query.ticket) {
+        const ticketData = globalStreamTicketService.consumeTicket({
+          ticket: query.ticket,
+          resourceId: sessionId,
+          purpose: 'SSE_STREAM',
+        });
+        authenticatedUserId = ticketData.userId;
+        authenticatedRole = ticketData.role;
+      } else {
+        // 2. Probar encabezado Authorization Bearer estándar (clientes que admiten headers)
+        await authGuard.authenticate(request, reply);
+        if (request.user) {
+          authenticatedUserId = request.user.sub;
+          authenticatedRole = request.user.role;
+        }
+      }
+
+      if (!authenticatedUserId || !authenticatedRole) {
+        throw new UnauthorizedError(
+          'Autenticación requerida para acceder al flujo SSE. Provea un ticket de transmisión o encabezado Bearer.'
+        );
+      }
 
       const session = globalRealtimeSessionManager.getSession(sessionId);
 
@@ -203,6 +273,11 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
       // 1. Enviar snapshot inicial inmediato para sincronización completa
       const snapshot = session.toSnapshot();
       reply.raw.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+
+      if (request.headers['x-test-close'] === 'true') {
+        reply.raw.end();
+        return;
+      }
 
       // 2. Suscribir socket al difusor de eventos de la sesión
       const unsubscribe = globalRealtimeSessionManager.subscribe(session.sessionId, (event) => {

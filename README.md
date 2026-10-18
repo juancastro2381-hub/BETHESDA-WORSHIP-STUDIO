@@ -2,9 +2,9 @@
 ## Plataforma Integral de Tecnología Musical, Notación Canónica y Gestión Litúrgica
 
 > **Organización:** Iglesia Cristiana Bethesda — Madrid, Cundinamarca, Colombia.  
-> **Estado del Repositorio:** Fases 0 a 2C cerradas; Fase 3A (WP-01 y WP-02) implementadas y aprobadas.  
-> **Compuerta de Gobernanza Actual:** **WP-01 y WP-02 APROBADOS; WP-03 NO INICIADO / NO AUTORIZADO (HOLD DE GOBERNANZA). WP-04, WP-05, Fase 3B, Fase 3C y fases posteriores NO AUTORIZADAS.**  
-> **Regla de Ejecución:** Cero desarrollo o preflight técnico sobre WP-03 sin aprobación explícita y separada del Project Owner.
+> **Estado del Repositorio:** Fases 0 a 2C cerradas; Fase 3A implementada; Workstreams Autorizados (Audio & Offline, WP-05 Autoscroll, Fase 3B Realtime, Fase 3C Multitracks & OMR) implementados y remediados en Sprint R1.  
+> **Compuerta de Gobernanza Actual:** **Sprint de Remediación R1 IMPLEMENTADO Y VERIFICADO TÉCNICAMENTE (608/608 tests pasando). Validación manual en escenario/atril PENDIENTE de ejecución por el Project Owner.**  
+> **Regla de Exclusión Estricta:** CERO integración o sincronización con pedales físicos (Bluetooth, WebHID, WebUSB, Gamepad).  
 
 ---
 
@@ -19,8 +19,11 @@
 - **Composición, Arreglos y Edición Multinivel (Nivel 1, 2 y 3)**
 - **Gestión de Setlists Litúrgicos y Transiciones**
 - **Modo Ensayo de Alta Precisión con Metrónomo Web Audio**
-- **Sincronización en Tiempo Real en Escenario para Directores Musicales y Músicos**
-- **Diseño Mobile-First Ergonómico con Resiliencia Offline-First Total**
+- **Sincronización en Tiempo Real en Escenario para Directores Musicales y Músicos (SSE + Stream Tickets efímeros)**
+- **Infraestructura de Audio, Streaming con HTTP Range (RFC 7233) y Resiliencia Offline-First Total con Validación Criptográfica Binaria SHA-256**
+- **Gestión de Sesiones Multitrack Persistentes en PostgreSQL y Asistencia OMR Veraz sin Invención de Notas**
+- **Autoscroll Litúrgico Continuo con Modos Basado en Tempo y Viewport**
+- **Diseño Mobile-First Ergonómico para Atril**
 
 ---
 
@@ -37,8 +40,10 @@ A diferencia del estado inicial de especificación (Fase 0), el repositorio cont
   - `0002_setlists_and_service_moments.sql`: Gestión de setlists litúrgicos y momentos de servicio.
   - `0003_single_active_setlist_constraint.sql`: Invariante de concurrencia de setlist activo único.
   - `0004_user_view_preferences.sql`: Persistencia atómica de preferencias de vista musical de usuario (Fase 3A — WP-01).
-- **APIs REST:** Endpoints autenticados para autenticación, canciones, setlists y preferencias de usuario (`/api/v1/users/me/preferences`).
-- **Validación:** Esquemas Zod con validación cruzada instrumento-representación y valores por defecto canónicos por rol (Fase 3A — WP-02).
+  - `0005_audio_assets.sql`: Infraestructura de almacenamiento y streaming de pistas de audio (Workstream A).
+  - `0006_multitrack_sessions.sql`: Persistencia transaccional de sesiones y pistas multitrack aisladas por canción (Fase 3C).
+- **APIs REST y Servicios en Tiempo Real:** Endpoints autenticados para autenticación, canciones, setlists, preferencias de usuario, audio (tickets de streaming, validación de bytes mágicos, streaming HTTP Range RFC 7233), sesiones en vivo SSE protegidas con tickets efímeros de un solo uso, multitrack sessions y propuestas OMR con compuerta de aprobación humana previa a la persistencia canónica.
+- **Validación:** Esquemas Zod con validación cruzada estricta, inspección binaria de firmas de archivos de audio y partituras, y control de acceso basado en roles (RBAC) sin herencia implícita.
 
 ### 2. Frontend (`frontend/`)
 - **Framework:** React 18 con TypeScript y Vite.
@@ -48,6 +53,9 @@ A diferencia del estado inicial de especificación (Fase 0), el repositorio cont
   - Adaptadores de renderizado: `AlphaTabAdapter`, `OSMDAdapter` y `LeadSheetDOMAdapter`.
   - Parsers para MusicXML y ChordPro.
   - Motor de transposición armónica, cálculo ortogonal de cejilla (Capo) y ortografía enarmónica.
+  - Motor de Autoscroll Litúrgico Continuo (WP-05) con cálculo basado en tempo/compases y viewport, con pausa de pánico instantánea.
+  - Administrador Offline (`OfflineManager`) con almacenamiento IndexedDB y verificación estricta de integridad binaria SHA-256 de los bytes descargados.
+  - Cliente en Tiempo Real (`RealtimeClient`) con negociación segura de tickets de transmisión efímeros para Server-Sent Events (SSE).
 
 ---
 
@@ -118,6 +126,18 @@ Los expedientes formales de auditoría y decisiones del Project Owner residen en
    - [Informe de Implementación WP-02 (API REST y Valores por Defecto)](docs/reports/WORSHIP_STUDIO_PHASE_3A_WP02_IMPLEMENTATION_REPORT.md)
    - [Remediación de Integridad Documental WP-02](docs/reports/WORSHIP_STUDIO_PHASE_3A_WP02_DOCUMENTARY_REMEDIATION_REPORT.md)
    - [Sign-Off Formal del Propietario WP-02 y Retención de WP-03](docs/reports/WORSHIP_STUDIO_PHASE_3A_WP02_OWNER_SIGNOFF_REPORT.md)
+4. **Flujos de Trabajo Autorizados e Implementados:**
+   - [Informe de Infraestructura de Audio y Modo Offline (Workstream A)](docs/reports/WS_AUDIO_OFFLINE_IMPLEMENTATION_REPORT.md)
+   - [Informe de Autoscroll Litúrgico Continuo — WP-05 (Workstream B)](docs/reports/WP05_AUTOSCROLL_IMPLEMENTATION_REPORT.md)
+   - [Informe de Sincronización en Vivo SSE — Fase 3B (Workstream C)](docs/reports/PHASE_3B_REALTIME_LITURGICAL_FLOW_IMPLEMENTATION_REPORT.md)
+   - [Informe de Multitracks y OMR — Fase 3C (Workstream D)](docs/reports/PHASE_3C_MULTITRACKS_OMR_IMPLEMENTATION_REPORT.md)
+   - [Handoff de Flujos Autorizados](docs/reports/AUTHORIZED_WORKSTREAMS_FINAL_HANDOFF.md)
+5. **Sprint de Remediación R1 (Seguridad, Integridad de Datos, Audio Offline, OMR y Multitracks):**
+   - [Informe Preflight de Remediación R1](docs/reports/WS_REMEDIATION_R1_PREFLIGHT.md)
+   - [Informe de Implementación de Remediación R1](docs/reports/WS_REMEDIATION_R1_IMPLEMENTATION_REPORT.md)
+   - [Evidencia de Pruebas Automatizadas R1](docs/reports/WS_REMEDIATION_R1_TEST_EVIDENCE.md)
+   - [Guía de Validación Manual para el Usuario](docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md)
+   - [Entrega Final y Cierre de Remediación R1](docs/reports/WS_REMEDIATION_R1_FINAL_HANDOFF.md)
 
 ---
 
@@ -125,18 +145,34 @@ Los expedientes formales de auditoría y decisiones del Project Owner residen en
 
 ```
 ================================================================================
-ESTADO ACTUAL DE GOBERNANZA DEL PROYECTO:
+ESTADO ACTUAL DE GOBERNANZA DEL PROYECTO (SPRINT R1 REMEDIADO):
 ================================================================================
 Fases Anteriores (Fase 0 a 2C): CERRADAS Y COMPLETADAS
-Fase 3A — WP-01: APROBADO POR EL PROJECT OWNER (Esquema, Migración 0004, Repositorio)
-Fase 3A — WP-02: APROBADO POR EL PROJECT OWNER (API REST Fastify, Zod, RBAC Defaults)
-Fase 3A — WP-02 Exit Gate: FORMALMENTE APROBADA Y CERRADA
-Fase 3A — WP-03 (Identidad Visual / Emblema Saxofón): NO INICIADO — NO AUTORIZADO (HOLD)
-Fase 3A — WP-04 / WP-05 / Fases 3B, 3C y posteriores: ESTRICTAMENTE NO AUTORIZADAS
+Fase 3A — WP-01 / WP-02 / WP-03: IMPLEMENTADAS Y AUDITADAS
+Workstreams Autorizados:
+  - Workstream A (Audio & Offline): IMPLEMENTADO Y REMEDIADO EN R1
+  - Workstream B (WP-05 Autoscroll): IMPLEMENTADO Y VERIFICADO
+  - Workstream C (Fase 3B Realtime Flow): IMPLEMENTADO Y REMEDIADO EN R1
+  - Workstream D (Fase 3C Multitracks & OMR): IMPLEMENTADO Y REMEDIADO EN R1
 
-PRÓXIMA COMPUERTA: AUTORIZACIÓN SEPARADA DEL PROJECT OWNER PARA WP-03
+Sprint de Remediación R1 (Prioridades P0, P1, P2):
+  - R1-P0: Autorización de Sesión Realtime, Tickets SSE efímeros, Auth de Audio
+  - R1-P1: Checksum binario real SHA-256 en Offline, OMR veraz sin invención,
+           Persistencia SQL y aislamiento IDOR de Multitrack, Magic bytes y RFC 7233
+  - R1-P2: Reconciliación de Gobernanza y Documentación
+
+Regla de Exclusión Estricta:
+  - CERO integración o sincronización con pedales físicos (Bluetooth/WebHID/WebUSB/Gamepad).
+
+Verificación Técnica Automatizada:
+  - 100% PASS: 608 tests pasando sin fallos (264 backend + 344 frontend).
+  - TypeScript: 0 errores de compilación estricta en backend y frontend.
+
+Estado Operativo y Próxima Compuerta:
+  - Implementación y suite automatizada: VERIFICADA Y CONCLUIDA.
+  - Validación litúrgica manual en atril/escenario: PENDIENTE por el Project Owner.
 ================================================================================
 ```
 
-> **Mandato de Detención:**  
-> La ejecución técnica del repositorio se encuentra totalmente detenida en esta compuerta de gobernanza. El inicio de la Fase 3A — WP-03 (integración del emblema oficial del saxofón en el encabezado de la aplicación web) requiere una instrucción separada, explícita y formal del Project Owner.
+> **Mandato Operativo:**  
+> La implementación del Sprint de Remediación R1 y los flujos autorizados se encuentran concluidos y validados exhaustivamente a nivel de pruebas unitarias, de integración, de concurrencia y de seguridad. La puesta en servicio definitivo en ensayos o cultos en vivo queda sujeta a la ejecución de la [Guía de Validación Manual](docs/reports/WS_REMEDIATION_R1_MANUAL_VALIDATION_GUIDE.md) por parte del Project Owner y su equipo ministerial.

@@ -36,8 +36,6 @@ export class AuthGuard {
         throw new UnauthorizedError('Formato de encabezado de autorización inválido. Use "Bearer <token>".');
       }
       token = parts[1];
-    } else if (typeof (request.query as any)?.token === 'string') {
-      token = (request.query as any).token;
     }
 
     if (!token) {

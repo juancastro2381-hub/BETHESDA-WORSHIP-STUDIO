@@ -1,9 +1,11 @@
 /**
  * @file multitrack-service.ts
- * @description Servicio de gestión de sesiones y pistas multipista (Fase 3C — D1).
+ * @description Servicio de gestión de sesiones y pistas multipista (Fase 3C — D1 / R1).
  *
  * Aplica:
  * - Vinculación obligatoria a AudioAssets autorizados de Workstream A (no duplica ni burla autorización).
+ * - Validación estricta de pertenencia: cada AudioAsset debe pertenecer a la misma canción (prevención de IDOR / contaminación cruzada).
+ * - Persistencia duradera en PostgreSQL a través de IMultitrackRepository.
  * - Validación de límites: volumen [0.0, 1.0], balance [-1.0, 1.0], offset [-5000, 5000] ms.
  * - Validación estricta de completitud offline: si falta una sola pista, se deniega la reproducción offline.
  * - CERO soporte de pedales físicos.
@@ -18,21 +20,32 @@ import type {
 } from '../domain/multitrack/types.ts';
 import type { IAudioRepository } from '../repositories/audio-repository.ts';
 import type { ISongRepository } from '../repositories/song-repository.ts';
+import {
+  type IMultitrackRepository,
+  DrizzleMultitrackRepository,
+} from '../repositories/multitrack-repository.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
 
 export class MultitrackService {
   private sessions: Map<string, MultitrackSession>;
   private audioRepo: IAudioRepository;
   private songRepo: ISongRepository;
+  private multitrackRepo: IMultitrackRepository;
 
-  constructor(audioRepo: IAudioRepository, songRepo: ISongRepository) {
+  constructor(
+    audioRepo: IAudioRepository,
+    songRepo: ISongRepository,
+    multitrackRepo?: IMultitrackRepository
+  ) {
     this.sessions = new Map();
     this.audioRepo = audioRepo;
     this.songRepo = songRepo;
+    this.multitrackRepo = multitrackRepo ?? new DrizzleMultitrackRepository();
   }
 
   /**
    * Crea una sesión multipista vinculada a una canción canónica y a recursos de audio autorizados.
+   * Persiste la sesión y pistas en PostgreSQL mediante transacción atómica.
    */
   public async createSession(
     dto: CreateMultitrackSessionDTO,
@@ -73,10 +86,17 @@ export class MultitrackService {
         throw new ValidationError(`El desfase de sincronización de la pista '${t.name}' debe estar entre -5000 y 5000 ms.`);
       }
 
-      // Verificar existencia y autorización del AudioAsset en Workstream A
+      // Verificar existencia del AudioAsset en Workstream A
       const asset = await this.audioRepo.findById(t.audioAssetId);
       if (!asset) {
         throw new NotFoundError('Recurso de audio (stem)', t.audioAssetId);
+      }
+
+      // Validar pertenencia estricta a la canción de la sesión (prevención IDOR / contaminación cruzada)
+      if (asset.songId !== dto.songId) {
+        throw new ValidationError(
+          `El recurso de audio '${t.name}' (${t.audioAssetId}) no pertenece a la canción de la sesión (${dto.songId}).`
+        );
       }
 
       tracks.push({
@@ -94,26 +114,60 @@ export class MultitrackService {
       });
     }
 
-    const session: MultitrackSession = {
-      id: sessionId,
-      songId: dto.songId,
-      title: dto.title,
-      durationSeconds: Math.max(0, dto.durationSeconds),
-      bpm: dto.bpm,
-      tracks,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    let session: MultitrackSession;
+    if (this.multitrackRepo) {
+      session = await this.multitrackRepo.createSession(
+        {
+          id: sessionId,
+          songId: dto.songId,
+          title: dto.title,
+          durationSeconds: Math.max(0, dto.durationSeconds),
+          bpm: dto.bpm,
+          createdByUserId: _userId,
+        },
+        tracks.map((tr) => ({
+          id: tr.id,
+          sessionId,
+          name: tr.name,
+          trackType: tr.trackType,
+          audioAssetId: tr.audioAssetId,
+          volume: tr.volume,
+          pan: tr.pan,
+          isMuted: tr.isMuted,
+          isSolo: tr.isSolo,
+          offsetMs: tr.offsetMs,
+          sortOrder: tr.sortOrder,
+        }))
+      );
+    } else {
+      session = {
+        id: sessionId,
+        songId: dto.songId,
+        title: dto.title,
+        durationSeconds: Math.max(0, dto.durationSeconds),
+        bpm: dto.bpm,
+        tracks,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
 
     this.sessions.set(sessionId, session);
     return session;
   }
 
   /**
-   * Obtiene una sesión multipista por ID.
+   * Obtiene una sesión multipista por ID, consultando la caché o la base de datos PostgreSQL.
    */
-  public getSession(sessionId: string): MultitrackSession {
-    const session = this.sessions.get(sessionId);
+  public async getSession(sessionId: string): Promise<MultitrackSession> {
+    let session = this.sessions.get(sessionId);
+    if (!session && this.multitrackRepo) {
+      const persisted = await this.multitrackRepo.findById(sessionId);
+      if (persisted) {
+        session = persisted;
+        this.sessions.set(sessionId, session);
+      }
+    }
     if (!session) {
       throw new NotFoundError('Sesión multipista', sessionId);
     }
@@ -121,14 +175,14 @@ export class MultitrackService {
   }
 
   /**
-   * Actualiza parámetros de mezcla de una pista (volumen, pan, mute, solo).
+   * Actualiza parámetros de mezcla de una pista (volumen, pan, mute, solo) de forma persistente.
    */
-  public updateTrackMix(
+  public async updateTrackMix(
     sessionId: string,
     trackId: string,
     updates: { volume?: number; pan?: number; isMuted?: boolean; isSolo?: boolean }
-  ): MultitrackTrack {
-    const session = this.getSession(sessionId);
+  ): Promise<MultitrackTrack> {
+    const session = await this.getSession(sessionId);
     const track = session.tracks.find((t) => t.id === trackId);
     if (!track) {
       throw new NotFoundError('Pista multipista', trackId);
@@ -157,6 +211,11 @@ export class MultitrackService {
     }
 
     session.updatedAt = new Date().toISOString();
+
+    if (this.multitrackRepo) {
+      await this.multitrackRepo.updateTrackMix(sessionId, trackId, updates);
+    }
+
     return track;
   }
 
@@ -164,11 +223,11 @@ export class MultitrackService {
    * Valida la completitud para reproducción offline.
    * Exige que TODOS los stems estén descargados y autorizados localmente.
    */
-  public checkOfflineCompleteness(
+  public async checkOfflineCompleteness(
     sessionId: string,
     availableLocalAssetIds: string[]
-  ): MultitrackOfflineStatus {
-    const session = this.getSession(sessionId);
+  ): Promise<MultitrackOfflineStatus> {
+    const session = await this.getSession(sessionId);
     const localSet = new Set(availableLocalAssetIds);
 
     const missingAssetIds: string[] = [];

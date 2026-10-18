@@ -981,4 +981,107 @@ describe('WP-04 — BethesdaOfflineManager Orchestration Suite', () => {
     assert.strictEqual(unownedMeta?.status, 'AVAILABLE_OFFLINE');
     assert.strictEqual(unownedMeta?.ownerUserId, null);
   });
+
+  // ==========================================================================
+  // R1-P1: INTEGRIDAD DE AUDIO OFFLINE Y CHECKSUM BINARIO REAL
+  // ==========================================================================
+
+  it('26. should compute exact SHA-256 over real binary bytes and detect modifications', async () => {
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+
+    const bytes1 = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const bytes2 = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const bytesModified = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 9]); // 1 bit/byte diferente
+
+    const hash1 = await computeBinarySha256(bytes1);
+    const hash2 = await computeBinarySha256(bytes2);
+    const hashModified = await computeBinarySha256(bytesModified);
+
+    assert.strictEqual(hash1, hash2, 'Identical bytes must produce identical SHA-256');
+    assert.notStrictEqual(hash1, hashModified, 'Modified bytes must produce different SHA-256');
+    assert.strictEqual(hash1.length, 64, 'SHA-256 hex must be 64 characters');
+  });
+
+  it('27. should download audio, verify expected binary checksum, and store verified record', async () => {
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+
+    const audioBytes = new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69]); // RIFF....WAVE
+    const expectedChecksum = await computeBinarySha256(audioBytes);
+
+    // Mock global fetch for this test
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(new Blob([audioBytes], { type: 'audio/wav' }), {
+        status: 200,
+        headers: { 'Content-Type': 'audio/wav' },
+      });
+    };
+
+    try {
+      manager = new BethesdaOfflineManager(storage);
+      manager.isOnline = () => true;
+
+      const result = await manager.downloadAudio(
+        'audio_verified_01',
+        'https://api.bethesda.test/audio/audio_verified_01/download',
+        'Pista de Batería',
+        'user_david',
+        expectedChecksum
+      );
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.resourceId, 'audio_verified_01');
+
+      // Verificar que el registro se guardó con el checksum correcto
+      const record = await storage.getAudioRecord('audio_verified_01');
+      assert.ok(record !== null, 'Audio record must exist in IndexedDB');
+      assert.strictEqual(record?.metadata.checksumSha256, expectedChecksum);
+      assert.strictEqual(record?.metadata.status, 'AVAILABLE_OFFLINE');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('28. should reject corrupted audio bytes when checksum does not match expected server hash', async () => {
+    const realBytes = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]);
+    const corruptedBytes = new Uint8Array([82, 73, 70, 70, 9, 9, 9, 9]); // Bytes alterados en tránsito
+
+    const { computeBinarySha256 } = await import('../offline-manager.ts');
+    const trustedServerChecksum = await computeBinarySha256(realBytes);
+
+    // Mock global fetch retornando bytes corruptos
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(new Blob([corruptedBytes], { type: 'audio/wav' }), {
+        status: 200,
+        headers: { 'Content-Type': 'audio/wav' },
+      });
+    };
+
+    try {
+      manager = new BethesdaOfflineManager(storage);
+      manager.isOnline = () => true;
+
+      const result = await manager.downloadAudio(
+        'audio_corrupted_01',
+        'https://api.bethesda.test/audio/audio_corrupted_01/download',
+        'Pista Corrupta',
+        'user_david',
+        trustedServerChecksum // Esperaba hash de realBytes, pero recibe corruptedBytes
+      );
+
+      assert.strictEqual(result.success, false, 'Download must fail on checksum mismatch');
+      assert.strictEqual(result.status, 'FAILED');
+      assert.ok(result.error?.includes('Fallo de integridad criptográfica'));
+
+      // Verificar que el registro fue marcado como FAILED en metadatos y no quedó AVAILABLE_OFFLINE
+      const meta = await storage.getMetadata('audio_corrupted_01');
+      assert.ok(meta !== null);
+      assert.strictEqual(meta?.status, 'FAILED');
+      assert.ok(meta?.errorMessage?.includes('Fallo de integridad criptográfica'));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
+

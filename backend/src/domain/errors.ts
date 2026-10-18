@@ -18,7 +18,8 @@ export type BackendErrorCode =
   | 'ACCOUNT_LOCKED'
   | 'TOKEN_EXPIRED'
   | 'TOKEN_INVALID'
-  | 'RATE_LIMIT_EXCEEDED';
+  | 'RATE_LIMIT_EXCEEDED'
+  | 'RANGE_NOT_SATISFIABLE';
 
 export class AppError extends Error {
   public readonly code: BackendErrorCode;
@@ -158,3 +159,14 @@ export class RateLimitExceededError extends AppError {
     this.name = 'RateLimitExceededError';
   }
 }
+
+export class RangeNotSatisfiableError extends AppError {
+  public constructor(
+    message: string = 'El rango solicitado no es satisfacible.',
+    totalSize: number = 0
+  ) {
+    super('RANGE_NOT_SATISFIABLE', message, 416, { totalSize });
+    this.name = 'RangeNotSatisfiableError';
+  }
+}
+

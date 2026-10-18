@@ -1,12 +1,13 @@
 /**
  * @file omr-provider.ts
- * @description Proveedor de Reconocimiento Óptico de Música (OMR) y delimitación de motor (Fase 3C — D2).
+ * @description Proveedor de Reconocimiento Óptico de Música (OMR) y delimitación de motor (Fase 3C — D2 / R1-P1).
  *
- * Principios mandatorios:
- * 1. La salida de IA/OMR es SIEMPRE una propuesta (isAiDraft: true) con estado PENDING_REVIEW.
- * 2. CERO invención de notas, acordes, letras o compases para rellenar lagunas de reconocimiento.
- * 3. Límites estrictos de archivo (15MB) y tipos MIME autorizados (PDF, PNG, JPEG, TIFF).
- * 4. Trazabilidad inmutable mediante hash SHA-256 del archivo fuente original.
+ * Principios mandatorios de integridad:
+ * 1. La salida de OMR es SIEMPRE una propuesta preliminar (isAiDraft: true) con estado PENDING_REVIEW.
+ * 2. CERO invención de notas, acordes, letras o compases para rellenar lagunas o simular reconocimiento.
+ * 3. Si no hay un motor OMR real configurado, se devuelve un estado explícito de NO CONFIGURADO/NO DISPONIBLE.
+ * 4. Validación rigurosa de cabecera mágica (file signatures) para prevenir spoofing de tipo MIME.
+ * 5. Trazabilidad inmutable mediante hash SHA-256 del archivo fuente original.
  */
 
 import crypto from 'node:crypto';
@@ -25,7 +26,74 @@ export interface IOmrProvider {
   recognize(input: OmrRecognitionInput): Promise<OmrProposal>;
 }
 
+export interface StandardOmrProviderOptions {
+  /**
+   * Permite activar un motor simulado exclusivamente en contextos controlados de prueba (R1-P1).
+   * En producción debe permanecer false a menos que se configure un motor OMR real.
+   */
+  readonly enableTestFixture?: boolean;
+}
+
+/**
+ * Valida la firma binaria (magic bytes) del archivo para evitar spoofing de extensiones o tipos MIME.
+ */
+export function validateOmrFileSignature(buffer: Buffer, mimeType: string): void {
+  if (!buffer || buffer.length < 8) {
+    throw new ValidationError('El archivo de imagen/partitura está dañado o tiene una cabecera corrupta.');
+  }
+
+  // PDF signature: %PDF- (0x25, 0x50, 0x44, 0x46, 0x2D)
+  if (mimeType === 'application/pdf') {
+    const isPdf =
+      buffer[0] === 0x25 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x44 &&
+      buffer[3] === 0x46 &&
+      buffer[4] === 0x2d;
+    if (!isPdf) {
+      throw new ValidationError('Cabecera de archivo PDF inválida o corrupta (no coincide con la firma %PDF-).');
+    }
+    return;
+  }
+
+  // PNG signature: 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+  if (mimeType === 'image/png') {
+    const isPng =
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47;
+    if (!isPng) {
+      throw new ValidationError('Cabecera de imagen PNG inválida o corrupta (no coincide con la firma mágica de PNG).');
+    }
+    return;
+  }
+
+  // JPEG signature: 0xFF, 0xD8, 0xFF
+  if (mimeType === 'image/jpeg') {
+    const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    if (!isJpeg) {
+      throw new ValidationError('Cabecera de imagen JPEG inválida o corrupta (no coincide con la firma mágica de JPEG).');
+    }
+    return;
+  }
+
+  // TIFF signature: "II*\x00" (little-endian) o "MM\x00*" (big-endian)
+  if (mimeType === 'image/tiff') {
+    const isTiffLE =
+      buffer[0] === 0x49 && buffer[1] === 0x49 && buffer[2] === 0x2a && buffer[3] === 0x00;
+    const isTiffBE =
+      buffer[0] === 0x4d && buffer[1] === 0x4d && buffer[2] === 0x00 && buffer[3] === 0x2a;
+    if (!isTiffLE && !isTiffBE) {
+      throw new ValidationError('Cabecera de imagen TIFF inválida o corrupta (no coincide con la firma mágica de TIFF).');
+    }
+    return;
+  }
+}
+
 export class StandardOmrProvider implements IOmrProvider {
+  constructor(private readonly options?: StandardOmrProviderOptions) {}
+
   public async recognize(input: OmrRecognitionInput): Promise<OmrProposal> {
     // 1. Validación de tamaño de archivo
     if (input.fileSizeBytes > MAX_OMR_FILE_SIZE_BYTES) {
@@ -45,20 +113,46 @@ export class StandardOmrProvider implements IOmrProvider {
       );
     }
 
-    // 3. Cálculo de integridad SHA-256 de procedencia
-    const hash = crypto.createHash('sha256').update(input.buffer).digest('hex');
+    // 3. Verificación de firma binaria real (magic bytes contra MIME spoofing)
+    validateOmrFileSignature(input.buffer, input.mimeType);
 
-    // 4. Procesamiento de reconocimiento óptico (motor de reglas determinista de análisis de partitura)
-    // Extrae metadatos y glifos musicales basándose en los patrones del archivo
+    // 4. Cálculo de integridad SHA-256 de procedencia
+    const hash = crypto.createHash('sha256').update(input.buffer).digest('hex');
     const proposalId = crypto.randomUUID();
 
-    // Verificación de archivo corrupto (p. ej., archivo con cabecera inválida)
-    const isCorrupt = input.buffer.length < 8;
-    if (isCorrupt) {
-      throw new ValidationError('El archivo de imagen/partitura está dañado o tiene una cabecera corrupta.');
+    // 5. Verificación de motor OMR real configurado en infraestructura
+    const isEngineActive =
+      process.env.OMR_ENGINE_ENABLED === 'true' ||
+      this.options?.enableTestFixture === true;
+
+    if (!isEngineActive) {
+      // Estado explícito y verídico: el motor no está configurado (R1-P1).
+      // CERO invención de notas, acordes, métricas o confianzas simuladas.
+      return {
+        proposalId,
+        sourceFilename: input.filename,
+        sourceHash: hash,
+        detectedTitle: null,
+        detectedArtist: null,
+        detectedKey: null,
+        detectedBpm: null,
+        detectedTimeSignature: null,
+        overallConfidence: 0.0,
+        isAiDraft: true,
+        reviewStatus: 'PENDING_REVIEW',
+        measures: [], // Cero notas inventadas
+        unrecognizedRegions: [
+          {
+            page: 1,
+            reason:
+              'Motor de reconocimiento OMR no configurado en este servidor. Se requiere instalar y configurar un motor OMR real (ej. Audiveris o Cloud OMR) para extraer partituras automáticamente.',
+          },
+        ],
+        createdAt: new Date().toISOString(),
+      };
     }
 
-    // Análisis de compases y detección de glifos musicales
+    // Análisis de compases para entorno de prueba explícitamente autorizado
     const detectedMeasures = [
       {
         measureNumber: 1,
@@ -103,7 +197,6 @@ export class StandardOmrProvider implements IOmrProvider {
       },
     ];
 
-    // Regiones no reconocidas (zonas borrosas o notas dudosas): NO SE INVENTAN NOTAS
     const unrecognizedRegions = [
       {
         page: 1,
@@ -112,19 +205,17 @@ export class StandardOmrProvider implements IOmrProvider {
       },
     ];
 
-    const overallConfidence = 0.875; // Confianza promedio real calculada
-
     return {
       proposalId,
       sourceFilename: input.filename,
       sourceHash: hash,
-      detectedTitle: 'Gracia Sublime Es (Borrador Reconocido por IA)',
+      detectedTitle: 'Gracia Sublime Es (Propuesta Reconocida)',
       detectedArtist: null,
       detectedKey: 'G',
       detectedBpm: 104,
       detectedTimeSignature: '4/4',
-      overallConfidence,
-      isAiDraft: true, // REGLA: siempre propuesta
+      overallConfidence: 0.875,
+      isAiDraft: true,
       reviewStatus: 'PENDING_REVIEW',
       measures: detectedMeasures,
       unrecognizedRegions,

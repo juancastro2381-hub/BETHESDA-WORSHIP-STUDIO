@@ -125,14 +125,33 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
           return;
         }
 
-        // 2. Si no está en local y estamos online, usar streaming autenticado
+        // 2. Si no está en local y estamos online, usar streaming autenticado mediante ticket (R1-P0)
         if (isOnline) {
           const client = BethesdaApiClient.getInstance();
-          const streamUrl = client.getAudioStreamUrl(selectedAssetId);
-          if (!isCancelled) {
-            setAudioSrc(streamUrl);
-            setIsLocalOffline(false);
-            setIsSavedOffline(false);
+          try {
+            const streamUrl = await client.getAudioPlaybackStreamUrl(selectedAssetId);
+            if (!isCancelled) {
+              setAudioSrc(streamUrl);
+              setIsLocalOffline(false);
+              setIsSavedOffline(false);
+            }
+          } catch {
+            // Fallback de contingencia a blob autenticado directo si el endpoint de tickets no responde
+            try {
+              const { blob } = await client.downloadAudioBlob(selectedAssetId);
+              if (!isCancelled) {
+                const objUrl = URL.createObjectURL(blob);
+                currentObjectUrlRef.current = objUrl;
+                setAudioSrc(objUrl);
+                setIsLocalOffline(false);
+                setIsSavedOffline(false);
+              }
+            } catch (fallbackErr: any) {
+              if (!isCancelled) {
+                setError(fallbackErr?.message ?? 'Error al conectar con la pista de audio.');
+                setAudioSrc(null);
+              }
+            }
           }
         } else {
           if (!isCancelled) {
@@ -169,13 +188,20 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     try {
       const selectedTrack = audioAssets.find((a) => a.id === selectedAssetId);
       const title = selectedTrack?.title ?? songTitle;
+      const expectedChecksum = selectedTrack?.checksumSha256 ?? null;
 
-      const result = await offlineManager.downloadAudio(selectedAssetId, undefined, title);
+      const result = await offlineManager.downloadAudio(
+        selectedAssetId,
+        undefined,
+        title,
+        null,
+        expectedChecksum
+      );
 
       if (result.success) {
         setIsSavedOffline(true);
         // Recargar como fuente local para usar IndexedDB
-        const localUrl = await offlineManager.getAudioObjectUrl(selectedAssetId);
+        const localUrl = await offlineManager.getAudioObjectUrl(selectedAssetId, true);
         if (localUrl) {
           if (currentObjectUrlRef.current) {
             URL.revokeObjectURL(currentObjectUrlRef.current);

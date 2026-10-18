@@ -13,6 +13,9 @@ import { AudioService } from '../../../application/audio-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
+import { UnauthorizedError } from '../../../domain/errors.ts';
+import { ROLE_PERMISSIONS, type UserRole } from '../../../domain/auth-types.ts';
+import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 
 const UploadAudioBodySchema = z.object({
   title: z.string().min(1).max(255),
@@ -107,15 +110,71 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 4. GET /api/v1/audio/:id/stream - Streaming con soporte Range (HTTP 206 / 200)
-  fastify.get(
-    '/audio/:id/stream',
+  // 4a. POST /api/v1/audio/:id/ticket - Emitir ticket temporal para streaming de audio en <audio>
+  fastify.post(
+    '/audio/:id/ticket',
     {
       preHandler: [authGuard.requirePermission('songs:read')],
     },
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
+      const user = request.user!;
+
+      // Validar que el activo exista
+      await audioService.getAudioById(id);
+
+      const ticket = globalStreamTicketService.issueTicket({
+        userId: user.sub,
+        role: user.role,
+        resourceId: id,
+        purpose: 'AUDIO_STREAM',
+      });
+
+      return reply.status(200).send({
+        data: {
+          ticket,
+          expiresInSeconds: 60,
+        },
+      });
+    }
+  );
+
+  // 4b. GET /api/v1/audio/:id/stream - Streaming con soporte Range (HTTP 206 / 200)
+  fastify.get(
+    '/audio/:id/stream',
+    async (request, reply) => {
+      const { id } = AudioIdParamSchema.parse(request.params);
       const rangeHeader = request.headers.range;
+      const ticketQuery = (request.query as any)?.ticket as string | undefined;
+
+      let authenticatedUserId: string | null = null;
+
+      if (ticketQuery) {
+        // Validar ticket multimedia sin quemar inmediatamente para permitir Range requests sucesivos durante seeking
+        const ticketData = globalStreamTicketService.consumeTicket(
+          {
+            ticket: ticketQuery,
+            resourceId: id,
+            purpose: 'AUDIO_STREAM',
+          },
+          false
+        );
+        authenticatedUserId = ticketData.userId;
+      } else {
+        await authGuard.authenticate(request, reply);
+        if (request.user) {
+          const permissions = ROLE_PERMISSIONS[request.user.role as UserRole] || [];
+          if (permissions.includes('songs:read')) {
+            authenticatedUserId = request.user.sub;
+          }
+        }
+      }
+
+      if (!authenticatedUserId) {
+        throw new UnauthorizedError(
+          'Autenticación requerida para streaming de audio. Provea un ticket de reproducción o encabezado Bearer.'
+        );
+      }
 
       const streamResult = await audioService.streamAudio(id, rangeHeader);
 

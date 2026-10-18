@@ -40,7 +40,7 @@ export const RealtimeActionBodySchema = z.object({
 export type RealtimeActionBody = z.infer<typeof RealtimeActionBodySchema>;
 
 export const RealtimeStreamQuerySchema = z.object({
-  token: z.string().optional(),
+  ticket: z.string().min(1).optional(),
 });
 
 export type RealtimeStreamQuery = z.infer<typeof RealtimeStreamQuerySchema>;

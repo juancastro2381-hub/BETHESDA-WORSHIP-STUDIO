@@ -287,6 +287,86 @@ describe('Workstream A — Audio Infrastructure, Download & Range Streaming Suit
     );
   });
 
+  it('9b. should reject MIME spoofing when file magic bytes do not match declared MIME type', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${leaderToken}`,
+      },
+      payload: {
+        title: 'Archivo de Texto Falsificado',
+        filename: 'fake_audio.wav',
+        mimeType: 'audio/wav',
+        dataBase64: Buffer.from('PLAIN TEXT CONTENT WITHOUT RIFF/WAVE HEADER').toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 400, 'Debe retornar 400 ante spoofing');
+    const json = res.json();
+    assert.ok(json.error.message.includes('magic bytes') || json.error.message.includes('firma válida'));
+  });
+
+  it('9c. should correctly handle suffix HTTP Range requests (bytes=-N)', async () => {
+    const suffixLength = 15;
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${createdAudioId}/stream`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+        range: `bytes=-${suffixLength}`,
+      },
+    });
+
+    assert.equal(res.statusCode, 206, 'Debe retornar 206 Partial Content para suffix range');
+    const total = sampleAudioBuffer.length;
+    const expectedStart = total - suffixLength;
+    const expectedEnd = total - 1;
+    assert.equal(res.headers['content-range'], `bytes ${expectedStart}-${expectedEnd}/${total}`);
+    assert.equal(res.headers['content-length'], suffixLength.toString());
+
+    const expectedChunk = sampleAudioBuffer.subarray(expectedStart, total);
+    assert.equal(res.rawPayload.toString(), expectedChunk.toString());
+  });
+
+  it('9d. should return 416 Range Not Satisfiable when requested range is out of bounds', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${createdAudioId}/stream`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+        range: 'bytes=99999-100000',
+      },
+    });
+
+    assert.equal(res.statusCode, 416, 'Debe retornar 416 Range Not Satisfiable');
+    assert.ok(res.headers['content-range']?.startsWith('bytes */'));
+  });
+
+  it('9e. should issue streaming ticket and permit audio streaming via ticket query parameter without Authorization header', async () => {
+    // 1. Solicitar ticket de streaming de 60s
+    const ticketRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${createdAudioId}/ticket`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+      },
+    });
+
+    assert.equal(ticketRes.statusCode, 200);
+    const { ticket } = ticketRes.json().data;
+    assert.ok(ticket, 'Debe generar un ticket seguro');
+
+    // 2. Reproducir stream usando el ticket sin cabecera Authorization
+    const streamRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${createdAudioId}/stream?ticket=${ticket}`,
+    });
+
+    assert.equal(streamRes.statusCode, 200, 'Debe permitir streaming autenticado vía ticket seguro');
+    assert.equal(streamRes.headers['content-length'], sampleAudioBuffer.length.toString());
+  });
+
   it('10. should delete audio asset cleanly from database and physical storage', async () => {
     const res = await app.inject({
       method: 'DELETE',

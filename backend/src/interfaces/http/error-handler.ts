@@ -13,6 +13,10 @@ export function errorHandler(error: FastifyError | Error, request: FastifyReques
 
   // 1. Error de Dominio de la Aplicación (AppError)
   if (error instanceof AppError) {
+    if (error.statusCode === 416) {
+      const totalSize = (error.details as any)?.totalSize ?? '*';
+      reply.header('Content-Range', `bytes */${totalSize}`);
+    }
     return reply.status(error.statusCode).send(error.toJSON());
   }
 

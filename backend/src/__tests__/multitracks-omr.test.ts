@@ -30,6 +30,7 @@ import { runMigrations } from '../db/migrate.ts';
 import { DrizzleUserRepository } from '../repositories/user-repository.ts';
 import { DrizzleSongRepository } from '../repositories/song-repository.ts';
 import { DrizzleAudioRepository } from '../repositories/audio-repository.ts';
+import { DrizzleMultitrackRepository } from '../repositories/multitrack-repository.ts';
 import { LocalFileSystemAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { MultitrackService } from '../application/multitrack-service.ts';
 import { OmrService } from '../application/omr-service.ts';
@@ -45,6 +46,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
   let userRepo: DrizzleUserRepository;
   let songRepo: DrizzleSongRepository;
   let audioRepo: DrizzleAudioRepository;
+  let multitrackRepo: DrizzleMultitrackRepository;
   let storageProvider: LocalFileSystemAudioStorageProvider;
   let multitrackService: MultitrackService;
   let omrService: OmrService;
@@ -64,12 +66,13 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     userRepo = new DrizzleUserRepository();
     songRepo = new DrizzleSongRepository();
     audioRepo = new DrizzleAudioRepository();
+    multitrackRepo = new DrizzleMultitrackRepository();
     storageProvider = new LocalFileSystemAudioStorageProvider(
       env.AUDIO_STORAGE_PATH,
       env.MAX_AUDIO_FILE_SIZE_BYTES
     );
-    multitrackService = new MultitrackService(audioRepo, songRepo);
-    omrService = new OmrService(new StandardOmrProvider(), songRepo);
+    multitrackService = new MultitrackService(audioRepo, songRepo, multitrackRepo);
+    omrService = new OmrService(new StandardOmrProvider({ enableTestFixture: true }), songRepo);
 
     const timestamp = Date.now();
 
@@ -271,11 +274,11 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     );
   });
 
-  it('D1.4: should update track mix parameters correctly', () => {
-    const session = multitrackService.getSession(activeSessionId);
+  it('D1.4: should update track mix parameters correctly', async () => {
+    const session = await multitrackService.getSession(activeSessionId);
     const trackToUpdate = session.tracks[0];
 
-    const updated = multitrackService.updateTrackMix(activeSessionId, trackToUpdate.id, {
+    const updated = await multitrackService.updateTrackMix(activeSessionId, trackToUpdate.id, {
       volume: 0.7,
       pan: 0.2,
       isMuted: true,
@@ -288,9 +291,9 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.equal(updated.isSolo, false);
   });
 
-  it('D1.5: should enforce offline completeness: false if a stem is missing, true only if all present', () => {
+  it('D1.5: should enforce offline completeness: false if a stem is missing, true only if all present', async () => {
     // Escenario A: Solo 1 de 2 stems disponibles localmente
-    const statusIncomplete = multitrackService.checkOfflineCompleteness(activeSessionId, [
+    const statusIncomplete = await multitrackService.checkOfflineCompleteness(activeSessionId, [
       testStemAsset1.id,
     ]);
     assert.equal(statusIncomplete.isFullyAvailableOffline, false);
@@ -299,13 +302,63 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.equal(statusIncomplete.missingAssetIds[0], testStemAsset2.id);
 
     // Escenario B: Ambos stems presentes localmente
-    const statusComplete = multitrackService.checkOfflineCompleteness(activeSessionId, [
+    const statusComplete = await multitrackService.checkOfflineCompleteness(activeSessionId, [
       testStemAsset1.id,
       testStemAsset2.id,
     ]);
     assert.equal(statusComplete.isFullyAvailableOffline, true);
     assert.equal(statusComplete.downloadedTracks, 2);
     assert.equal(statusComplete.missingAssetIds.length, 0);
+  });
+
+  it('D1.6: should reject audio asset belonging to a different song (cross-song stem association prevention)', async () => {
+    const song2Result = await songRepo.create({
+      title: 'Segunda Canción — Aislamiento de Stems',
+      artist: 'Artista Desconocido',
+      defaultKey: 'D',
+      defaultBpm: 80,
+      timeSignature: '4/4',
+      status: 'APPROVED',
+      versionName: 'Principal',
+      sourceFormat: 'INTERNAL',
+      canonicalPayload: CanonicalSerializer.serialize(createReferenceSongFixture()),
+    });
+    createdSongIds.add(song2Result.song.id);
+
+    // Intentar asociar testStemAsset1 (de testSong) a una sesión de song2
+    await assert.rejects(
+      async () => {
+        await multitrackService.createSession(
+          {
+            songId: song2Result.song.id,
+            title: 'Sesión Inválida con Stem Cruzado',
+            durationSeconds: 120,
+            bpm: 80,
+            tracks: [
+              {
+                name: 'Stem Ajeno',
+                trackType: 'OTHER',
+                audioAssetId: testStemAsset1.id,
+              },
+            ],
+          },
+          testUser.id
+        );
+      },
+      { name: 'ValidationError' }
+    );
+  });
+
+  it('D1.7: should persist multitrack session to PostgreSQL and survive service recreation', async () => {
+    // Recrear el servicio desde cero simulando reinicio de backend / diferentes instancias
+    const restartedService = new MultitrackService(audioRepo, songRepo, new DrizzleMultitrackRepository());
+    const recoveredSession = await restartedService.getSession(activeSessionId);
+
+    assert.ok(recoveredSession);
+    assert.equal(recoveredSession.id, activeSessionId);
+    assert.equal(recoveredSession.songId, testSong.id);
+    assert.equal(recoveredSession.tracks.length, 2);
+    assert.equal(recoveredSession.tracks[0].volume, 0.7); // Parámetro actualizado en D1.4
   });
 
   // ==========================================================================
@@ -404,7 +457,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     );
   });
 
-  it('D2.6: should allow canonical commit only after explicit human approval', async () => {
+  it('D2.6: should allow canonical commit only after explicit human approval and preserve real recognized measures', async () => {
     // 1. Músico humano revisa y aprueba
     const reviewed = omrService.reviewProposal(testProposalId, testUser.id, 'APPROVED_FOR_IMPORT');
     assert.equal(reviewed.reviewStatus, 'APPROVED_FOR_IMPORT');
@@ -420,6 +473,41 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.equal(createdSong.song.status, 'APPROVED');
     assert.ok(createdSong.version.canonicalPayload);
     createdSongIds.add(createdSong.song.id);
+
+    // R1-P1: Verificar que el contenido canónico proviene directamente de la propuesta y NO de un fixture estático
+    const payload = createdSong.version.canonicalPayload as any;
+    assert.equal(payload.measures.length, 4, 'Debe contener los 4 compases de la propuesta aprobada');
+    assert.equal(payload.measures[0].lyrics[0].text, 'Gra-');
+    assert.equal(payload.measures[0].chords[0].chord.root, 'G');
+  });
+
+  it('D2.7: should truthfully report unconfigured state with zero notes when real OMR engine is absent', async () => {
+    // Servicio con proveedor OMR estándar por defecto (sin motor configurado)
+    const unconfiguredOmrService = new OmrService(new StandardOmrProvider(), songRepo);
+    const mockPdf = Buffer.from('%PDF-1.4 raw score content without external engine');
+
+    const proposal = await unconfiguredOmrService.processUpload(
+      {
+        buffer: mockPdf,
+        filename: 'unconfigured_test.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: mockPdf.length,
+      },
+      testUser.id
+    );
+
+    assert.equal(proposal.overallConfidence, 0.0);
+    assert.equal(proposal.measures.length, 0, 'No debe fabricar notas si el motor no está configurado');
+    assert.ok(proposal.unrecognizedRegions[0].reason.includes('no configurado'));
+
+    // Intentar aprobar y cometer propuesta sin compases debe ser rechazado
+    unconfiguredOmrService.reviewProposal(proposal.proposalId, testUser.id, 'APPROVED_FOR_IMPORT');
+    await assert.rejects(
+      async () => {
+        await unconfiguredOmrService.commitToCanonicalSong(proposal.proposalId, testUser.id);
+      },
+      { name: 'ValidationError' }
+    );
   });
 
   it('D.EXCLUSION: should strictly verify zero physical pedal synchronization in Multitracks & OMR', () => {

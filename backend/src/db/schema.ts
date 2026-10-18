@@ -22,6 +22,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -604,10 +605,101 @@ export type UserViewPreferenceEntity = typeof userViewPreferences.$inferSelect;
 export type NewUserViewPreferenceEntity = typeof userViewPreferences.$inferInsert;
 
 // ============================================================================
+// ENTIDADES DE MULTITRACKS Y MEZCLA (FASE 3C — WORKSTREAM R1)
+// ============================================================================
+
+/**
+ * Tabla: multitrack_sessions
+ * Sesiones de multipistas persistentes asociadas a una canción canónica.
+ */
+export const multitrackSessions = pgTable(
+  'multitrack_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    songId: uuid('song_id')
+      .notNull()
+      .references(() => songs.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    durationSeconds: integer('duration_seconds').notNull().default(0),
+    bpm: integer('bpm').notNull().default(120),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_multitrack_sessions_song_id').on(table.songId),
+    index('idx_multitrack_sessions_created_by').on(table.createdByUserId),
+  ]
+);
+
+/**
+ * Tabla: multitrack_tracks
+ * Pistas o stems individuales pertenecientes a una sesión de multipistas.
+ */
+export const multitrackTracks = pgTable(
+  'multitrack_tracks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => multitrackSessions.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 255 }).notNull(),
+    trackType: varchar('track_type', { length: 64 }).notNull(),
+    audioAssetId: uuid('audio_asset_id')
+      .notNull()
+      .references(() => audioAssets.id, { onDelete: 'cascade' }),
+    volume: real('volume').notNull().default(0.8),
+    pan: real('pan').notNull().default(0),
+    isMuted: boolean('is_muted').notNull().default(false),
+    isSolo: boolean('is_solo').notNull().default(false),
+    offsetMs: integer('offset_ms').notNull().default(0),
+    sortOrder: integer('sort_order').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_multitrack_tracks_session_id').on(table.sessionId),
+    index('idx_multitrack_tracks_audio_asset_id').on(table.audioAssetId),
+  ]
+);
+
+export const multitrackSessionsRelations = relations(multitrackSessions, ({ one, many }) => ({
+  song: one(songs, {
+    fields: [multitrackSessions.songId],
+    references: [songs.id],
+  }),
+  createdByUser: one(users, {
+    fields: [multitrackSessions.createdByUserId],
+    references: [users.id],
+  }),
+  tracks: many(multitrackTracks),
+}));
+
+export const multitrackTracksRelations = relations(multitrackTracks, ({ one }) => ({
+  session: one(multitrackSessions, {
+    fields: [multitrackTracks.sessionId],
+    references: [multitrackSessions.id],
+  }),
+  audioAsset: one(audioAssets, {
+    fields: [multitrackTracks.audioAssetId],
+    references: [audioAssets.id],
+  }),
+}));
+
+// ============================================================================
 // TIPOS INFERIDOS DRIZZLE ORM (WORKSTREAM A — AUDIO)
 // ============================================================================
 
 export type AudioAsset = typeof audioAssets.$inferSelect;
 export type NewAudioAsset = typeof audioAssets.$inferInsert;
+
+// ============================================================================
+// TIPOS INFERIDOS DRIZZLE ORM (FASE 3C — MULTITRACKS)
+// ============================================================================
+
+export type MultitrackSessionRow = typeof multitrackSessions.$inferSelect;
+export type NewMultitrackSessionRow = typeof multitrackSessions.$inferInsert;
+export type MultitrackTrackRow = typeof multitrackTracks.$inferSelect;
+export type NewMultitrackTrackRow = typeof multitrackTracks.$inferInsert;
 
 

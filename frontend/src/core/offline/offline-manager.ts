@@ -28,6 +28,7 @@ import {
   OFFLINE_POLICIES,
 } from './types.ts';
 import { BethesdaOfflineStorage, offlineStorage } from './storage/indexeddb-storage.ts';
+import { tokenManager } from '../auth/token-manager.ts';
 
 /**
  * Calcula el hash SHA-256 de una cadena de texto de forma compatible con navegador y Node.js.
@@ -55,6 +56,27 @@ export async function computeSha256(content: string): Promise<string> {
       hash |= 0;
     }
     return Math.abs(hash).toString(16).padStart(64, '0');
+  }
+}
+
+/**
+ * Calcula el hash SHA-256 de un buffer binario (ArrayBuffer o Uint8Array)
+ * de forma compatible con navegador (crypto.subtle) y Node.js (R1-P1).
+ */
+export async function computeBinarySha256(data: ArrayBuffer | Uint8Array): Promise<string> {
+  const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+  if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', uint8 as unknown as BufferSource);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  try {
+    const moduleName = 'crypto';
+    const nodeCrypto = await import(/* @vite-ignore */ moduleName);
+    return nodeCrypto.createHash('sha256').update(uint8).digest('hex');
+  } catch {
+    throw new Error('No crypto engine available to compute binary SHA-256');
   }
 }
 
@@ -379,12 +401,15 @@ export class BethesdaOfflineManager {
 
   /**
    * Descarga una pista de audio (referencia/acompañamiento), valida su integridad y la almacena.
+   * R1-P0: Adjunta encabezado Authorization: Bearer <token> para autenticación consistente.
+   * R1-P1: Calcula SHA-256 sobre los bytes binarios reales y valida contra checksum esperado.
    */
   public async downloadAudio(
     audioId: string,
     audioUrl?: string,
     title?: string,
-    currentUserId?: string | null
+    currentUserId?: string | null,
+    expectedChecksumSha256?: string | null
   ): Promise<OfflineDownloadResult> {
     const abortController = new AbortController();
     this.activeAbortControllers.set(audioId, abortController);
@@ -403,13 +428,20 @@ export class BethesdaOfflineManager {
         percentage: 10,
       });
 
-      // 1. Descarga vía fetch con señal de cancelación y credenciales de sesión
+      // 1. Descarga vía fetch con señal de cancelación y token Bearer auténtico (R1-P0)
       const targetUrl = audioUrl && audioUrl.trim().length > 0
         ? audioUrl
         : `${this.apiClient.baseUrl}/audio/${audioId}/download`;
 
+      const headers: Record<string, string> = {};
+      const token = tokenManager.getToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch(targetUrl, {
         signal: abortController.signal,
+        headers,
         credentials: 'include',
       });
 
@@ -443,8 +475,21 @@ export class BethesdaOfflineManager {
         throw new OfflineStorageError('CORRUPTED_RESOURCE', 'El archivo de audio descargado está vacío (0 bytes).');
       }
 
+      // 4. Verificación de integridad binaria real sobre los bytes descargados (R1-P1)
+      const buffer = await blob.arrayBuffer();
+      const checksumSha256 = await computeBinarySha256(buffer);
+
+      // Si el servidor o llamador proveyó un checksum esperado confiable, validarlo estrictamente
+      if (expectedChecksumSha256 && expectedChecksumSha256.trim().length > 0) {
+        if (checksumSha256.toLowerCase() !== expectedChecksumSha256.trim().toLowerCase()) {
+          throw new OfflineStorageError(
+            'CORRUPTED_RESOURCE',
+            `Fallo de integridad criptográfica: el hash de los bytes descargados (${checksumSha256.slice(0, 12)}...) no coincide con el checksum esperado (${expectedChecksumSha256.slice(0, 12)}...).`
+          );
+        }
+      }
+
       const nowIso = new Date().toISOString();
-      const checksumSha256 = await computeSha256(`AUDIO_${audioId}_${blob.size}`);
 
       const metadata: OfflineResourceMetadata = {
         id: audioId,
@@ -467,7 +512,7 @@ export class BethesdaOfflineManager {
         mimeType: blob.type || 'audio/mpeg',
       };
 
-      // 3. Almacenar el blob en IndexedDB
+      // 5. Almacenar el blob verificado en IndexedDB
       await this.storage.saveAudioRecord(record);
 
       return {
@@ -511,8 +556,9 @@ export class BethesdaOfflineManager {
   /**
    * Genera una URL de objeto (blob URL) para reproducir localmente un audio sin conexión.
    * Si la autorización expiró y el cliente está offline, bloquea la reproducción (Decisión U-01).
+   * Opcionalmente valida la integridad criptográfica de los bytes almacenados antes de generar la URL.
    */
-  public async getAudioObjectUrl(audioId: string): Promise<string | null> {
+  public async getAudioObjectUrl(audioId: string, verifyIntegrity = false): Promise<string | null> {
     const meta = await this.storage.getMetadata(audioId);
     if (meta && meta.status === 'FAILED') {
       throw new OfflineStorageError(
@@ -539,6 +585,24 @@ export class BethesdaOfflineManager {
         throw new OfflineStorageError(
           'UNAUTHORIZED_SESSION',
           `La autorización sin conexión de la pista de audio '${record.metadata.title}' ha expirado (límite de 7 días sin revalidar con el servidor).`
+        );
+      }
+    }
+
+    // Verificación de integridad bajo demanda antes de reproducir (R1-P1)
+    if (verifyIntegrity && record.metadata.checksumSha256) {
+      const buffer = await record.blob.arrayBuffer();
+      const currentHash = await computeBinarySha256(buffer);
+      if (currentHash.toLowerCase() !== record.metadata.checksumSha256.toLowerCase()) {
+        const updatedMeta: OfflineResourceMetadata = {
+          ...record.metadata,
+          status: 'FAILED',
+          errorMessage: 'Integridad local comprometida: los bytes en disco han sido alterados o corrompidos.',
+        };
+        await this.storage.saveMetadata(updatedMeta).catch(() => {});
+        throw new OfflineStorageError(
+          'CORRUPTED_RESOURCE',
+          `La pista de audio local está corrupta o fue modificada indebidamente.`
         );
       }
     }

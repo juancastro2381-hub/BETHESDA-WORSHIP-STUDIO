@@ -36,6 +36,13 @@
       "when": 1789910000000,
       "tag": "0004_user_view_preferences",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789920000000,
+      "tag": "0005_audio_assets",
+      "breakpoints": true
     }
   ]
 }

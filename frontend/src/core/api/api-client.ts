@@ -73,7 +73,7 @@ export interface ApiClientConfig {
 
 export class BethesdaApiClient {
   private static instance: BethesdaApiClient | null = null;
-  private readonly baseUrl: string;
+  public readonly baseUrl: string;
 
   public constructor(config?: ApiClientConfig) {
     this.baseUrl = config?.baseUrl ?? (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:3001/api/v1';
@@ -500,5 +500,59 @@ export class BethesdaApiClient {
     const json: UpdateUserPreferencesResponse = await res.json();
     return json.data;
   }
+
+  // ============================================================================
+  // WORKSTREAM A: MÉTODOS DE AUDIO Y PLAYBACK OFFLINE
+  // ============================================================================
+
+  /**
+   * Obtiene la lista de pistas de audio asociadas a una canción (Workstream A).
+   */
+  public async getSongAudioAssets(songId: string): Promise<AudioAssetDTO[]> {
+    const res = await this.fetchWithAuth(`/songs/${songId}/audio`, { method: 'GET' });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Retorna la URL de streaming para reproducción directa vía elemento <audio>.
+   */
+  public getAudioStreamUrl(audioId: string): string {
+    return `${this.baseUrl}/audio/${audioId}/stream`;
+  }
+
+  /**
+   * Descarga el archivo de audio como Blob para almacenamiento local en IndexedDB.
+   */
+  public async downloadAudioBlob(audioId: string): Promise<{ blob: Blob; filename: string; mimeType: string }> {
+    const res = await this.fetchWithAuth(`/audio/${audioId}/download`, { method: 'GET' });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    let filename = `audio_${audioId}.mp3`;
+    const match = disposition.match(/filename="?([^";]+)"?/);
+    if (match && match[1]) {
+      filename = decodeURIComponent(match[1]);
+    }
+    const mimeType = res.headers.get('content-type') || blob.type || 'audio/mpeg';
+    return { blob, filename, mimeType };
+  }
+}
+
+export interface AudioAssetDTO {
+  readonly id: string;
+  readonly songId: string;
+  readonly title: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly fileSizeBytes: number;
+  readonly checksumSha256: string;
+  readonly durationSeconds?: number | null;
+  readonly createdAt: string;
 }
 

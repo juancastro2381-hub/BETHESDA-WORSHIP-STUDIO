@@ -28,16 +28,22 @@ export class AuthGuard {
    */
   public authenticate = async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
     const authHeader = request.headers.authorization;
-    if (!authHeader) {
+    let token: string | undefined;
+
+    if (authHeader) {
+      const parts = authHeader.split(' ');
+      if (parts.length !== 2 || parts[0] !== 'Bearer') {
+        throw new UnauthorizedError('Formato de encabezado de autorización inválido. Use "Bearer <token>".');
+      }
+      token = parts[1];
+    } else if (typeof (request.query as any)?.token === 'string') {
+      token = (request.query as any).token;
+    }
+
+    if (!token) {
       return;
     }
 
-    const parts = authHeader.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      throw new UnauthorizedError('Formato de encabezado de autorización inválido. Use "Bearer <token>".');
-    }
-
-    const token = parts[1];
     const payload = this.tokenService.verifyAccessToken(token);
     request.user = payload;
   };

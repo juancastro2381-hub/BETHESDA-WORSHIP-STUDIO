@@ -3850,4 +3850,137 @@ body {
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* ==========================================================================
+   WP-05 AUTOSCROLL CONTROL BAR (Sin pedales físicos)
+   ========================================================================== */
+
+.autoscroll-control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.65rem 1.25rem;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 8px;
+  margin: 0.5rem 0;
+  backdrop-filter: blur(8px);
+}
+
+.autoscroll-main-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-autoscroll {
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.btn-autoscroll-start {
+  background: #f59e0b;
+  color: #0f172a;
+}
+.btn-autoscroll-start:hover {
+  background: #d97706;
+}
+
+.btn-autoscroll-pause {
+  background: #3b82f6;
+  color: #fff;
+}
+.btn-autoscroll-pause:hover {
+  background: #2563eb;
+}
+
+.btn-autoscroll-resume {
+  background: #10b981;
+  color: #fff;
+}
+.btn-autoscroll-resume:hover {
+  background: #059669;
+}
+
+.btn-autoscroll-stop, .btn-autoscroll-reset {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #cbd5e1;
+}
+.btn-autoscroll-stop:hover, .btn-autoscroll-reset:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.autoscroll-speed-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.autoscroll-speed-label {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  margin-right: 0.25rem;
+}
+
+.btn-speed-option {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #94a3b8;
+  padding: 0.25rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-speed-option:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.btn-speed-option.active {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: #f59e0b;
+  color: #f59e0b;
+  font-weight: 700;
+}
+
+.autoscroll-progress-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 110px;
+}
+
+.progress-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: #f59e0b;
+  border-radius: 3px;
+  transition: width 0.1s linear;
+}
+
+.progress-text {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  min-width: 32px;
+  text-align: right;
+}
+
+
 

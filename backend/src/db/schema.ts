@@ -419,6 +419,39 @@ export const userViewPreferences = pgTable(
 );
 
 // ============================================================================
+// ENTIDADES DE AUDIO Y MULTIMEDIA (WORKSTREAM A)
+// ============================================================================
+
+/**
+ * Tabla: audio_assets
+ * Recursos de audio asociados a canciones (pistas de referencia, grabaciones, stems).
+ */
+export const audioAssets = pgTable(
+  'audio_assets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    songId: uuid('song_id')
+      .notNull()
+      .references(() => songs.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    filename: varchar('filename', { length: 255 }).notNull(),
+    storagePath: varchar('storage_path', { length: 512 }).notNull(),
+    mimeType: varchar('mime_type', { length: 64 }).notNull(),
+    fileSizeBytes: integer('file_size_bytes').notNull(),
+    checksumSha256: varchar('checksum_sha256', { length: 64 }).notNull(),
+    durationSeconds: integer('duration_seconds'),
+    uploadedByUserId: uuid('uploaded_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_audio_assets_song_id').on(table.songId),
+    index('idx_audio_assets_uploaded_by').on(table.uploadedByUserId),
+    index('idx_audio_assets_created_at').on(table.createdAt),
+  ]
+);
+
+// ============================================================================
 // RELACIONES DRIZZLE ORM
 // ============================================================================
 
@@ -432,6 +465,7 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   createdVersions: many(songVersions),
   directedSetlists: many(setlists),
   viewPreferences: one(userViewPreferences),
+  uploadedAudios: many(audioAssets),
 }));
 
 export const userViewPreferencesRelations = relations(userViewPreferences, ({ one }) => ({
@@ -487,6 +521,18 @@ export const songsRelations = relations(songs, ({ many, one }) => ({
     relationName: 'updater',
   }),
   setlistItems: many(setlistItems),
+  audioAssets: many(audioAssets),
+}));
+
+export const audioAssetsRelations = relations(audioAssets, ({ one }) => ({
+  song: one(songs, {
+    fields: [audioAssets.songId],
+    references: [songs.id],
+  }),
+  uploadedByUser: one(users, {
+    fields: [audioAssets.uploadedByUserId],
+    references: [users.id],
+  }),
 }));
 
 export const songVersionsRelations = relations(songVersions, ({ one, many }) => ({
@@ -556,5 +602,12 @@ export type TransitionType = (typeof transitionTypeEnum.enumValues)[number];
 
 export type UserViewPreferenceEntity = typeof userViewPreferences.$inferSelect;
 export type NewUserViewPreferenceEntity = typeof userViewPreferences.$inferInsert;
+
+// ============================================================================
+// TIPOS INFERIDOS DRIZZLE ORM (WORKSTREAM A — AUDIO)
+// ============================================================================
+
+export type AudioAsset = typeof audioAssets.$inferSelect;
+export type NewAudioAsset = typeof audioAssets.$inferInsert;
 
 

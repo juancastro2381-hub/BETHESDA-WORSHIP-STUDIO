@@ -382,12 +382,13 @@ export class BethesdaOfflineManager {
    */
   public async downloadAudio(
     audioId: string,
-    audioUrl: string,
-    title: string,
+    audioUrl?: string,
+    title?: string,
     currentUserId?: string | null
   ): Promise<OfflineDownloadResult> {
     const abortController = new AbortController();
     this.activeAbortControllers.set(audioId, abortController);
+    const audioTitle = title || `Pista de Audio [${audioId.slice(0, 8)}]`;
 
     try {
       // 0. Validar cuota de almacenamiento disponible antes de iniciar
@@ -396,18 +397,26 @@ export class BethesdaOfflineManager {
       this.activeProgress.set(audioId, {
         resourceId: audioId,
         resourceType: 'AUDIO',
-        title: `Descargando audio '${title}'...`,
+        title: `Descargando audio '${audioTitle}'...`,
         bytesReceived: 0,
         totalBytes: 100,
         percentage: 10,
       });
 
-      // 1. Descarga vía fetch con señal de cancelación
-      const res = await fetch(audioUrl, {
+      // 1. Descarga vía fetch con señal de cancelación y credenciales de sesión
+      const targetUrl = audioUrl && audioUrl.trim().length > 0
+        ? audioUrl
+        : `${this.apiClient.baseUrl}/audio/${audioId}/download`;
+
+      const res = await fetch(targetUrl, {
         signal: abortController.signal,
+        credentials: 'include',
       });
 
       if (!res.ok) {
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          throw new OfflineStorageError('UNAUTHORIZED_SESSION', `Acceso denegado al recurso de audio: HTTP ${res.status}`);
+        }
         throw new OfflineStorageError('NETWORK_ERROR', `Error al descargar audio: HTTP ${res.status}`);
       }
 
@@ -440,7 +449,7 @@ export class BethesdaOfflineManager {
       const metadata: OfflineResourceMetadata = {
         id: audioId,
         resourceType: 'AUDIO',
-        title,
+        title: audioTitle,
         versionNumber: 1,
         ownerUserId: currentUserId ?? null,
         status: 'AVAILABLE_OFFLINE',
@@ -474,7 +483,7 @@ export class BethesdaOfflineManager {
         const failedMeta: OfflineResourceMetadata = {
           id: audioId,
           resourceType: 'AUDIO',
-          title,
+          title: audioTitle,
           versionNumber: 0,
           ownerUserId: currentUserId ?? null,
           status: 'FAILED',

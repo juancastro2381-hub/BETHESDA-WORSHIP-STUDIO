@@ -34,6 +34,10 @@ const envSchema = z.object({
   // Bootstrap Super Admin (Opcional para inicialización)
   INITIAL_SUPERADMIN_EMAIL: z.string().email().optional(),
   INITIAL_SUPERADMIN_PASSWORD: z.string().min(10).optional(),
+
+  // Workstream A: Almacenamiento seguro de audio
+  AUDIO_STORAGE_PATH: z.string().default('storage/audio'),
+  MAX_AUDIO_FILE_SIZE_BYTES: z.coerce.number().default(50 * 1024 * 1024), // 50MB (Decisión U-03)
 });
 
 export type Env = z.infer<typeof envSchema>;

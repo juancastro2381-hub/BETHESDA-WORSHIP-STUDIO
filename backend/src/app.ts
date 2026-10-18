@@ -17,6 +17,8 @@ import { songRoutes } from './interfaces/http/routes/song.routes.ts';
 import { authRoutes } from './interfaces/http/routes/auth.routes.ts';
 import { userRoutes } from './interfaces/http/routes/user.routes.ts';
 import { setlistRoutes } from './interfaces/http/routes/setlist.routes.ts';
+import { audioRoutes } from './interfaces/http/routes/audio.routes.ts';
+import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { JwtTokenService } from './application/token-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
 import { AuthGuard } from './interfaces/http/middlewares/auth-middleware.ts';
@@ -125,6 +127,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(userRoutes, { prefix: '/users' });
       await v1.register(songRoutes, { prefix: '/songs' });
       await v1.register(setlistRoutes, { prefix: '/setlists' });
+      await v1.register(audioRoutes);
+      await v1.register(realtimeRoutes, { prefix: '/realtime' });
     },
     { prefix: '/api/v1' }
   );

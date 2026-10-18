@@ -39,6 +39,9 @@ import { DatabaseSongsModal } from './DatabaseSongsModal.tsx';
 import { SetlistsModal } from './SetlistsModal.tsx';
 import { SetlistNavigationToolbar } from './SetlistNavigationToolbar.tsx';
 import { ServiceMomentCard } from './ServiceMomentCard.tsx';
+import { AudioPlayerBar } from './AudioPlayerBar.tsx';
+import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
+import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 
 export interface MusicalWorkspaceProps {
@@ -117,6 +120,10 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const songCacheRef = useRef<Map<string, CanonicalMusicPayload>>(new Map());
   const [songLoading, setSongLoading] = useState<boolean>(false);
 
+  // Referencia al contenedor de partitura y controlador de Autoscroll (WP-05)
+  const viewportRef = useRef<HTMLElement | null>(null);
+  const autoscroll = useAutoscroll(viewportRef);
+
   const {
     activeSong,
     state,
@@ -126,6 +133,11 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     diagnostics,
     supportedRepresentations,
   } = viewResult;
+
+  // Resetear autoscroll ante cambio de canción activa o transición de repertorio
+  useEffect(() => {
+    autoscroll.reset();
+  }, [activeSong?.title, setlistExecution.currentIndex]);
 
   // Manejador para persistir la preferencia en PostgreSQL mediante PUT /api/v1/users/me/preferences
   const handleSavePreference = useCallback(
@@ -437,6 +449,12 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             persistedSongId={persistedMeta?.songId}
           />
 
+          {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
+          <AudioPlayerBar
+            songId={persistedMeta?.songId ?? (activeSong as any)?.id ?? activeSong.title}
+            songTitle={activeSong.title}
+          />
+
           {/* 4. MusicalControls: Instrumento, Representaciones, Capo, Transposición y Cifrado */}
           <MusicalControls
             selectedInstrumentId={state.selectedInstrumentId}
@@ -468,8 +486,19 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             onSetForcedRenderer={setForcedRenderer}
           />
 
+          {/* 5b. AutoscrollControl: Desplazamiento Automático Manos Libres (WP-05 — Sin Pedales) */}
+          <AutoscrollControl
+            controller={autoscroll}
+            isVisible={activeSong.measures.length > 0}
+          />
+
           {/* 6. Viewport de Renderizado Musical Real */}
-          <main className="workspace-viewport-area" role="main" aria-label="Partitura y Notación Musical">
+          <main
+            ref={viewportRef}
+            className="workspace-viewport-area"
+            role="main"
+            aria-label="Partitura y Notación Musical"
+          >
             {songLoading ? (
               <div className="workspace-loading-state" role="status">
                 <span className="auth-spinner" aria-hidden="true" />

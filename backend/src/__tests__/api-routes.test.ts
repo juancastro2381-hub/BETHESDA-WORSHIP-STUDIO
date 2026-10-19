@@ -571,4 +571,84 @@ describe('Phase 2A / Post-Doc Remediation — Song Catalog RBAC & Fastify HTTP A
     ]);
     assert.strictEqual(Number(checkDb.rows[0].count), 0);
   });
+
+  it('12. should immediately revoke read-only access for suspended, deactivated, or locked accounts via real-time database validation', async () => {
+    const timestamp = Date.now();
+    // 1. Crear usuario inicialmente activo con rol VIEWER (tiene songs:read)
+    const readUser = await userRepo.create({
+      email: `reader-revoked-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Lector',
+      lastName: 'Revocado',
+      role: 'VIEWER',
+      accountStatus: 'ACTIVE',
+      emailVerified: true,
+    });
+    createdUserIds.push(readUser.id);
+
+    // Emitir token mientras la cuenta está activa
+    const readToken = tokenService.signAccessToken({
+      sub: readUser.id,
+      email: readUser.email,
+      role: readUser.role,
+    }).token;
+
+    // Verificar que inicialmente PUEDE leer el catálogo (200 OK)
+    const initialReadRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${readToken}` },
+    });
+    assert.strictEqual(initialReadRes.statusCode, 200);
+
+    // 2. Suspender la cuenta en la base de datos PostgreSQL
+    await userRepo.updateStatus(readUser.id, 'SUSPENDED');
+
+    // Intentar leer catálogo con token previamente emitido -> DEBE SER RECHAZADO (403 Forbidden)
+    const suspendedListRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${readToken}` },
+    });
+    assert.strictEqual(suspendedListRes.statusCode, 403);
+    assert.match(JSON.parse(suspendedListRes.payload).error.message, /SUSPENDED/);
+
+    // Intentar leer canción específica -> 403 Forbidden
+    const randomUuid = '00000000-0000-0000-0000-000000000001';
+    const suspendedGetRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/songs/${randomUuid}`,
+      headers: { authorization: `Bearer ${readToken}` },
+    });
+    assert.strictEqual(suspendedGetRes.statusCode, 403);
+    assert.match(JSON.parse(suspendedGetRes.payload).error.message, /SUSPENDED/);
+
+    // 3. Crear usuario bloqueado por seguridad
+    const lockedReader = await userRepo.create({
+      email: `reader-locked-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Lector',
+      lastName: 'Bloqueado',
+      role: 'VIEWER',
+      accountStatus: 'ACTIVE',
+      emailVerified: true,
+    });
+    createdUserIds.push(lockedReader.id);
+    await userRepo.update(lockedReader.id, {
+      lockoutUntil: new Date(Date.now() + 3600000), // Bloqueado 1 hora
+    });
+    const lockedReadToken = tokenService.signAccessToken({
+      sub: lockedReader.id,
+      email: lockedReader.email,
+      role: lockedReader.role,
+    }).token;
+
+    const lockedListRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${lockedReadToken}` },
+    });
+    assert.strictEqual(lockedListRes.statusCode, 403);
+    assert.match(JSON.parse(lockedListRes.payload).error.message, /bloqueada por seguridad/);
+  });
 });

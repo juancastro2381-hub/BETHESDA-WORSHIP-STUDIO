@@ -101,11 +101,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
 
     // 4. Lectura y estado offline: Verificar si la sesión califica como compartida
     if (!session.createdByUserId) {
-      return; // Sesión de catálogo del sistema
-    }
-
-    if (typeof session.title === 'string' && session.title.includes('[SHARED]')) {
-      return; // Compartida explícitamente
+      return; // Sesión de catálogo del sistema (compartida para todo el ministerio)
     }
 
     // Comprobar si el creador es WORSHIP_LEADER, ADMIN o SUPER_ADMIN
@@ -120,6 +116,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Si es una sesión privada de otro integrante: Denegado
+    // NOTA DE SEGURIDAD: No se infiere autorización a partir del texto del título (ej. '[SHARED]').
     throw new ForbiddenError(
       `No tiene autorización para ${
         action === 'offline' ? 'consultar el estado offline de' : 'acceder a'
@@ -195,8 +192,14 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
         try {
           await assertSessionResourceAccess(s, user.sub, freshUser.role, 'read');
           authorizedSessions.push(s);
-        } catch {
-          // Omitir sesiones privadas de otros usuarios
+        } catch (err) {
+          if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {
+            // Omitir únicamente denegaciones esperadas de sesiones privadas de otros usuarios
+            continue;
+          }
+          // Propagar errores inesperados de infraestructura o base de datos sin convertirlos en respuestas parciales engañosas
+          request.log.error(err, 'Error inesperado durante la verificación de autorización en by-song');
+          throw err;
         }
       }
 

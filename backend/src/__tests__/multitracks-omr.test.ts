@@ -1203,6 +1203,94 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.strictEqual(adminDeleteRes.statusCode, 204);
   });
 
+  it('D1.17: should verify private session remains strictly private regardless of title text (e.g. [SHARED])', async () => {
+    // 1. Primer Músico crea una sesión que intenta simular compartición mediante el texto del título
+    const musicianShareAttemptRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/multitrack/sessions',
+      headers: { authorization: `Bearer ${firstMusicianToken}` },
+      payload: {
+        songId: testSong.id,
+        title: 'Ensayo con Intento de Evasión [SHARED] por Músico',
+        durationSeconds: 180,
+        bpm: 80,
+        tracks: [
+          {
+            name: 'Pista de Intento',
+            trackType: 'CLICK',
+            audioAssetId: testStemAsset1.id,
+            volume: 0.7,
+            pan: 0.0,
+          },
+        ],
+      },
+    });
+
+    assert.strictEqual(musicianShareAttemptRes.statusCode, 201);
+    const createdSession = JSON.parse(musicianShareAttemptRes.payload).data;
+
+    // 2. Segundo Músico intenta leer la sesión privada con [SHARED] en el título -> DEBE SER RECHAZADA (403 Forbidden)
+    const readAttemptRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${createdSession.id}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(readAttemptRes.statusCode, 403);
+    assert.match(JSON.parse(readAttemptRes.payload).error.message, /sesión multipista privada/);
+
+    // 3. Segundo Músico intenta consultar estado offline de la sesión con [SHARED] -> DEBE SER RECHAZADA (403 Forbidden)
+    const offlineAttemptRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/multitrack/sessions/${createdSession.id}/offline-status`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+    });
+    assert.strictEqual(offlineAttemptRes.statusCode, 403);
+
+    // 4. Segundo Músico intenta modificar mezcla -> DEBE SER RECHAZADA (403 Forbidden)
+    const patchAttemptRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/multitrack/sessions/${createdSession.id}/tracks/${createdSession.tracks[0].id}`,
+      headers: { authorization: `Bearer ${secondMusicianToken}` },
+      payload: { volume: 0.1 },
+    });
+    assert.strictEqual(patchAttemptRes.statusCode, 403);
+
+    // Invariante en PostgreSQL: el volumen debe seguir siendo 0.7
+    const checkDb = await multitrackService.getSession(createdSession.id);
+    assert.strictEqual(checkDb.tracks[0].volume, 0.7);
+  });
+
+  it('D1.18: should propagate unexpected internal errors during by-song filtering instead of swallowing them', async () => {
+    // Simular un fallo inesperado de infraestructura (ej. corte de conexión con Postgres) dentro del bucle de filtrado
+    const originalFindById = DrizzleUserRepository.prototype.findById;
+    try {
+      let callCount = 0;
+      DrizzleUserRepository.prototype.findById = async function (id: string) {
+        callCount++;
+        // Permitir que la autenticación del usuario actual pase (llamada 1)
+        // pero hacer que la comprobación de recursos dentro del bucle de filtrado falle con un error no controlado (llamada 2)
+        if (callCount > 1) {
+          throw new Error('Postgres connection pool exhausted (simulated unexpected error)');
+        }
+        return originalFindById.call(this, id);
+      };
+
+      const failRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/multitrack/by-song/${testSong.id}`,
+        headers: { authorization: `Bearer ${secondMusicianToken}` },
+      });
+
+      // El endpoint NO debe tragar el error y devolver 200 con datos parciales; debe responder con 500 INTERNAL_ERROR
+      assert.strictEqual(failRes.statusCode, 500);
+      const errBody = JSON.parse(failRes.payload);
+      assert.strictEqual(errBody.error.code, 'INTERNAL_ERROR');
+    } finally {
+      // Restaurar método original
+      DrizzleUserRepository.prototype.findById = originalFindById;
+    }
+  });
+
   it('D.EXCLUSION: should strictly verify zero physical pedal synchronization in Multitracks & OMR', () => {
     const forbidden = ['pedal', 'foot', 'bluetooth', 'gamepad', 'webusb', 'webhid'];
     const serviceContent = MultitrackService.toString() + OmrService.toString();

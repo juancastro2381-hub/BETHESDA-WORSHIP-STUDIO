@@ -31,10 +31,10 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const authGuard = new AuthGuard(tokenService, userRepo);
 
-  // 1. GET /api/v1/songs - Listar catálogo de canciones (Requiere songs:read)
+  // 1. GET /api/v1/songs - Listar catálogo de canciones (Requiere songs:read verificado contra BD)
   fastify.get(
     '/',
-    { preHandler: [authGuard.requirePermission('songs:read', false)] },
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
     async (request, reply) => {
       const query = ListSongsQuerySchema.parse(request.query);
       const result = await songService.listSongs(query);
@@ -75,10 +75,10 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 4. GET /api/v1/songs/:songId - Obtener canción y versión actual (Requiere songs:read)
+  // 4. GET /api/v1/songs/:songId - Obtener canción y versión actual (Requiere songs:read verificado contra BD)
   fastify.get(
     '/:songId',
-    { preHandler: [authGuard.requirePermission('songs:read', false)] },
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
     async (request, reply) => {
       const params = SongIdParamSchema.parse(request.params);
       const songWithVersion = await songService.getSong(params.songId);
@@ -110,10 +110,10 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 6. GET /api/v1/songs/:songId/versions - Listar historial de versiones (Requiere songs:read)
+  // 6. GET /api/v1/songs/:songId/versions - Listar historial de versiones (Requiere songs:read verificado contra BD)
   fastify.get(
     '/:songId/versions',
-    { preHandler: [authGuard.requirePermission('songs:read', false)] },
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
     async (request, reply) => {
       const params = SongIdParamSchema.parse(request.params);
       const versions = await songService.listVersions(params.songId);
@@ -123,10 +123,10 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 7. GET /api/v1/songs/:songId/versions/:versionId - Obtener una versión específica (Requiere songs:read)
+  // 7. GET /api/v1/songs/:songId/versions/:versionId - Obtener una versión específica (Requiere songs:read verificado contra BD)
   fastify.get(
     '/:songId/versions/:versionId',
-    { preHandler: [authGuard.requirePermission('songs:read', false)] },
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
     async (request, reply) => {
       const params = VersionIdParamSchema.parse(request.params);
       const version = await songService.getVersion(params.versionId);

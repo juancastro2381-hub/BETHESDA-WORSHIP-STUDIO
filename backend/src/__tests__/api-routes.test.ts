@@ -424,4 +424,151 @@ describe('Phase 2A / Post-Doc Remediation — Song Catalog RBAC & Fastify HTTP A
     const body = JSON.parse(response.payload);
     assert.strictEqual(body.error.code, 'INVALID_MUSIC_PAYLOAD');
   });
+
+  it('10. should reject suspended, locked, or deactivated accounts on sensitive mutations and preserve persistent state immutability', async () => {
+    const timestamp = Date.now();
+    // Crear usuario suspendido con rol WORSHIP_LEADER
+    const suspendedUser = await userRepo.create({
+      email: `suspended-leader-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Suspendido',
+      lastName: 'Usuario',
+      role: 'WORSHIP_LEADER',
+      accountStatus: 'SUSPENDED',
+      emailVerified: true,
+    });
+    createdUserIds.push(suspendedUser.id);
+    const suspendedToken = tokenService.signAccessToken({
+      sub: suspendedUser.id,
+      email: suspendedUser.email,
+      role: suspendedUser.role,
+    }).token;
+
+    const canonicalSong = createReferenceSongFixture();
+    const canonicalJSON = CanonicalSerializer.serialize(canonicalSong);
+
+    // 10a. Intentar POST /api/v1/songs con cuenta suspendida -> 403 Forbidden
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${suspendedToken}` },
+      payload: {
+        title: 'Canción Intento Suspendido',
+        defaultKey: 'E',
+        sourceFormat: 'INTERNAL',
+        canonicalPayload: canonicalJSON,
+      },
+    });
+    assert.strictEqual(createRes.statusCode, 403);
+    const createBody = JSON.parse(createRes.payload);
+    assert.match(createBody.error.message, /SUSPENDED/);
+
+    // Invariante de persistencia: verificar que NO se insertó la canción en la BD
+    const songDbCheck = await pool.query('SELECT COUNT(*) FROM songs WHERE title = $1', [
+      'Canción Intento Suspendido',
+    ]);
+    assert.strictEqual(Number(songDbCheck.rows[0].count), 0);
+
+    // 10b. Intentar POST /api/v1/songs/import con cuenta suspendida -> 403 Forbidden
+    const importRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs/import',
+      headers: { authorization: `Bearer ${suspendedToken}` },
+      payload: {
+        source: '{title: Import Intento Suspendido}\n[C]Prueba',
+        filename: 'suspendido.cho',
+      },
+    });
+    assert.strictEqual(importRes.statusCode, 403);
+    const importDbCheck = await pool.query('SELECT COUNT(*) FROM songs WHERE title = $1', [
+      'Import Intento Suspendido',
+    ]);
+    assert.strictEqual(Number(importDbCheck.rows[0].count), 0);
+
+    // 10c. Usuario bloqueado por seguridad (lockoutUntil en el futuro)
+    const lockedUser = await userRepo.create({
+      email: `locked-leader-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Bloqueado',
+      lastName: 'Usuario',
+      role: 'WORSHIP_LEADER',
+      accountStatus: 'ACTIVE',
+      emailVerified: true,
+    });
+    createdUserIds.push(lockedUser.id);
+    await userRepo.update(lockedUser.id, {
+      lockoutUntil: new Date(Date.now() + 3600000), // Bloqueado 1 hora
+    });
+    const lockedToken = tokenService.signAccessToken({
+      sub: lockedUser.id,
+      email: lockedUser.email,
+      role: lockedUser.role,
+    }).token;
+
+    const lockedCreateRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${lockedToken}` },
+      payload: {
+        title: 'Canción Intento Bloqueado',
+        defaultKey: 'D',
+        sourceFormat: 'INTERNAL',
+        canonicalPayload: canonicalJSON,
+      },
+    });
+    assert.strictEqual(lockedCreateRes.statusCode, 403);
+    assert.match(JSON.parse(lockedCreateRes.payload).error.message, /bloqueada por seguridad/);
+  });
+
+  it('11. should enforce real-time DB role validation when token role differs from database role', async () => {
+    const timestamp = Date.now();
+    // Crear usuario inicialmente WORSHIP_LEADER
+    const demotedUser = await userRepo.create({
+      email: `demoted-${timestamp}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Degradado',
+      lastName: 'Usuario',
+      role: 'WORSHIP_LEADER',
+      accountStatus: 'ACTIVE',
+      emailVerified: true,
+    });
+    createdUserIds.push(demotedUser.id);
+
+    // Se firma el token mientras era WORSHIP_LEADER
+    const staledLeaderToken = tokenService.signAccessToken({
+      sub: demotedUser.id,
+      email: demotedUser.email,
+      role: 'WORSHIP_LEADER',
+    }).token;
+
+    // Se degrada en la base de datos a VIEWER
+    await userRepo.updateRole(demotedUser.id, 'VIEWER');
+
+    const canonicalSong = createReferenceSongFixture();
+    const canonicalJSON = CanonicalSerializer.serialize(canonicalSong);
+
+    // Intentar crear canción con token antiguo que dice WORSHIP_LEADER
+    const staleAttemptRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${staledLeaderToken}` },
+      payload: {
+        title: 'Canción Intento Degradado',
+        defaultKey: 'A',
+        sourceFormat: 'INTERNAL',
+        canonicalPayload: canonicalJSON,
+      },
+    });
+
+    // Debe ser rechazado porque verifyDatabaseRole verifica el rol real en PostgreSQL
+    assert.strictEqual(staleAttemptRes.statusCode, 403);
+    const staleBody = JSON.parse(staleAttemptRes.payload);
+    assert.match(staleBody.error.message, /VIEWER/);
+
+    // Verificar que la BD no fue modificada
+    const checkDb = await pool.query('SELECT COUNT(*) FROM songs WHERE title = $1', [
+      'Canción Intento Degradado',
+    ]);
+    assert.strictEqual(Number(checkDb.rows[0].count), 0);
+  });
 });

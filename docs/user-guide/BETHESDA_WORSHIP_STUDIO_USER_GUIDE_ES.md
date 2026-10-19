@@ -695,8 +695,8 @@ Imprima o mantenga a mano esta lista para validar el funcionamiento del atril en
 
 ## 20. LIMITACIONES DE LA DOCUMENTACIÓN Y FECHA DE REVISIÓN
 
-- **Fecha de Auditoría y Remediación:** 18 de octubre de 2026.
-- **Base Técnica Verificada:** Repositorio oficial en rama `main`, reconciliación histórica de commits `e89f5a9` (sprint R1-A) y `dae46fa` (HEAD remoto con documentación y fixtures WAV), complementado con la remediación de seguridad de autorización en catálogo de canciones y autorización a nivel de recurso en multitrack (630 pruebas automatizadas frontend y backend ejecutadas y superadas con 100% de éxito).
+- **Fecha de Auditoría y Remediación:** 18-19 de octubre de 2026.
+- **Base Técnica Verificada:** Repositorio oficial en rama `main`, reconciliación histórica de commits `e89f5a9` (sprint R1-A), `dae46fa` (HEAD previo evaluado en auditoría independiente) y `2a7630f` (HEAD actual en `origin/main`), complementado con la remediación de seguridad de autorización en catálogo de canciones y autorización a nivel de recurso en multitrack con verificación de inmutabilidad persistente (632 pruebas automatizadas frontend y backend ejecutadas y superadas con 100% de éxito).
 - **Limitaciones Expresas:**
   - Esta guía describe con fidelidad matemática lo que el código fuente y las pruebas vigentes ejecutan hoy. No promete funciones que solo existan en planes futuros o maquetas visuales.
   - **No se declara preparación para producción comercial (*Production Readiness*):** La puesta en marcha definitiva en el presbiterio de la Iglesia Cristiana Bethesda permanece sujeta a las pruebas y validación manual directa por parte del Propietario del Proyecto y el liderazgo pastoral.

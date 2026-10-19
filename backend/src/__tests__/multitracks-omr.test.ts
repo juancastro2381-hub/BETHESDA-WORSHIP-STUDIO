@@ -1051,6 +1051,12 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.strictEqual(unauthorizedPatchRes.statusCode, 403);
     const errBody = JSON.parse(unauthorizedPatchRes.payload);
     assert.match(errBody.error.message, /modificar una sesión multipista perteneciente a otro usuario/);
+
+    // Invariante de seguridad: Asegurar que el estado persistente NO fue mutado (volumen sigue siendo 0.8)
+    const sessionCheck = await multitrackService.getSession(privateSessionId);
+    const trackCheck = sessionCheck.tracks.find((t: any) => t.id === privateTrackId);
+    assert.ok(trackCheck);
+    assert.strictEqual(trackCheck.volume, 0.8, 'El volumen de la pista no debe ser mutado por petición denegada');
   });
 
   it('D1.13: should reject deleting another user\'s multitrack session (403 Forbidden)', async () => {
@@ -1064,6 +1070,10 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.strictEqual(unauthorizedDeleteRes.statusCode, 403);
     const errBody = JSON.parse(unauthorizedDeleteRes.payload);
     assert.match(errBody.error.message, /eliminar una sesión multipista perteneciente a otro usuario/);
+
+    // Invariante de seguridad: Asegurar que la sesión persistente NO fue eliminada
+    const sessionAfterDeleteAttempt = await multitrackRepo.findById(privateSessionId);
+    assert.ok(sessionAfterDeleteAttempt, 'La sesión persistente no debe ser eliminada por petición denegada');
   });
 
   it('D1.14: should reject accessing offline status for a session outside user\'s authorized scope (403 Forbidden)', async () => {
@@ -1135,6 +1145,12 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     });
     assert.strictEqual(patchSharedRes.statusCode, 403);
 
+    // Invariante de seguridad: Verificar que el volumen persistente de la sesión compartida no cambió
+    const sharedCheck = await multitrackService.getSession(sharedSessionId);
+    const sharedTrackCheck = sharedCheck.tracks.find((t: any) => t.id === sharedTrackId);
+    assert.ok(sharedTrackCheck);
+    assert.strictEqual(sharedTrackCheck.volume, 0.8, 'El volumen de la sesión compartida no debe mutar por petición no autorizada');
+
     // 5. Segundo Músico NO puede eliminar la sesión compartida del Director
     const deleteSharedRes = await app.inject({
       method: 'DELETE',
@@ -1142,6 +1158,10 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
       headers: { authorization: `Bearer ${secondMusicianToken}` },
     });
     assert.strictEqual(deleteSharedRes.statusCode, 403);
+
+    // Invariante de seguridad: Verificar que la sesión compartida no fue eliminada
+    const sharedSessionStillExists = await multitrackRepo.findById(sharedSessionId);
+    assert.ok(sharedSessionStillExists, 'La sesión compartida no debe eliminarse por petición denegada');
 
     // 6. Listado por canción: Segundo Músico ve la sesión compartida, pero NO ve la sesión privada del Primer Músico
     const listBySongRes = await app.inject({

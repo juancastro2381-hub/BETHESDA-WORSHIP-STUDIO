@@ -1,0 +1,25 @@
+# Environment and Secrets
+.env
+.env.*
+backend/.env
+backend/.env.*
+!.env.example
+!backend/.env.example
+
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build Outputs
+dist/
+backend/dist/
+frontend/dist/
+*.tsbuildinfo
+
+# OS & Logs
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+

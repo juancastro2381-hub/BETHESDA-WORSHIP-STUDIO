@@ -13,7 +13,10 @@ import { DrizzleAuditLogRepository } from '../repositories/audit-repository.ts';
 import { Argon2PasswordHasher } from '../domain/crypto/password-hasher.ts';
 import { AuditService } from '../application/audit-service.ts';
 import { UserInvitationService } from '../application/invitation-service.ts';
-import { ValidationError, ConflictError } from '../domain/errors.ts';
+import { ValidationError, ConflictError, NotFoundError } from '../domain/errors.ts';
+import { generateSecureToken, hashToken } from '../domain/crypto/token-utils.ts';
+import { users } from '../db/schema.ts';
+import { eq } from 'drizzle-orm';
 
 describe('Phase 2B — User Invitation Lifecycle & Inherent Email Verification', () => {
   let invitationService: UserInvitationService;
@@ -175,5 +178,74 @@ describe('Phase 2B — User Invitation Lifecycle & Inherent Email Verification',
     assert.ok(activatedUser);
     assert.equal(activatedUser.accountStatus, 'ACTIVE');
     assert.equal(activatedUser.emailVerified, true);
+  });
+
+  it('7. should rollback invitation consumption if error occurs during user update (ACID Rollback Invariant)', async () => {
+    const inviteEmail = `rollback_${Date.now()}@bethesda.org`;
+    const { rawInvitationToken, user } = await invitationService.inviteUser({
+      email: inviteEmail,
+      firstName: 'Lucas',
+      lastName: 'Rollback',
+      role: 'MUSICIAN',
+      invitedByUserId: adminUserId,
+    });
+
+    const tokenHash = hashToken(rawInvitationToken);
+
+    // Simular inconsistencia eliminando el usuario antes de la aceptación
+    await db.delete(users).where(eq(users.id, user.id));
+
+    // Intentar aceptar la invitación: fallará porque el usuario no existe en la transacción
+    await assert.rejects(
+      async () => await invitationService.acceptInvitation(rawInvitationToken, 'ClaveValida2026!'),
+      (err: any) => err instanceof NotFoundError,
+      'Debe arrojar NotFoundError'
+    );
+
+    // Invariante ACID: La transacción debió hacer rollback, por lo que isAccepted debe seguir siendo FALSE
+    const invitationInDb = await invitationRepo.findByTokenHash(tokenHash);
+    assert.ok(invitationInDb, 'El registro de invitación debe persistir');
+    assert.equal(invitationInDb.isAccepted, false, 'La invitación NO debe quedar como consumida tras el rollback');
+  });
+
+  it('8. should categorically reject expired invitation tokens (Expiration Enforcement)', async () => {
+    const expiredEmail = `expirado_${Date.now()}@bethesda.org`;
+    const rawToken = generateSecureToken(32);
+    const tokenHash = hashToken(rawToken);
+
+    // Crear usuario pendiente
+    const pendingUser = await userRepo.create({
+      email: expiredEmail,
+      passwordHash: 'dummy_hash',
+      firstName: 'Tomas',
+      lastName: 'Expirado',
+      role: 'MUSICIAN',
+      accountStatus: 'PENDING_INVITATION',
+      emailVerified: false,
+    });
+
+    // Crear invitación ya expirada (hace 2 horas)
+    await invitationRepo.create({
+      email: expiredEmail,
+      tokenHash,
+      role: 'MUSICIAN',
+      invitedByUserId: adminUserId,
+      expiresAt: new Date(Date.now() - 2 * 60 * 60 * 1000), // Expirada
+    });
+
+    // Intentar aceptar el token expirado
+    await assert.rejects(
+      async () => await invitationService.acceptInvitation(rawToken, 'ClaveValida2026!'),
+      (err: any) => err instanceof ValidationError && err.message.includes('ha expirado'),
+      'Debe rechazar token expirado con ValidationError'
+    );
+
+    // Verificar que en BD no se consumió y el usuario sigue PENDING_INVITATION
+    const inv = await invitationRepo.findByTokenHash(tokenHash);
+    assert.ok(inv);
+    assert.equal(inv.isAccepted, false);
+
+    const userInDb = await userRepo.findById(pendingUser.id);
+    assert.equal(userInDb?.accountStatus, 'PENDING_INVITATION');
   });
 });

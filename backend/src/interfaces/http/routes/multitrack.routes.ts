@@ -63,18 +63,18 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * Helper de autorización a nivel de recurso (Resource-Level Authorization):
-   * Enforza la política de compartición y propiedad para sesiones multipistas.
+   * Enforza la política autoritativa de compartición y propiedad para sesiones multipistas.
    *
-   * Reglas:
-   * 1. SUPER_ADMIN y ADMIN: Acceso administrativo total a cualquier sesión del ministerio.
-   * 2. Dueño (createdByUserId === user.sub): Acceso total a su propia sesión.
-   * 3. Modificaciones (PATCH) y Eliminación (DELETE): Estrictamente restringidas al dueño o a ADMIN/SUPER_ADMIN.
-   * 4. Lectura (GET) y Estado Offline:
-   *    - Permitido si la sesión es compartida ministerialmente:
-   *      a) createdByUserId es null (sesión maestra del sistema).
-   *      b) O fue creada por un WORSHIP_LEADER, ADMIN o SUPER_ADMIN (sesión oficial de culto compartida).
-   *      c) O el título incluye la etiqueta '[SHARED]' (indicador explícito de compartición con el equipo).
-   *    - Denegado (403 Forbidden) si es una sesión privada creada por otro usuario (ej. otro MUSICIAN).
+   * Reglas de Gobernanza y Acceso:
+   * 1. SUPER_ADMIN y ADMIN: Override administrativo total (lectura, modificación y eliminación) sobre cualquier sesión.
+   * 2. Propietario / Creador (createdByUserId === user.sub): Acceso total para leer, ajustar volúmenes (PATCH) y eliminar (DELETE) su propia sesión.
+   * 3. Modificaciones (PATCH) y Eliminación (DELETE): Estrictamente reservadas al propietario legítimo o a roles administrativos con override.
+   * 4. Lectura (GET) y Consulta de Estado Offline (GET /offline-status):
+   *    - Permitido únicamente si la sesión es compartida ministerialmente bajo la política autoritativa:
+   *      a) createdByUserId es null (sesión maestra o bootstrap del sistema).
+   *      b) O fue creada por un integrante del liderazgo ministerial (WORSHIP_LEADER, ADMIN o SUPER_ADMIN).
+   *    - Denegado estrictamente (HTTP 403 Forbidden) si se trata de una sesión privada perteneciente a otro usuario (ej. otro MUSICIAN).
+   * 5. Invariante de Título: Los títulos de las sesiones JAMÁS confieren permisos de acceso (etiquetas cosméticas como '[SHARED]' son ignoradas para control de acceso).
    */
   const assertSessionResourceAccess = async (
     session: any,

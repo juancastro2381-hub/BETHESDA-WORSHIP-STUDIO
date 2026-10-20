@@ -16,7 +16,7 @@
 
 | Dimensión Evaluada | Veredicto | Justificación Técnica de Seguridad y Gobernanza |
 | :--- | :---: | :--- |
-| **Remediación en Código Fuente (Code Remediation)** | **PASS** | Todas las vulnerabilidades y vectores de riesgo identificados han sido corregidos en el código fuente:<br>1. **Eliminación del bypass por título (Prioridad 1):** La función `assertSessionResourceAccess()` ya no evalúa `session.title.includes('[SHARED]')`. Las sesiones de músicos ordinarios son estrictamente privadas. El acceso compartido se restringe a sesiones del liderazgo o del sistema.<br>2. **Revocación inmediata en tiempo real en lecturas (Prioridad 2):** Los 7 endpoints de `song.routes.ts` utilizan `verifyDatabaseRole = true`. Cuentas suspendidas, inactivas o bloqueadas son rechazadas inmediatamente con HTTP 403, incluso si presentan un token JWT no expirado.<br>3. **Manejo seguro de excepciones en `by-song` (Prioridad 3):** Se discriminan excepciones: solo se suprimen `ForbiddenError` y `UnauthorizedError`; fallos inesperados de BD o infraestructura propagan HTTP 500 y se registran en logs estructurados.<br>4. **Invariantes de base de datos:** Peticiones denegadas con 403 mantienen inmutable el estado en PostgreSQL (volumen de pistas, integridad de sesiones, conteo de canciones). |
+| **Remediación en Código Fuente (Code Remediation)** | **PASS** | Todas las vulnerabilidades y vectores de riesgo identificados han sido corregidos en el código fuente:<br>1. **Eliminación del bypass por título (Prioridad 1):** La función `assertSessionResourceAccess()` no evalúa el título de la sesión (`session.title`). Las sesiones de músicos ordinarios son estrictamente privadas. El acceso compartido se restringe a sesiones del liderazgo o del sistema. El JSDoc ha sido corregido para reflejar exactamente esta política.<br>2. **Revocación inmediata en tiempo real en lecturas (Prioridad 2):** Los 7 endpoints de `song.routes.ts` utilizan `verifyDatabaseRole = true`. Cuentas suspendidas, inactivas o bloqueadas son rechazadas inmediatamente con HTTP 403, incluso si presentan un token JWT no expirado.<br>3. **Manejo seguro de excepciones en `by-song` (Prioridad 3):** Se discriminan excepciones: solo se suprimen `ForbiddenError` y `UnauthorizedError`; fallos inesperados de BD o infraestructura propagan HTTP 500 y se registran en logs estructurados.<br>4. **Invariantes de base de datos:** Peticiones denegadas con 403 mantienen inmutable el estado en PostgreSQL (volumen de pistas, integridad de sesiones, conteo de canciones). |
 | **Verificación de Pruebas Automatizadas (Test Verification)** | **PASS** | Se ejecutaron en vivo las suites completas sobre el checkout actual:<br>- **Backend:** 286 pruebas ejecutadas, 286 pasadas, 0 falladas (56 suites, 212.4 s, PostgreSQL real).<br>- **Frontend:** 349 pruebas ejecutadas, 349 pasadas, 0 falladas (53 suites, 2.77 s, Vitest).<br>- **Total agregado no redundante:** **635 pruebas automatizadas superadas (100% éxito)**.<br>- **Compilación y tipado:** 0 errores en `tsc --noEmit` (backend y frontend), 0 errores en `vite build` y compilación backend `tsc`. |
 | **Preparación Operativa Interna (Operational Readiness)** | **PASS** | El sistema es plenamente funcional para ensayos ministeriales en red local, atril digital, transposición armónica, navegación litúrgica de setlists y almacenamiento desconectado con IndexedDB / Dexie.js. |
 | **Preparación para Producción Litúrgica (Production Readiness)** | **NOT PRODUCTION READY** | Conforme a las restricciones de gobernanza, **el sistema NO se declara listo para producción inmediata** debido a cuatro dependencias físicas y operativas pendientes:<br>1. **Aprovisionamiento sin UI:** No existe pantalla de gestión de usuarios; requiere API REST/cURL.<br>2. **Inexistencia de audios de producción:** Los 58 archivos WAV en disco son fixtures sintéticos de prueba (30-69 bytes); se requiere la ingesta de pistas maestras reales de la iglesia.<br>3. **Motor OMR stub:** No hay binario de Audiveris instalado en el entorno de producción.<br>4. **Validación humana en templo pendiente:** Primer inicio de sesión de Super Admin con cambio obligatorio de contraseña, prueba de lectura a 1.5 m en atril y simulación de corte Wi-Fi dominical. |
@@ -30,39 +30,61 @@
 - **Rama Local Activa:** `main`
 - **Remoto `origin/main` HEAD:** `d5e5bee38156661c4256b6d11ed2c7c60baf02d7`
 - **Sincronización:** `ahead 0, behind 0` (Confirmado mediante `git fetch origin main` y `git rev-list --left-right --count HEAD...origin/main`).
-- **Estado del Árbol de Trabajo:** Limpio respecto a código y documentación versionada (`nothing to commit, working tree clean` antes de la ejecución de pruebas). Tras ejecutar la suite de pruebas multipista, se registran 3 archivos temporales no rastreados (*untracked*) generados dinámicamente en `backend/storage/audio/`.
+- **Estado del Árbol de Trabajo:** Modificación puntual y acotada del JSDoc en `backend/src/interfaces/http/routes/multitrack.routes.ts` (cero código ejecutable modificado). Tras ejecutar la suite de pruebas multipista, se registran 3 archivos temporales no rastreados (*untracked*) generados dinámicamente en `backend/storage/audio/`.
 
-### 2.2 Commits Intermedios entre `d524e2e` y `origin/main` (`d5e5bee`)
-Se identificó exactamente **un (1) commit intermedio** entre la versión local previa reportada (`d524e2efbe6140e55c18ef166971a213a8548b11`) y el HEAD remoto actual:
+### 2.2 Reconciliación Exhaustiva del Conteo de Commits y Rango Git
 
-```
-commit d5e5bee38156661c4256b6d11ed2c7c60baf02d7
-Author:     juancastro2381-hub <juancastro2381@gmail.com>
-AuthorDate: Mon Oct 19 18:36:30 2026 -0500
-Commit:     juancastro2381-hub <juancastro2381@gmail.com>
-CommitDate: Mon Oct 19 18:36:30 2026 -0500
+Para resolver de forma definitiva cualquier discrepancia en el conteo de commits reportado por distintos observadores, se analizaron los rangos exactos tanto en el cliente local Git como a través de la API oficial de GitHub (`/repos/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/compare`):
 
-    REPORTE FINAL DE AUDITORÍA DE SEGURIDAD Y CRITERIOS DE ACEPTACIÓN
-```
+#### A. Rango Base: `d524e2e` -> Head: `d5e5bee` (Rango Inmediato)
+- **Comando Git Local:** `git rev-list --left-right --count d524e2efbe6140e55c18ef166971a213a8548b11...d5e5bee38156661c4256b6d11ed2c7c60baf02d7`
+  - **Resultado Git:** `0 1` (0 detrás, 1 por delante).
+- **GitHub API Compare (`/compare/d524e2e...d5e5bee`):**
+  - `status`: `"ahead"`
+  - `ahead_by`: `1`
+  - `behind_by`: `0`
+  - `total_commits`: `1`
+- **Detalle del Commit Único en este Rango:**
+  ```
+  commit d5e5bee38156661c4256b6d11ed2c7c60baf02d7
+  Author:     juancastro2381-hub <juancastro2381@gmail.com>
+  AuthorDate: Mon Oct 19 18:36:30 2026 -0500 (UTC: 2026-10-19T23:36:30Z)
+  Commit:     juancastro2381-hub <juancastro2381@gmail.com>
+  CommitDate: Mon Oct 19 18:36:30 2026 -0500
+  Subject:    REPORTE FINAL DE AUDITORÍA DE SEGURIDAD Y CRITERIOS DE ACEPTACIÓN
+  Parent:     d524e2efbe6140e55c18ef166971a213a8548b11
+  Tree:       84c9084a83b61470573198ad87b3f3bf1a415993
+  ```
+  - **Propósito:** Consolidar en GitHub las remediaciones de seguridad validadas: (1) `verifyDatabaseRole = true` en todos los endpoints de lectura en `song.routes.ts`, (2) eliminación del bypass de título `[SHARED]` y control robusto de errores en `multitrack.routes.ts`, (3) pruebas de integración 12, D1.17 y D1.18, (4) tracking de 9 fixtures sintéticos WAV en `backend/storage/audio/`, y (5) actualización del reporte de puerta de seguridad `FINAL_SECURITY_REMEDIATION_GATE.md`.
+  - **Archivos Afectados (14 archivos: +473 inserciones, -186 eliminaciones):**
+    * `backend/src/__tests__/api-routes.test.ts` (+80 líneas)
+    * `backend/src/__tests__/multitracks-omr.test.ts` (+88 líneas)
+    * `backend/src/interfaces/http/routes/multitrack.routes.ts` (17 líneas modificadas)
+    * `backend/src/interfaces/http/routes/song.routes.ts` (16 líneas modificadas)
+    * `backend/storage/audio/` (9 archivos `.wav` rastreados)
+    * `docs/reports/FINAL_SECURITY_REMEDIATION_GATE.md` (449 líneas modificadas)
 
-**Resumen de Archivos Afectados en `d5e5bee` (14 archivos: +473 inserciones, -186 eliminaciones):**
-1. `backend/src/__tests__/api-routes.test.ts` (+80 líneas: adición de la prueba 12 para revocación inmediata de cuentas suspendidas/bloqueadas en lecturas).
-2. `backend/src/__tests__/multitracks-omr.test.ts` (+88 líneas: adición de pruebas D1.17 y D1.18).
-3. `backend/src/interfaces/http/routes/multitrack.routes.ts` (17 líneas modificadas: eliminación del bypass por título `[SHARED]` y discriminación de excepciones en `by-song`).
-4. `backend/src/interfaces/http/routes/song.routes.ts` (16 líneas modificadas: `verifyDatabaseRole = true` en todos los endpoints de lectura).
-5. `backend/storage/audio/` (9 archivos `.wav` sintéticos rastreados en git para pruebas de aislamiento y streaming).
-6. `docs/reports/FINAL_SECURITY_REMEDIATION_GATE.md` (449 líneas modificadas: reporte exhaustivo de la puerta de seguridad).
+#### B. Rango Histórico Alternativo: `2a7630f` -> Head: `d5e5bee` (Referencia Remota Previa)
+Si la auditoría independiente evaluó la distancia desde la referencia remota previa (`2a7630f`), existen **dos (2) commits intermedios**:
+- **GitHub API Compare (`/compare/2a7630f...d5e5bee`):** `ahead_by: 2, behind_by: 0, total_commits: 2`.
+  1. Commit 1: `d524e2efbe6140e55c18ef166971a213a8548b11` (*"REPORTE DE RECONCILIACIÓN DE REMEDIACIÓN Y PUERTA DE SEGURIDAD"*), Autor: `juancastro2381-hub`, Fecha: `Mon Oct 19 18:13:41 2026 -0500`. Propósito: Reconciliación documental entre la auditoría independiente y el commit remoto.
+  2. Commit 2: `d5e5bee38156661c4256b6d11ed2c7c60baf02d7` (*"REPORTE FINAL DE AUDITORÍA DE SEGURIDAD Y CRITERIOS DE ACEPTACIÓN"*), Autor: `juancastro2381-hub`, Fecha: `Mon Oct 19 18:36:30 2026 -0500`. Propósito: Remediación definitiva en código y pruebas.
 
-### 2.3 Análisis Técnico: Significado de "0 Files With Changes" en la Interfaz Gráfica
-Es fundamental aclarar la diferencia conceptual y técnica entre un árbol de trabajo limpio y la sincronización con el repositorio remoto:
+#### C. Rango Desde Auditoría Original: `dae46fa` -> Head: `d5e5bee`
+- **GitHub API Compare (`/compare/dae46fa...d5e5bee`):** `ahead_by: 3, behind_by: 0, total_commits: 3`.
+  - Commits: `2a7630f`, `d524e2e`, `d5e5bee`.
 
-1. **"0 Files With Changes" (Working Tree Clean):** En cualquier cliente Git (VS Code, GitKraken, GitHub Desktop, terminal), este indicador significa **únicamente** que no existen modificaciones sin guardar, archivos modificados sin confirmar (*unstaged*) ni archivos preparados (*staged*) en el directorio local en comparación con el commit apuntado por el `HEAD` local actual.
-2. **No demuestra sincronización remota:** Un desarrollador puede tener un árbol de trabajo 100% limpio ("0 Files With Changes") estando 5 commits por delante de `origin/main` (cambios locales no publicados), 10 commits por detrás (código remoto no descargado), o en una rama local completamente divergente o huérfana.
-3. **Evidencia Requerida de Equivalencia:** Para demostrar que el árbol local y el repositorio remoto son idénticos, se requiere cotejar los hash SHA de 40 caracteres:
-   - `git rev-parse HEAD` = `d5e5bee38156661c4256b6d11ed2c7c60baf02d7`
-   - `git rev-parse origin/main` = `d5e5bee38156661c4256b6d11ed2c7c60baf02d7`
-   - Conteo de divergencia: `0 0`.
-   En el caso actual, **ambas condiciones se cumplen fácticamente**: el árbol local está limpio y coincide exactamente con el HEAD publicado en GitHub.
+**Conclusión de Reconciliación Git:** La discrepancia se origina exclusivamente en la elección del commit base de comparación. Desde `d524e2e` existe exactamente **1 commit**; desde `2a7630f` existen exactamente **2 commits**; y desde `dae46fa` existen **3 commits**. Todas las cifras son matemáticamente coherentes y están corroboradas por la API de GitHub y Git CLI.
+
+---
+
+### 2.3 Análisis Técnico: Distinción entre Árbol Limpio y Sincronización Remota
+Es de máxima prioridad metodológica no confundir conceptos distintos:
+
+1. **"0 Files With Changes" (Árbol de Trabajo Limpio):** Indica **únicamente** que el estado de los archivos en el disco local coincide con el commit apuntado por el `HEAD` local actual. No aporta evidencia sobre el estado del repositorio remoto en GitHub.
+2. **Sincronización con Repositorio Remoto:** Exige comprobar que el puntero local (`refs/heads/main`) y el puntero remoto (`refs/remotes/origin/main`) resuelvan al mismo identificador SHA (`d5e5bee`) y que no existan commits por enviar (*ahead*) ni por recibir (*behind*).
+3. **Reproducción de Pruebas:** Un informe documental de pruebas pasadas no sustituye la ejecución en vivo capturando códigos de salida en la máquina de auditoría.
+4. **Remediación vs Producción:** Un veredicto de `PASS` en seguridad de software no equivale a la preparación litúrgica para un servicio dominical real.
 
 ---
 
@@ -101,7 +123,7 @@ Se auditó la función `assertSessionResourceAccess()`, el helper `assertFreshAc
 
 #### Verificaciones Específicas de Criterios:
 1. **Los títulos de sesión NUNCA confieren permisos:**
-   - La condición `session.title.includes('[SHARED]')` fue suprimida del código.
+   - La condición `session.title.includes('[SHARED]')` fue suprimida del código y el JSDoc fue actualizado para prohibir explícitamente esta inferencia.
    - Comprobado mediante prueba automatizada D1.17: Una sesión privada titulada `"Ensayos Guitarras [SHARED] Pro"` creada por un músico devuelve **HTTP 403 Forbidden** a cualquier otro usuario.
 2. **Aislamiento absoluto entre músicos ordinarios:**
    - Un músico no puede leer (`GET`), modificar (`PATCH`), eliminar (`DELETE`) ni consultar estado offline (`GET /offline-status`) de la sesión de otro músico.
@@ -161,32 +183,17 @@ Se realizó una inspección completa del directorio `backend/storage/audio/`:
 
 ---
 
-## 6. AUDITORÍA DE CONSISTENCIA DOCUMENTAL Y REGISTRO DE DISCREPANCIAS
+## 6. AUDITORÍA DE CONSISTENCIA DOCUMENTAL Y ESTADO DE RESOLUCIÓN
 
-Se revisaron exhaustivamente los tres documentos requeridos para detectar discrepancias, comentarios desactualizados o contradicciones:
+### 6.1 Discrepancia 1 — Comentario JSDoc en `multitrack.routes.ts` (**RESUELTO**)
+- **Estado Anterior:** El bloque de comentarios JSDoc de `assertSessionResourceAccess()` (líneas 64-78) contenía la frase desactualizada: `c) O el título incluye la etiqueta '[SHARED]'`.
+- **Acción de Reconciliación Ejecutada:** Se actualizó el bloque JSDoc en `backend/src/interfaces/http/routes/multitrack.routes.ts` eliminando toda mención a `[SHARED]`, documentando la regla de invariante de título y alineando el comentario con el código ejecutable y las pruebas D1.17 sin modificar ninguna línea de código ejecutable.
 
-### 6.1 Discrepancia 1 — Comentario Desactualizado en `backend/src/interfaces/http/routes/multitrack.routes.ts`
-- **Ubicación:** Bloque de comentarios JSDoc de la función `assertSessionResourceAccess()` (líneas 72-78).
-- **Texto Desactualizado:**
-  ```typescript
-  * 4. Lectura (GET) y Estado Offline:
-  *    - Permitido si la sesión es compartida ministerialmente:
-  *      a) createdByUserId es null (sesión maestra del sistema).
-  *      b) O fue creada por un WORSHIP_LEADER, ADMIN o SUPER_ADMIN (sesión oficial de culto compartida).
-  *      c) O el título incluye la etiqueta '[SHARED]' (indicador explícito de compartición con el equipo).
-  ```
-- **Factualidad:** En la línea 119 del mismo archivo, el código y la implementación eliminaron dicha comprobación: `// NOTA DE SEGURIDAD: No se infiere autorización a partir del texto del título (ej. '[SHARED]').` La prueba D1.17 valida que `[SHARED]` en el título ya no otorga permisos. El comentario del JSDoc quedó desactualizado respecto a la implementación corregida.
-- **Acción:** Registrado en este reporte sin modificar el archivo de código, respetando la directiva de no tocar código sin autorización separada.
+### 6.2 Discrepancia 2 — `docs/reports/POST_DOCUMENTATION_REMEDIATION_REPORT.md` (**DOCUMENTADO**)
+- El documento histórico pertenece al hito `2a7630f` y conserva tablas con `verifyDatabaseRole = false` y 632 pruebas, superadas por la versión actual. Permanece intacto como registro histórico de auditoría.
 
-### 6.2 Discrepancia 2 — `docs/reports/POST_DOCUMENTATION_REMEDIATION_REPORT.md`
-- **Discrepancias Detectadas:**
-  1. *Versión Git referenciada:* Se redactó indicando que el HEAD era `2a7630f`, el cual ha sido superado por `d5e5bee`.
-  2. *Tabla de endpoints de canciones (Sección 3.1):* Señala que `GET /api/v1/songs` y las rutas de lectura utilizan `verifyDatabaseRole = false`, lo cual correspondía a la versión `2a7630f`, pero fue modificado a `true` en el árbol de trabajo actual.
-  3. *Mención de `[SHARED]` (Sección 3.2):* Aún menciona que el título con `[SHARED]` califica como sesión compartida, lo cual fue revocado para garantizar seguridad determinista.
-  4. *Conteo de pruebas (Sección 4):* Reporta 632 pruebas en lugar de las 635 pruebas actuales.
-
-### 6.3 Discrepancia 3 — `docs/reports/FINAL_SECURITY_REMEDIATION_GATE.md`
-- **Discrepancia Detectada:** El documento fue completado cuando el HEAD local era `d524e2e` y los cambios estaban sin commitear. Tras el commit y push efectuado por el usuario hacia `d5e5bee`, el encabezado de dicho reporte aún registra `d524e2e` como commit evaluado y no refleja la inclusión en Git de los 9 archivos WAV adicionales que se incorporaron en `d5e5bee`.
+### 6.3 Discrepancia 3 — `docs/reports/FINAL_SECURITY_REMEDIATION_GATE.md` (**DOCUMENTADO**)
+- El documento fue redactado antes del commit `d5e5bee`. Su encabezado refleja el estado local previo `d524e2e` y 46 WAVs rastreados, los cuales se incrementaron a 55 en `d5e5bee`.
 
 ---
 
@@ -219,5 +226,5 @@ Para avanzar desde el estado actual (**Apto para Homologación**) hacia **Produc
 - [x] **Inspección de autorización multipista:** Confirmada la supresión de `[SHARED]`, aislamiento de músicos, override de admin y discriminación de excepciones en `by-song`.
 - [x] **Pruebas ejecutadas y capturadas en vivo:** 635 pruebas pasadas (286 backend, 349 frontend, 0 fallos).
 - [x] **Reconciliación de Git documentada:** Explicada la diferencia entre árbol limpio ("0 Files With Changes") y sincronización remota con SHAs completos.
-- [x] **Discrepancias documentales registradas:** Comentario desactualizado en `multitrack.routes.ts` y reportes históricos señalados puntualmente.
+- [x] **Discrepancias documentales resueltas/registradas:** JSDoc en `multitrack.routes.ts` corregido; reportes históricos contextualizados.
 - [x] **Veredictos diferenciados emitidos:** Remediación de Código (`PASS`), Verificación de Pruebas (`PASS`), Preparación Operativa (`PASS`), Preparación para Producción (`NOT PRODUCTION READY`).

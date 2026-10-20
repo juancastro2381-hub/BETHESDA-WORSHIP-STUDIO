@@ -339,17 +339,17 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
           </div>
         )}
 
-        {/* Banner de Enlace Administrativo (SMTP No Configurado) */}
+        {/* Banner de Enlace Administrativo (SMTP No Configurado - Fallback de Contingencia) */}
         {generatedInviteLink && (
           <div className="user-mgmt-invite-link-banner" style={{ margin: '0.75rem 1.5rem 0' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
-              <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>ℹ️</span>
+              <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>⚠️</span>
               <div style={{ flex: 1 }}>
                 <strong style={{ color: '#fde047', display: 'block', marginBottom: '0.25rem' }}>
-                  Servidor SMTP no configurado en este entorno
+                  [CONTINGENCIA OPERATIVA / DESARROLLO]: Servidor de correo SMTP no configurado
                 </strong>
                 <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.82rem', color: '#cbd5e1' }}>
-                  El correo no se pudo despachar por la red. Entregue este enlace seguro de activación de un solo uso directamente al integrante:
+                  El correo no fue despachado automáticamente porque el servidor SMTP no está configurado en este entorno. En producción es obligatorio un proveedor de correo saliente. Como contingencia operativa controlada, entregue este enlace seguro de activación de un solo uso directamente al integrante:
                 </p>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <input

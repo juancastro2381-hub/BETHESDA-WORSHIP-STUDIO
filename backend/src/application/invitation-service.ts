@@ -107,7 +107,8 @@ export class UserInvitationService {
       rawInvitationToken,
       expiresAt,
       deliveryStatus: 'UNCONFIGURED_MOCK',
-      deliveryMessage: 'Servicio SMTP no configurado en este entorno. Enlace administrativo generado para entrega manual segura.',
+      deliveryMessage:
+        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas. En producción se requiere un servicio de correo saliente configurado.',
     };
   }
 
@@ -160,7 +161,8 @@ export class UserInvitationService {
       rawInvitationToken,
       expiresAt,
       deliveryStatus: 'UNCONFIGURED_MOCK',
-      deliveryMessage: 'Servicio SMTP no configurado en este entorno. Enlace administrativo generado para entrega manual segura.',
+      deliveryMessage:
+        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas. En producción se requiere un servicio de correo saliente configurado.',
     };
   }
 

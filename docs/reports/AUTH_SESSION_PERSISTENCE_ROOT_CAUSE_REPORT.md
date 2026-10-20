@@ -14,11 +14,11 @@
 Durante las pruebas operativas en entorno de desarrollo e integración de Bethesda Worship Studio, los usuarios experimentaban una pérdida inmediata de sesión al presionar `F5` o recargar cualquier vista de la aplicación web. El usuario era desautenticado forzosamente, perdiendo el contexto ministerial, el atril litúrgico y requiriendo ingresar credenciales repetidamente.
 
 Una investigación forense e independiente identificó **tres factores concurrentes** en las capas de transporte HTTP, ciclo de vida de React y arquitectura de tokens que causaban esta degradación:
-1. **Pérdida de Cookies por Origen Cruzado en Desarrollo (Cross-Origin Cookie Dropping):** El frontend Vite se servía en `http://localhost:5173` y realizaba peticiones directamente a `http://localhost:3001` sin proxy inverso configurado. La cookie de refresco configurada con `SameSite: Strict` y ruta restringida era bloqueada por las políticas de aislamiento de orígenes de los navegadores modernos.
+1. **Fricción de Origen Cruzado, CORS y Alcance de Cookies en Desarrollo:** El frontend Vite se servía en `http://localhost:5173` y realizaba peticiones directamente a `http://localhost:3001` sin proxy inverso configurado. Aunque ambos servicios comparten el mismo sitio registral (`localhost`), sus diferentes puertos constituyen **orígenes distintos** (RFC 6454: esquema + host + puerto). La interacción entre solicitudes *cross-origin*, la ausencia de proxy, el alcance estricto de ruta (`Path: /api/v1/auth`), el modo de credenciales en `fetch()` y las políticas de aislamiento de cookies en contextos de origen cruzado provocaban que en la recarga (`F5`) la cookie de refresco no se adjuntara confiablemente.
 2. **Colisión de Refresco Concurrente (Concurrent Refresh Race Condition):** Durante la carga o recarga de la aplicación, múltiples componentes y hooks disparaban llamadas concurrentes a `/api/v1/auth/refresh`. La primera llamada consumía y rotaba el token; las llamadas concurrentes en vuelo presentaban el token revocado, interpretándose erróneamente como un ataque de repetición (*token replay attack*), lo que provocaba la revocación en cascada de toda la familia de tokens (*Family Revocation*) y el cierre forzoso de la sesión.
 3. **Ausencia de Máquina de Estados de Ciclo de Vida en Frontend:** El contexto de autenticación (`AuthContext`) no modelaba explícitamente el estado `INITIALIZING`, lo que provocaba que la interfaz se renderizara prematuramente como desautenticada mientras la promesa de refresco aún estaba en curso.
 
-La solución implementada resolvió el problema integralmente en el cliente y el servidor mediante un proxy inverso de desarrollo en Vite, deduplicación *single-flight* en el cliente HTTP (`refreshPromise`), máquina de estados explícita en `AuthContext` y preservación estricta de la detección de ataques de repetición en el backend.
+La solución implementada resolvió el problema en desarrollo mediante un proxy inverso de desarrollo en Vite (que proporciona semántica *same-origin* local), deduplicación *single-flight* en el cliente HTTP (`refreshPromise`), máquina de estados explícita en `AuthContext` y preservación estricta de la detección de ataques de repetición en el backend. Asimismo, se documentaron los requisitos de infraestructura requeridos para producción (donde el proxy de Vite no existe).
 
 ---
 
@@ -66,19 +66,39 @@ El sistema implementa una arquitectura híbrida de doble token conforme a las me
 
 ## 3. Análisis Forense de Causa Raíz (RCA)
 
-### Causa Raíz 1: Origen Cruzado en Entorno de Desarrollo (Cross-Origin Cookie Dropping)
+### Causa Raíz 1: Origen Cruzado, CORS y Aislamiento de Cookies en Desarrollo
 
-#### Diagnóstico Técnico
-En desarrollo local, el servidor de desarrollo Vite se ejecutaba en `http://localhost:5173`. Las peticiones HTTP generadas por `BethesdaApiClient` apuntaban a `http://localhost:3001` (o al puerto predeterminado del backend).
+#### Diagnóstico Técnico y Distinción entre Origen y Sitio (RFC 6454 vs. RFC 6265bis)
+En la arquitectura inicial de desarrollo local, la aplicación cliente Vite se servía en `http://localhost:5173`, mientras que el servidor Fastify atendía en `http://localhost:3001`. El cliente realizaba llamadas HTTP directas entre ambos puertos sin un proxy inverso intermedio.
 
-Aunque ambos servicios residían en `localhost`, el estándar W3C/WHATWG especifica que dos URLs con puertos diferentes constituyen **orígenes distintos** (`Origin: http://localhost:5173` vs `Target: http://localhost:3001`).
+Para comprender con exactitud la causa raíz de la pérdida de cookies al recargar (`F5`), es indispensable diferenciar los conceptos de **Origen** (*Origin*) y **Sitio** (*Site*):
 
-La cookie `bethesda_refresh_token` emitida por el backend tenía los atributos:
-```http
-Set-Cookie: bethesda_refresh_token=<token>; Path=/api/v1/auth; HttpOnly; SameSite=Strict
-```
+1. **Definición de Origen (RFC 6454):**
+   Un origen está definido estrictamente por la tupla:
+   $$\text{Origen} = (\text{esquema}, \text{host}, \text{puerto})$$
+   Dado que los puertos difieren (`5173` vs `3001`), `http://localhost:5173` y `http://localhost:3001` constituyen **orígenes completamente distintos** (*Cross-Origin*).
 
-Bajo la política `SameSite=Strict`, los navegadores modernos (Chromium, Firefox, Safari) **rechazan categóricamente** enviar la cookie en cualquier solicitud cross-origin, incluso si el cliente especifica `credentials: 'include'` en la llamada `fetch()`. En consecuencia, al recargar la página (`F5`), el navegador enviaba una petición a `http://localhost:3001/api/v1/auth/refresh` **completamente vacía de cookies**. El backend respondía `401 Unauthorized ("Token de refresco ausente")`, y la aplicación declaraba al usuario desautenticado.
+2. **Definición de Sitio (RFC 6265bis / HTML Living Standard):**
+   El concepto de sitio (*Site*) para la evaluación de cookies se basa en el registro efectivo de dominio de nivel superior más un nivel (`eTLD+1`) y, en navegadores modernos bajo *Schemeful Same-Site*, en el esquema:
+   $$\text{Sitio} = (\text{esquema}, \text{registrable\_domain})$$
+   Bajo esta definición formal, dado que ambos extremos comparten `localhost` y el esquema `http`, `http://localhost:5173` y `http://localhost:3001` son técnicamente **Same-Site** (específicamente, *same-site cross-origin*). Por lo tanto, atribuir el bloqueo únicamente a que "puertos distintos hacen sitios distintos" es técnicamente inexacto en las especificaciones de cookies.
+
+#### Mecanismo Real del Fallo en Tiempo de Ejecución
+La ausencia de la cookie de refresco en la recarga (`F5`) se debió a la conjunción de las siguientes restricciones de transporte HTTP y navegador:
+
+1. **Modo de Credenciales en Fetch (`credentials: 'include'`):**
+   En solicitudes *cross-origin*, la API estándar `fetch()` de los navegadores **omite por defecto el envío y almacenamiento de cookies** (`credentials: 'same-origin'`). Si una petición a `http://localhost:3001/api/v1/auth/refresh` no declara explícitamente `credentials: 'include'`, el navegador omite categóricamente la cabecera `Cookie`.
+2. **Requisitos de CORS y Negociación Preflight:**
+   Al ser una petición *cross-origin* con credenciales y encabezados de tipo (`Content-Type: application/json`), el navegador impone que:
+   - El servidor backend responda obligatoriamente con `Access-Control-Allow-Credentials: true`.
+   - `Access-Control-Allow-Origin` no puede ser un comodín (`*`); debe coincidir exactamente con el origen emisor (`http://localhost:5173`).
+   - El preflight `OPTIONS` debe ser atendido y aceptado antes de enviar la solicitud real con cookies.
+3. **Ámbito de Ruta y Aislamiento de Cookies (`Path: /api/v1/auth`):**
+   La cookie emitida por el backend posee el atributo `Path=/api/v1/auth`. En un entorno donde las URLs base de la API variaban o no mantenían paridad con el contexto del documento, el navegador aplicaba políticas de aislamiento contextual de almacenamiento.
+4. **Políticas de Particionamiento y Contexto de Navegadores:**
+   Bajo directivas de seguridad modernas (como las protecciones contra rastreo en Chromium, Safari y Firefox), las cookies emitidas con directivas estrictas en contextos con puertos cruzados son objeto de aislamiento estricto si no existe un contexto de navegación unificado.
+
+Al recargar la página (`F5`), el cliente ejecutaba `fetch('http://localhost:3001/api/v1/auth/refresh')` en un contexto donde el navegador no adjuntaba la cookie `bethesda_refresh_token`. El servidor respondía de forma determinista con `401 Unauthorized ("Token de refresco ausente")`, provocando que el cliente destruyera la sesión en memoria y forzara al usuario al formulario de inicio de sesión.
 
 ### Causa Raíz 2: Colisión de Refresco Concurrente y Falsa Alarma de Replay Attack
 
@@ -133,7 +153,11 @@ export default defineConfig({
 });
 ```
 
-**Efecto de Seguridad:** En el navegador, todas las peticiones viajan a `http://localhost:5173/api/v1/...`. Al compartir el mismo origen (esquema, host y puerto), la cookie `SameSite=Strict` es enviada de manera 100% confiable y nativa por el navegador. En producción, la misma configuración es satisfecha mediante Nginx o Caddy como reverse proxy.
+**Efecto en Desarrollo:** En el navegador, todas las peticiones viajan a `http://localhost:5173/api/v1/...`. Al unificar el origen bajo el mismo esquema, host y puerto, las llamadas se transforman en estrictamente **Same-Origin** (RFC 6454), lo que permite que la cookie `SameSite=Strict` y `Path=/api/v1/auth` se transmita de manera 100% nativa y sin requerir preflights CORS complejos en el entorno local.
+
+> [!IMPORTANT]
+> **El proxy de Vite no constituye prueba de corrección en producción:**  
+> El proxy inverso de Vite existe exclusivamente dentro del servidor de desarrollo local (`vite dev`). En compilaciones de producción (`vite build`), Vite genera archivos estáticos independientes (HTML, JS, CSS) sin servidor proxy. Por consiguiente, la resolución exitosa en desarrollo **no prueba por sí sola la viabilidad en producción**, requiriendo una topología de despliegue formalizada como se detalla en la sección 4.6.
 
 ### 4.2. Base URL Relativa Same-Origin (`frontend/src/core/api/api-client.ts`)
 Se actualizó el cliente HTTP para utilizar `/api/v1` como URL base predeterminada en lugar de URLs absolutas con puerto cruzado:
@@ -201,6 +225,24 @@ Al montar la aplicación:
 
 ### 4.5. Preservación Estricta de Replay Attack Detection en Backend (`backend/src/application/auth-service.ts`)
 Se mantuvo intacta la política de tolerancia cero frente a tokens reutilizados en el backend: si un atacante intenta utilizar un token de refresco que ya fue rotado, el backend revoca inmediatamente toda la familia de tokens en PostgreSQL y registra el evento forense `SUSPICIOUS_TOKEN_REUSE`. La seguridad no se debilita con ventanas permisivas innecesarias, dado que la deduplicación está garantizada en la capa de transporte cliente.
+
+### 4.6. Consideraciones Arquitecturales y Requisitos para Producción (Production Hardening Gate)
+Para garantizar la persistencia de sesión y la seguridad en el despliegue de producción, deben cumplirse rigurosamente los siguientes requisitos de infraestructura:
+
+1. **Topología de Red Recomendada (Same-Origin mediante Reverse Proxy Ingress):**
+   - Configurar un reverse proxy perimetral (Nginx, Caddy, Traefik, Cloudflare o AWS ALB) que unifique frontend y backend bajo un único origen público:
+     - `https://worship.bethesda.org/` $\to$ SPA compilada (activos estáticos).
+     - `https://worship.bethesda.org/api/v1/` $\to$ Backend Fastify.
+   - **Beneficio de Seguridad:** Preserva la semántica *Same-Origin* pura, eliminando preflights CORS para la navegación principal, asegurando que la cookie `SameSite=Strict` funcione de forma determinista y blindando la plataforma contra vectores de fuga entre sitios.
+2. **Protocolo HTTPS y Bandera `Secure` Obligatorios:**
+   - En producción (`NODE_ENV=production`), la cookie `bethesda_refresh_token` debe emitirse con `secure: true`.
+   - Cualquier intento de conexión HTTP en claro debe ser redirigido a HTTPS (HTTP 301 con HSTS activado).
+3. **Requisitos en Arquitectura Desacoplada (Cross-Origin / Subdominios Separados):**
+   Si la infraestructura requiere hospedar el cliente en `https://app.bethesda.org` y el API en `https://api.bethesda.org`:
+   - **Lista Blanca Explícita de CORS:** Configurar `fastify-cors` con `origin: ['https://app.bethesda.org']` y `credentials: true`. Queda prohibido el uso de comodines (`*`).
+   - **Ajuste de Atributos de Cookie:** La directiva `SameSite=Strict` bloqueará el envío de cookies entre subdominios diferentes en llamadas iniciadas desde la SPA. Debe configurarse `SameSite=Lax` con `Domain=.bethesda.org` o `SameSite=None; Secure`.
+   - **Defensa Obligatoria Anti-CSRF:** Al relajar `SameSite` en un entorno cross-origin, es mandatorio implementar defensas activas contra Cross-Site Request Forgery (CSRF), tales como validación de encabezado personalizado (`X-Bethesda-Requested-With`) o tokens anti-CSRF criptográficos sincronizados (*Double Submit Cookie*).
+   - **Inclusión de Credenciales en Fetch:** El cliente debe invocar todas las peticiones con `credentials: 'include'`.
 
 ---
 

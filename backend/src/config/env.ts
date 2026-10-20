@@ -8,12 +8,22 @@ import { z } from 'zod';
 
 dotenv.config();
 
+// Si la ejecución proviene del ejecutor de pruebas (node/tsx --test), forzar NODE_ENV a 'test'
+const isTestExecution =
+  process.env.NODE_ENV === 'test' ||
+  process.argv.some((arg) => arg.includes('test')) ||
+  process.execArgv.some((arg) => arg.includes('test'));
+
+if (isTestExecution && process.env.NODE_ENV !== 'test') {
+  process.env.NODE_ENV = 'test';
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(3001),
   HOST: z.string().default('0.0.0.0'),
-  DATABASE_URL: z.string().url().default('postgresql://postgres:1011324455Ne@localhost:5432/bethesda_worship_dev'),
-  TEST_DATABASE_URL: z.string().url().default('postgresql://postgres:1011324455Ne@localhost:5432/bethesda_worship_test'),
+  DATABASE_URL: z.string().url('DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
+  TEST_DATABASE_URL: z.string().url('TEST_DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

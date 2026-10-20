@@ -8,7 +8,7 @@
 
 import { CanonicalMusicPayload, type CanonicalMusicPayloadJSON } from '../canonical-model/index.ts';
 import { tokenManager } from '../auth/token-manager.ts';
-import type { AuthResponseData } from '../auth/types.ts';
+import type { AuthResponseData, UserRole, AccountStatus } from '../auth/types.ts';
 import { ApiError } from './api-error.ts';
 import type {
   CreateSetlistItemPayload,
@@ -74,9 +74,10 @@ export interface ApiClientConfig {
 export class BethesdaApiClient {
   private static instance: BethesdaApiClient | null = null;
   public readonly baseUrl: string;
+  private refreshPromise: Promise<AuthResponseData> | null = null;
 
   public constructor(config?: ApiClientConfig) {
-    this.baseUrl = config?.baseUrl ?? (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:3001/api/v1';
+    this.baseUrl = config?.baseUrl ?? (import.meta as any).env?.VITE_API_URL ?? '/api/v1';
   }
 
   public static getInstance(config?: ApiClientConfig): BethesdaApiClient {
@@ -156,21 +157,34 @@ export class BethesdaApiClient {
 
   /**
    * Renovación de token de sesión mediante Cookie HttpOnly (Fase 2B).
+   * Deduplica llamadas concurrentes para mitigar carreras en recargas simultáneas de página.
    */
   public async refreshSession(): Promise<AuthResponseData> {
-    const res = await fetch(`${this.baseUrl}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err?.error?.message ?? `Sesión expirada o no iniciada: HTTP ${res.status}`);
+    if (this.refreshPromise) {
+      return this.refreshPromise;
     }
 
-    const json = await res.json();
-    return json.data;
+    this.refreshPromise = (async () => {
+      try {
+        const res = await fetch(`${this.baseUrl}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err?.error?.message ?? `Sesión expirada o no iniciada: HTTP ${res.status}`);
+        }
+
+        const json = await res.json();
+        return json.data;
+      } finally {
+        this.refreshPromise = null;
+      }
+    })();
+
+    return this.refreshPromise;
   }
 
   /**
@@ -568,6 +582,155 @@ export class BethesdaApiClient {
     const mimeType = res.headers.get('content-type') || blob.type || 'audio/mpeg';
     return { blob, filename, mimeType };
   }
+
+  // ==========================================================================
+  // GESTIÓN DE USUARIOS Y ROLES (FASE 2B / FASE C)
+  // ==========================================================================
+
+  /**
+   * Consulta el listado paginado de usuarios del ministerio.
+   */
+  public async listUsers(
+    params?: ListUsersParams
+  ): Promise<{ items: FrontendUserEntity[]; total: number; limit: number; offset: number }> {
+    const query = new URLSearchParams();
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    if (params?.offset !== undefined) query.set('offset', String(params.offset));
+    if (params?.role) query.set('role', params.role);
+    if (params?.status) query.set('status', params.status);
+    if (params?.search) query.set('search', params.search);
+
+    const path = `/users${query.toString() ? `?${query.toString()}` : ''}`;
+    const res = await this.fetchWithAuth(path);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al listar usuarios: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return {
+      items: json.data,
+      total: json.pagination?.total ?? json.data.length,
+      limit: json.pagination?.limit ?? params?.limit ?? 20,
+      offset: json.pagination?.offset ?? params?.offset ?? 0,
+    };
+  }
+
+  /**
+   * Emite una invitación administrativa para un nuevo integrante.
+   */
+  public async inviteUser(payload: {
+    email: string;
+    firstName: string;
+    lastName: string;
+    role: UserRole;
+  }): Promise<InviteUserResponseData> {
+    const res = await this.fetchWithAuth('/users/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al invitar usuario: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Reenvía una invitación a un usuario en PENDING_INVITATION, invalidando el token anterior.
+   */
+  public async resendInvitation(userId: string): Promise<InviteUserResponseData> {
+    const res = await this.fetchWithAuth(`/users/${userId}/resend-invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al reenviar invitación: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Modifica el rol RBAC de un usuario.
+   */
+  public async changeUserRole(userId: string, role: UserRole): Promise<{ id: string; email: string; role: UserRole }> {
+    const res = await this.fetchWithAuth(`/users/${userId}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al modificar rol: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Deshabilita o suspende la cuenta de un usuario.
+   */
+  public async disableUser(userId: string): Promise<{ message: string }> {
+    const res = await this.fetchWithAuth(`/users/${userId}/disable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al suspender usuario: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return { message: json.message };
+  }
+
+  /**
+   * Reactiva la cuenta de un usuario suspendido o bloqueado.
+   */
+  public async enableUser(userId: string): Promise<{ message: string }> {
+    const res = await this.fetchWithAuth(`/users/${userId}/enable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al reactivar usuario: HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    return { message: json.message };
+  }
+}
+
+export interface ListUsersParams {
+  limit?: number | undefined;
+  offset?: number | undefined;
+  role?: UserRole | undefined;
+  status?: AccountStatus | undefined;
+  search?: string | undefined;
+}
+
+export interface FrontendUserEntity {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  role: UserRole;
+  accountStatus: AccountStatus;
+  emailVerified: boolean;
+  createdAt: string;
+}
+
+export interface InviteUserResponseData {
+  invitationId?: string;
+  userId: string;
+  email: string;
+  role: UserRole;
+  expiresAt: string;
+  invitationToken: string;
+  deliveryStatus: 'SENT' | 'UNCONFIGURED_MOCK';
+  deliveryMessage: string;
 }
 
 export interface AudioAssetDTO {

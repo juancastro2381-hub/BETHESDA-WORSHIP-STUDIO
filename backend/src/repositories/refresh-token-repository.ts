@@ -3,7 +3,7 @@
  * @description Repositorio para la gestión segura de Refresh Tokens y Familias de Tokens (Fase 2B).
  */
 
-import { eq, and, lt } from 'drizzle-orm';
+import { eq, and, lt, desc } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import { refreshTokens } from '../db/schema.ts';
 import type { RefreshTokenEntity } from '../domain/auth-types.ts';
@@ -20,6 +20,7 @@ export interface CreateRefreshTokenInput {
 export interface IRefreshTokenRepository {
   create(input: CreateRefreshTokenInput): Promise<RefreshTokenEntity>;
   findByTokenHash(tokenHash: string): Promise<RefreshTokenEntity | null>;
+  findActiveByFamily(familyId: string): Promise<RefreshTokenEntity | null>;
   revokeToken(id: string): Promise<void>;
   revokeFamily(familyId: string): Promise<void>;
   revokeAllForUser(userId: string): Promise<void>;
@@ -52,6 +53,17 @@ export class DrizzleRefreshTokenRepository implements IRefreshTokenRepository {
       .select()
       .from(refreshTokens)
       .where(eq(refreshTokens.tokenHash, tokenHash))
+      .limit(1);
+
+    return found ? this.mapToEntity(found) : null;
+  }
+
+  public async findActiveByFamily(familyId: string): Promise<RefreshTokenEntity | null> {
+    const [found] = await this.db
+      .select()
+      .from(refreshTokens)
+      .where(and(eq(refreshTokens.familyId, familyId), eq(refreshTokens.isRevoked, false)))
+      .orderBy(desc(refreshTokens.createdAt))
       .limit(1);
 
     return found ? this.mapToEntity(found) : null;

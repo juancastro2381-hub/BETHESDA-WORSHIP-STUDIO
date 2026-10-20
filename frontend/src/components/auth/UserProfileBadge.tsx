@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import { LoginModal } from './LoginModal.tsx';
+import { UserManagementModal } from '../admin/UserManagementModal.tsx';
 import type { UserRole } from '../../core/auth/types.ts';
 
 const ROLE_LABELS: Record<UserRole, string> = {
@@ -25,8 +26,9 @@ const ROLE_COLORS: Record<UserRole, string> = {
 };
 
 export const UserProfileBadge: React.FC = () => {
-  const { user, isAuthenticated, isLoading, logout } = useAuth();
+  const { user, isAuthenticated, isLoading, logout, canManageUsers } = useAuth();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isUserMgmtOpen, setIsUserMgmtOpen] = useState(false);
 
   if (isLoading) {
     return (
@@ -69,6 +71,19 @@ export const UserProfileBadge: React.FC = () => {
             {roleLabel}
           </span>
         </div>
+
+        {canManageUsers && (
+          <button
+            type="button"
+            className="auth-admin-button"
+            onClick={() => setIsUserMgmtOpen(true)}
+            title="Administración de integrantes y roles"
+            id="open-user-management-button"
+          >
+            <span aria-hidden="true">👥</span> Integrantes
+          </button>
+        )}
+
         <button
           type="button"
           className="auth-logout-button"
@@ -79,7 +94,14 @@ export const UserProfileBadge: React.FC = () => {
           Salir
         </button>
       </div>
+
       <LoginModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+      {canManageUsers && (
+        <UserManagementModal
+          isOpen={isUserMgmtOpen}
+          onClose={() => setIsUserMgmtOpen(false)}
+        />
+      )}
     </>
   );
 };

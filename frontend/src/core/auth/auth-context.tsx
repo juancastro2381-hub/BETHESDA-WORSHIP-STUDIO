@@ -8,15 +8,17 @@
  */
 
 import React, { createContext, useState, useEffect, useCallback, type ReactNode } from 'react';
-import type { AuthUser, UserRole } from './types.ts';
+import type { AuthUser, UserRole, AuthLifecycleStatus } from './types.ts';
 import { tokenManager } from './token-manager.ts';
 import { BethesdaApiClient } from '../api/api-client.ts';
 import { offlineManager } from '../offline/offline-manager.ts';
 
 export interface AuthContextType {
   user: AuthUser | null;
+  authStatus: AuthLifecycleStatus;
   isAuthenticated: boolean;
   isLoading: boolean;
+  canManageUsers: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   changeInitialPassword: (currentPassword: string, newPassword: string) => Promise<void>;
@@ -27,7 +29,7 @@ export const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [authStatus, setAuthStatus] = useState<AuthLifecycleStatus>('INITIALIZING');
 
   const apiClient = BethesdaApiClient.getInstance();
 
@@ -39,6 +41,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const response = await apiClient.refreshSession();
       tokenManager.setToken(response.accessToken, response.expiresIn);
       setUser(response.user);
+      setAuthStatus('AUTHENTICATED');
 
       // Programar la siguiente renovación 60s antes de expirar
       tokenManager.scheduleSilentRefresh(async () => {
@@ -49,20 +52,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     } catch {
       tokenManager.clearToken();
       setUser(null);
+      setAuthStatus('UNAUTHENTICATED');
       return null;
     }
   }, [apiClient]);
 
-  // Al montar la aplicación (o tras F5), intentar restaurar la sesión usando la cookie HttpOnly
+  // Al montar la aplicación (o tras recarga F5), restaurar la sesión usando la cookie HttpOnly
   useEffect(() => {
     let isMounted = true;
 
     async function initSession() {
       try {
         await performSilentRefresh();
-      } finally {
+      } catch {
         if (isMounted) {
-          setIsLoading(false);
+          setAuthStatus('UNAUTHENTICATED');
         }
       }
     }
@@ -83,6 +87,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const response = await apiClient.login(email, password);
       tokenManager.setToken(response.accessToken, response.expiresIn);
       setUser(response.user);
+      setAuthStatus('AUTHENTICATED');
 
       tokenManager.scheduleSilentRefresh(async () => {
         await performSilentRefresh();
@@ -107,6 +112,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
       tokenManager.clearToken();
       setUser(null);
+      setAuthStatus('UNAUTHENTICATED');
     }
   }, [apiClient, user]);
 
@@ -136,12 +142,18 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     [user]
   );
 
+  const canManageUsers = !!user && (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN');
+  const isLoading = authStatus === 'INITIALIZING';
+  const isAuthenticated = authStatus === 'AUTHENTICATED' && user !== null;
+
   return (
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated: !!user,
+        authStatus,
+        isAuthenticated,
         isLoading,
+        canManageUsers,
         login,
         logout,
         changeInitialPassword,

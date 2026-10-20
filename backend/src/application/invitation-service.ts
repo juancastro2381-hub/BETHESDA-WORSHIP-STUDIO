@@ -27,6 +27,8 @@ export interface InviteUserResult {
   user: UserEntity;
   rawInvitationToken: string;
   expiresAt: Date;
+  deliveryStatus: 'SENT' | 'UNCONFIGURED_MOCK';
+  deliveryMessage: string;
 }
 
 export class UserInvitationService {
@@ -50,7 +52,10 @@ export class UserInvitationService {
       throw new ConflictError(`Ya existe un usuario activo registrado con el correo '${normalizedEmail}'.`);
     }
 
-    // 2. Generar token criptográfico único (256 bits)
+    // 2. Invalidar invitaciones previas pendientes para evitar tokens duplicados concurrentes
+    await this.invitationRepo.revokePendingByEmail(normalizedEmail);
+
+    // 3. Generar token criptográfico único (256 bits)
     const rawInvitationToken = generateSecureToken(32);
     const tokenHash = hashToken(rawInvitationToken);
     const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); // 72 horas
@@ -76,7 +81,7 @@ export class UserInvitationService {
       });
     }
 
-    // 3. Persistir token hasheado en user_invitations
+    // 4. Persistir token hasheado en user_invitations
     await this.invitationRepo.create({
       email: normalizedEmail,
       tokenHash,
@@ -101,6 +106,61 @@ export class UserInvitationService {
       user,
       rawInvitationToken,
       expiresAt,
+      deliveryStatus: 'UNCONFIGURED_MOCK',
+      deliveryMessage: 'Servicio SMTP no configurado en este entorno. Enlace administrativo generado para entrega manual segura.',
+    };
+  }
+
+  /**
+   * Reenvía una invitación a un usuario en estado PENDING_INVITATION, invalidando el token anterior.
+   */
+  public async resendInvitation(userId: string, requestedByUserId: string): Promise<InviteUserResult> {
+    const user = await this.userRepo.findById(userId);
+    if (!user) {
+      throw new NotFoundError(`Usuario con ID ${userId} no encontrado.`);
+    }
+
+    if (user.accountStatus !== 'PENDING_INVITATION') {
+      throw new ValidationError(
+        `Solo se pueden reenviar invitaciones para usuarios en estado PENDING_INVITATION. Estado actual: ${user.accountStatus}`
+      );
+    }
+
+    // 1. Invalidar tokens previos no consumidos
+    await this.invitationRepo.revokePendingByEmail(user.email);
+
+    // 2. Generar nuevo token criptográfico
+    const rawInvitationToken = generateSecureToken(32);
+    const tokenHash = hashToken(rawInvitationToken);
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); // 72 horas
+
+    // 3. Persistir nuevo registro de invitación
+    await this.invitationRepo.create({
+      email: user.email,
+      tokenHash,
+      role: user.role,
+      invitedByUserId: requestedByUserId,
+      expiresAt,
+    });
+
+    await this.auditService.log({
+      eventType: 'INVITATION_RESENT',
+      userId: requestedByUserId,
+      resource: 'users',
+      metadata: {
+        targetUserId: user.id,
+        email: user.email,
+        role: user.role,
+        expiresAt,
+      },
+    });
+
+    return {
+      user,
+      rawInvitationToken,
+      expiresAt,
+      deliveryStatus: 'UNCONFIGURED_MOCK',
+      deliveryMessage: 'Servicio SMTP no configurado en este entorno. Enlace administrativo generado para entrega manual segura.',
     };
   }
 

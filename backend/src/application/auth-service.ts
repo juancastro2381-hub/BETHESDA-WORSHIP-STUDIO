@@ -205,7 +205,7 @@ export class AuthService {
 
     // DETECCIÓN DE ROBO O REUTILIZACIÓN (TOKEN REPLAY)
     if (storedToken.isRevoked) {
-      // Un token previamente revocado está intentando ser consumido nuevamente -> Robo evidente
+      // Un token previamente revocado está intentando ser consumido nuevamente -> Reuso fraudulento
       await this.refreshTokenRepo.revokeFamily(storedToken.familyId);
       await this.auditService.log({
         eventType: 'SUSPICIOUS_TOKEN_REUSE',

@@ -69,10 +69,11 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 
   const authGuard = new AuthGuard(tokenService, userRepo);
 
+  const isProd = env.NODE_ENV === 'production';
   const cookieOptions = {
     path: '/api/v1/auth',
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
+    secure: isProd,
     sameSite: 'strict' as const,
     maxAge: env.REFRESH_TOKEN_EXPIRES_IN_DAYS * 24 * 60 * 60,
   };
@@ -121,8 +122,10 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     try {
       const result = await authService.refresh(rawRefreshToken, context);
 
-      // Rotar la cookie con el nuevo token de refresco
-      reply.setCookie('bethesda_refresh_token', result.refreshToken, cookieOptions);
+      // Rotar la cookie con el nuevo token de refresco si se emitió uno nuevo
+      if (result.refreshToken) {
+        reply.setCookie('bethesda_refresh_token', result.refreshToken, cookieOptions);
+      }
 
       return reply.status(200).send({
         success: true,

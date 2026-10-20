@@ -21,6 +21,7 @@ export interface IUserInvitationRepository {
   findByTokenHash(tokenHash: string): Promise<UserInvitationEntity | null>;
   findByEmail(email: string): Promise<UserInvitationEntity | null>;
   markAccepted(id: string): Promise<void>;
+  revokePendingByEmail(email: string): Promise<void>;
 }
 
 export class DrizzleUserInvitationRepository implements IUserInvitationRepository {
@@ -70,6 +71,14 @@ export class DrizzleUserInvitationRepository implements IUserInvitationRepositor
       .update(userInvitations)
       .set({ isAccepted: true })
       .where(eq(userInvitations.id, id));
+  }
+
+  public async revokePendingByEmail(email: string): Promise<void> {
+    const normalizedEmail = email.trim().toLowerCase();
+    await this.db
+      .update(userInvitations)
+      .set({ isAccepted: true })
+      .where(and(eq(userInvitations.email, normalizedEmail), eq(userInvitations.isAccepted, false)));
   }
 
   private mapToEntity(row: typeof userInvitations.$inferSelect): UserInvitationEntity {

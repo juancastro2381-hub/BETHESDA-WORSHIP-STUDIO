@@ -21,14 +21,13 @@ export const App: React.FC = () => {
             <div className="brand-section">
               <img
                 src="/worship_studio_saxophone_emblem.png"
-                alt="Bethesda Worship Studio"
+                alt="Worship Studio"
                 className="brand-emblem-img"
-                width={44}
-                height={44}
+                width={48}
+                height={48}
               />
               <div>
-                <h1 className="brand-title">BETHESDA WORSHIP STUDIO</h1>
-                <p className="brand-subtitle">Iglesia Cristiana Bethesda — Madrid, Cundinamarca</p>
+                <h1 className="brand-title">WORSHIP STUDIO</h1>
               </div>
             </div>
             <div className="header-actions">

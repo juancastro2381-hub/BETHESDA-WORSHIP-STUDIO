@@ -5,7 +5,15 @@
 
 export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'WORSHIP_LEADER' | 'MUSICIAN' | 'VIEWER';
 
-export type AccountStatus = 'ACTIVE' | 'PENDING_INVITATION' | 'MUST_CHANGE_PASSWORD' | 'DISABLED';
+export type AccountStatus =
+  | 'ACTIVE'
+  | 'PENDING_INVITATION'
+  | 'MUST_CHANGE_PASSWORD'
+  | 'DISABLED'
+  | 'SUSPENDED'
+  | 'LOCKED';
+
+export type AuthLifecycleStatus = 'INITIALIZING' | 'AUTHENTICATED' | 'UNAUTHENTICATED';
 
 export interface AuthUser {
   id: string;

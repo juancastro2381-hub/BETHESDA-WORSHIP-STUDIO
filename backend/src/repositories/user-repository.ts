@@ -3,7 +3,7 @@
  * @description Repositorio para la entidad de Usuarios (Fase 2B) utilizando Drizzle ORM y PostgreSQL.
  */
 
-import { eq, sql } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import { users } from '../db/schema.ts';
 import type { UserEntity, UserRole, AccountStatus } from '../domain/auth-types.ts';
@@ -29,7 +29,9 @@ export interface IUserRepository {
   recordSuccessfulLogin(id: string): Promise<void>;
   recordFailedLogin(id: string, lockoutDurationMinutes?: number): Promise<{ failedAttempts: number; isLocked: boolean; lockoutUntil: Date | null }>;
   incrementTokenVersion(id: string): Promise<number>;
-  list(options?: { role?: UserRole; status?: AccountStatus; limit?: number; offset?: number }): Promise<{ items: UserEntity[]; total: number }>;
+  countActiveSuperAdmins(): Promise<number>;
+  list(options?: { role?: UserRole; status?: AccountStatus; search?: string; limit?: number; offset?: number }): Promise<{ items: UserEntity[]; total: number }>;
+  listUsers(options?: { role?: UserRole; status?: AccountStatus; search?: string; limit?: number; offset?: number }): Promise<{ items: UserEntity[]; total: number }>;
 }
 
 export class DrizzleUserRepository implements IUserRepository {
@@ -200,34 +202,57 @@ export class DrizzleUserRepository implements IUserRepository {
     return updated ? updated.tokenVersion : 1;
   }
 
+  public async countActiveSuperAdmins(): Promise<number> {
+    const [result] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(and(eq(users.role, 'SUPER_ADMIN'), eq(users.accountStatus, 'ACTIVE')));
+
+    return Number(result?.count ?? 0);
+  }
+
   public async list(options?: {
     role?: UserRole;
     status?: AccountStatus;
+    search?: string;
     limit?: number;
     offset?: number;
   }): Promise<{ items: UserEntity[]; total: number }> {
     const limit = options?.limit ?? 50;
     const offset = options?.offset ?? 0;
 
-    let query = this.db.select().from(users);
-
     const conditions = [];
     if (options?.role) conditions.push(eq(users.role, options.role));
     if (options?.status) conditions.push(eq(users.accountStatus, options.status));
+    if (options?.search && options.search.trim()) {
+      const term = `%${options.search.trim().toLowerCase()}%`;
+      conditions.push(
+        sql`(${users.email} ILIKE ${term} OR ${users.firstName} ILIKE ${term} OR ${users.lastName} ILIKE ${term})`
+      );
+    }
 
-    const rows = conditions.length > 0
-      ? await query.where(sql.join(conditions, sql` AND `)).limit(limit).offset(offset)
+    const whereClause = conditions.length > 0 ? sql.join(conditions, sql` AND `) : undefined;
+
+    const [totalResult] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(whereClause);
+
+    const query = this.db.select().from(users);
+    const rows = whereClause
+      ? await query.where(whereClause).limit(limit).offset(offset)
       : await query.limit(limit).offset(offset);
 
     return {
       items: rows.map(this.mapToEntity),
-      total: rows.length, // Para simplificar paginación en desarrollo
+      total: Number(totalResult?.count ?? rows.length),
     };
   }
 
   public async listUsers(options?: {
     role?: UserRole;
     status?: AccountStatus;
+    search?: string;
     limit?: number;
     offset?: number;
   }): Promise<{ items: UserEntity[]; total: number }> {

@@ -62,6 +62,8 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       limit: query.limit,
       offset: query.offset,
       role: query.role,
+      status: query.status,
+      search: query.search,
     });
 
     return reply.status(200).send({
@@ -90,15 +92,23 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     const context = getContext(request);
     const inviterId = request.user!.sub;
 
-    const result = await invitationService.inviteUser(
-      {
-        email: body.email,
-        firstName: body.firstName,
-        lastName: body.lastName,
-        role: body.role,
-        invitedByUserId: inviterId,
-      }
-    );
+    const operator = await userRepo.findById(inviterId);
+    if (!operator) {
+      throw new NotFoundError('Operador no encontrado.');
+    }
+
+    // Regla de escalación: Solo SUPER_ADMIN puede invitar a otro SUPER_ADMIN
+    if (operator.role !== 'SUPER_ADMIN' && body.role === 'SUPER_ADMIN') {
+      throw new ForbiddenError('Solo un Super Administrador puede invitar a usuarios con el rol SUPER_ADMIN.');
+    }
+
+    const result = await invitationService.inviteUser({
+      email: body.email,
+      firstName: body.firstName,
+      lastName: body.lastName,
+      role: body.role,
+      invitedByUserId: inviterId,
+    });
 
     return reply.status(201).send({
       success: true,
@@ -109,11 +119,48 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         role: result.user.role,
         expiresAt: result.expiresAt,
         invitationToken: result.rawInvitationToken,
+        deliveryStatus: result.deliveryStatus,
+        deliveryMessage: result.deliveryMessage,
       },
     });
   });
 
-  // 3. PATCH /api/v1/users/:id/role - Modificar rol de usuario (Requiere users:change_role verificado contra BD)
+  // 3. POST /api/v1/users/:id/resend-invite - Reenviar invitación (Requiere users:invite)
+  fastify.post('/:id/resend-invite', { preHandler: authGuard.requirePermission('users:invite', true) }, async (request, reply) => {
+    const params = UserIdParamSchema.parse(request.params);
+    const inviterId = request.user!.sub;
+
+    const operator = await userRepo.findById(inviterId);
+    if (!operator) {
+      throw new NotFoundError('Operador no encontrado.');
+    }
+
+    const targetUser = await userRepo.findById(params.id);
+    if (!targetUser) {
+      throw new NotFoundError(`Usuario con ID ${params.id} no encontrado.`);
+    }
+
+    if (operator.role !== 'SUPER_ADMIN' && targetUser.role === 'SUPER_ADMIN') {
+      throw new ForbiddenError('Los administradores no tienen autorización para gestionar invitaciones de Super Administradores.');
+    }
+
+    const result = await invitationService.resendInvitation(params.id, inviterId);
+
+    return reply.status(200).send({
+      success: true,
+      data: {
+        userId: result.user.id,
+        email: result.user.email,
+        role: result.user.role,
+        expiresAt: result.expiresAt,
+        invitationToken: result.rawInvitationToken,
+        deliveryStatus: result.deliveryStatus,
+        deliveryMessage: result.deliveryMessage,
+      },
+    });
+  });
+
+  // 4. PATCH /api/v1/users/:id/role - Modificar rol de usuario (Requiere users:change_role verificado contra BD)
   fastify.patch('/:id/role', { preHandler: authGuard.requirePermission('users:change_role', true) }, async (request, reply) => {
     const params = UserIdParamSchema.parse(request.params);
     const body = ChangeUserRoleBodySchema.parse(request.body);
@@ -125,9 +172,34 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       throw new NotFoundError(`Usuario con ID ${params.id} no encontrado.`);
     }
 
-    // Un usuario no puede alterar su propio rol directamente para prevenir escalación
+    // Un usuario no puede alterar su propio rol directamente para prevenir escalación o despojo involuntario
     if (params.id === operatorId) {
       throw new ForbiddenError('No puede modificar su propio rol.');
+    }
+
+    const operator = await userRepo.findById(operatorId);
+    if (!operator) {
+      throw new NotFoundError('Operador no encontrado.');
+    }
+
+    // Un ADMIN no puede ascender a SUPER_ADMIN ni modificar a un SUPER_ADMIN
+    if (operator.role !== 'SUPER_ADMIN') {
+      if (body.role === 'SUPER_ADMIN') {
+        throw new ForbiddenError('Solo un Super Administrador puede asignar el rol SUPER_ADMIN.');
+      }
+      if (targetUser.role === 'SUPER_ADMIN') {
+        throw new ForbiddenError('Los administradores no tienen autorización para modificar el rol de un Super Administrador.');
+      }
+    }
+
+    // Protección del último Super Administrador activo de la congregación
+    if (targetUser.role === 'SUPER_ADMIN' && body.role !== 'SUPER_ADMIN') {
+      const activeSuperAdmins = await userRepo.countActiveSuperAdmins();
+      if (activeSuperAdmins <= 1) {
+        throw new ForbiddenError(
+          'Operación denegada: no es posible revocar el rol al único Super Administrador activo del sistema.'
+        );
+      }
     }
 
     const previousRole = targetUser.role;
@@ -162,7 +234,7 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
-  // 4. POST /api/v1/users/:id/disable - Deshabilitar usuario (Requiere users:disable verificado contra BD)
+  // 5. POST /api/v1/users/:id/disable - Deshabilitar/Suspender usuario (Requiere users:disable)
   fastify.post('/:id/disable', { preHandler: authGuard.requirePermission('users:disable', true) }, async (request, reply) => {
     const params = UserIdParamSchema.parse(request.params);
     const context = getContext(request);
@@ -175,6 +247,25 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (params.id === operatorId) {
       throw new ForbiddenError('No puede deshabilitar su propia cuenta.');
+    }
+
+    const operator = await userRepo.findById(operatorId);
+    if (!operator) {
+      throw new NotFoundError('Operador no encontrado.');
+    }
+
+    if (operator.role !== 'SUPER_ADMIN' && targetUser.role === 'SUPER_ADMIN') {
+      throw new ForbiddenError('Los administradores no tienen autorización para deshabilitar a un Super Administrador.');
+    }
+
+    // Protección del último Super Administrador activo
+    if (targetUser.role === 'SUPER_ADMIN') {
+      const activeSuperAdmins = await userRepo.countActiveSuperAdmins();
+      if (activeSuperAdmins <= 1) {
+        throw new ForbiddenError(
+          'Operación denegada: no es posible deshabilitar al único Super Administrador activo del sistema.'
+        );
+      }
     }
 
     const updatedUser = await userRepo.update(params.id, {
@@ -199,6 +290,51 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.status(200).send({
       success: true,
       message: `Usuario ${updatedUser.email} deshabilitado exitosamente.`,
+    });
+  });
+
+  // 6. POST /api/v1/users/:id/enable - Reactivar usuario suspendido (Requiere users:disable)
+  fastify.post('/:id/enable', { preHandler: authGuard.requirePermission('users:disable', true) }, async (request, reply) => {
+    const params = UserIdParamSchema.parse(request.params);
+    const context = getContext(request);
+    const operatorId = request.user!.sub;
+
+    const targetUser = await userRepo.findById(params.id);
+    if (!targetUser) {
+      throw new NotFoundError(`Usuario con ID ${params.id} no encontrado.`);
+    }
+
+    const operator = await userRepo.findById(operatorId);
+    if (!operator) {
+      throw new NotFoundError('Operador no encontrado.');
+    }
+
+    if (operator.role !== 'SUPER_ADMIN' && targetUser.role === 'SUPER_ADMIN') {
+      throw new ForbiddenError('Los administradores no tienen autorización para modificar el estado de un Super Administrador.');
+    }
+
+    const updatedUser = await userRepo.update(params.id, {
+      accountStatus: 'ACTIVE',
+      failedLoginAttempts: 0,
+      lockoutUntil: null,
+      tokenVersion: targetUser.tokenVersion + 1,
+    });
+
+    await auditService.log({
+      eventType: 'USER_ENABLED',
+      userId: operatorId,
+      resource: `user:${params.id}`,
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+      metadata: {
+        targetUserId: params.id,
+        previousStatus: targetUser.accountStatus,
+      },
+    });
+
+    return reply.status(200).send({
+      success: true,
+      message: `Usuario ${updatedUser.email} reactivado exitosamente.`,
     });
   });
 };

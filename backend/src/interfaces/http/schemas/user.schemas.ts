@@ -25,6 +25,8 @@ export const ListUsersQuerySchema = z.object({
   limit: z.coerce.number().min(1).max(100).default(20),
   offset: z.coerce.number().min(0).default(0),
   role: z.enum(UserRoleEnum).optional(),
+  status: z.enum(['ACTIVE', 'PENDING_INVITATION', 'MUST_CHANGE_PASSWORD', 'LOCKED', 'SUSPENDED']).optional(),
+  search: z.string().optional(),
 });
 
 export type InviteUserBody = z.infer<typeof InviteUserBodySchema>;

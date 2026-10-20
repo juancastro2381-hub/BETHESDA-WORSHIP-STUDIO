@@ -9,6 +9,9 @@
 
 import type { IUserRepository } from '../repositories/user-repository.ts';
 import type { IUserInvitationRepository } from '../repositories/user-invitation-repository.ts';
+import { DrizzleUserRepository } from '../repositories/user-repository.ts';
+import { DrizzleUserInvitationRepository } from '../repositories/user-invitation-repository.ts';
+import { db as defaultDb, type Database } from '../db/index.ts';
 import type { IPasswordHasher } from '../domain/crypto/password-hasher.ts';
 import type { IAuditService } from './audit-service.ts';
 import { generateSecureToken, hashToken } from '../domain/crypto/token-utils.ts';
@@ -36,7 +39,8 @@ export class UserInvitationService {
     private readonly userRepo: IUserRepository,
     private readonly invitationRepo: IUserInvitationRepository,
     private readonly passwordHasher: IPasswordHasher,
-    private readonly auditService: IAuditService
+    private readonly auditService: IAuditService,
+    private readonly db: Database = defaultDb
   ) {}
 
   /**
@@ -108,7 +112,7 @@ export class UserInvitationService {
       expiresAt,
       deliveryStatus: 'UNCONFIGURED_MOCK',
       deliveryMessage:
-        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas. En producción se requiere un servicio de correo saliente configurado.',
+        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas (válido por 72 horas). En producción se requiere un servicio de correo saliente configurado.',
     };
   }
 
@@ -162,13 +166,19 @@ export class UserInvitationService {
       expiresAt,
       deliveryStatus: 'UNCONFIGURED_MOCK',
       deliveryMessage:
-        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas. En producción se requiere un servicio de correo saliente configurado.',
+        '[MODO DE DESARROLLO / CONTINGENCIA OPERATIVA]: Servicio SMTP no configurado en este entorno. Enlace administrativo generado exclusivamente para entrega manual controlada y pruebas (válido por 72 horas). En producción se requiere un servicio de correo saliente configurado.',
     };
   }
 
   /**
    * El usuario invitado consume el token y establece su propia contraseña de forma autónoma.
    * La entrega y uso del token prueba el control del correo: marca email_verified = true y status = ACTIVE.
+   *
+   * Garantía de Concurrencia y Atomicidad:
+   * 1. Cómputo de Argon2id previo a la transacción para evitar contención de base de datos.
+   * 2. Reclamación atómica (`claimAndConsume`) y mutación de usuario dentro de una transacción ACID.
+   * 3. Ante solicitudes concurrentes idénticas, PostgreSQL asegura que exactamente UNA triunfa y la
+   *    otra es rechazada limpiamente sin inconsistencias de estado.
    */
   public async acceptInvitation(token: string, newPassword: string): Promise<UserEntity> {
     if (!token || typeof token !== 'string') {
@@ -180,25 +190,31 @@ export class UserInvitationService {
     }
 
     const tokenHash = hashToken(token);
-    const invitation = await this.invitationRepo.findByTokenHash(tokenHash);
 
-    if (!invitation || invitation.isAccepted || invitation.expiresAt < new Date()) {
-      throw new ValidationError('El token de invitación es inválido, ya fue utilizado o ha expirado.');
-    }
-
-    const user = await this.userRepo.findByEmail(invitation.email);
-    if (!user) {
-      throw new NotFoundError('Usuario asociado a la invitación no encontrado.');
-    }
-
-    // Hashear la contraseña elegida por el usuario con Argon2id
+    // 1. Hashear la contraseña con Argon2id ANTES de abrir la transacción
+    // para no bloquear el pool de PostgreSQL durante el cómputo intensivo de CPU
     const passwordHash = await this.passwordHasher.hash(newPassword);
 
-    // Actualizar usuario: ACTIVE y email_verified = true
-    const updatedUser = await this.userRepo.updatePassword(user.id, passwordHash);
+    // 2. Ejecutar consumo atómico y actualización de usuario en una transacción con aislamiento ACID
+    const updatedUser = await this.db.transaction(async (tx) => {
+      const txInvitationRepo = new DrizzleUserInvitationRepository(tx);
+      const txUserRepo = new DrizzleUserRepository(tx);
 
-    // Marcar invitación como consumida
-    await this.invitationRepo.markAccepted(invitation.id);
+      // Consumo atómico: UPDATE con WHERE token_hash = $1 AND is_accepted = false AND expires_at > now()
+      const claimedInvitation = await txInvitationRepo.claimAndConsume(tokenHash);
+
+      if (!claimedInvitation) {
+        throw new ValidationError('El token de invitación es inválido, ya fue utilizado o ha expirado.');
+      }
+
+      const user = await txUserRepo.findByEmail(claimedInvitation.email);
+      if (!user) {
+        throw new NotFoundError('Usuario asociado a la invitación no encontrado.');
+      }
+
+      // Actualizar usuario: ACTIVE, emailVerified = true y nueva contraseña
+      return await txUserRepo.updatePassword(user.id, passwordHash);
+    });
 
     await this.auditService.log({
       eventType: 'INVITATION_COMPLETED',

@@ -143,4 +143,37 @@ describe('Phase 2B — User Invitation Lifecycle & Inherent Email Verification',
       'Debe rechazar invitar a un usuario activo con ConflictError'
     );
   });
+
+  it('6. should ensure exactly ONE request succeeds under concurrent acceptance attempts (Atomic Claim Invariant)', async () => {
+    const inviteEmail = `concurrente_${Date.now()}@bethesda.org`;
+    const { rawInvitationToken } = await invitationService.inviteUser({
+      email: inviteEmail,
+      firstName: 'Mateo',
+      lastName: 'Concurrencia',
+      role: 'MUSICIAN',
+      invitedByUserId: adminUserId,
+    });
+
+    // Disparar dos peticiones concurrentes para aceptar la misma invitación
+    const promise1 = invitationService.acceptInvitation(rawInvitationToken, 'ClaveConcurrente1_2026!');
+    const promise2 = invitationService.acceptInvitation(rawInvitationToken, 'ClaveConcurrente2_2026!');
+
+    const results = await Promise.allSettled([promise1, promise2]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    assert.equal(fulfilled.length, 1, 'Exactamente una petición debe tener éxito');
+    assert.equal(rejected.length, 1, 'Exactamente una petición debe ser rechazada');
+
+    const rejectionReason = (rejected[0] as PromiseRejectedResult).reason;
+    assert.ok(rejectionReason instanceof ValidationError, 'El rechazo debe ser un ValidationError');
+    assert.match(rejectionReason.message, /inválido, ya fue utilizado o ha expirado/i);
+
+    // Verificar que el usuario en base de datos quedó ACTIVE y emailVerified = true
+    const activatedUser = await userRepo.findByEmail(inviteEmail);
+    assert.ok(activatedUser);
+    assert.equal(activatedUser.accountStatus, 'ACTIVE');
+    assert.equal(activatedUser.emailVerified, true);
+  });
 });

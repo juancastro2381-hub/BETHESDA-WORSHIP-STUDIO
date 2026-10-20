@@ -3,7 +3,7 @@
  * @description Repositorio para la gestión de invitaciones administrativas y tokens de onboarding (Fase 2B).
  */
 
-import { eq, and } from 'drizzle-orm';
+import { eq, and, gt } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import { userInvitations } from '../db/schema.ts';
 import type { UserInvitationEntity, UserRole } from '../domain/auth-types.ts';
@@ -21,11 +21,12 @@ export interface IUserInvitationRepository {
   findByTokenHash(tokenHash: string): Promise<UserInvitationEntity | null>;
   findByEmail(email: string): Promise<UserInvitationEntity | null>;
   markAccepted(id: string): Promise<void>;
+  claimAndConsume(tokenHash: string): Promise<UserInvitationEntity | null>;
   revokePendingByEmail(email: string): Promise<void>;
 }
 
 export class DrizzleUserInvitationRepository implements IUserInvitationRepository {
-  public constructor(private readonly db: Database = defaultDb) {}
+  public constructor(private readonly db: any = defaultDb) {}
 
   public async create(input: CreateInvitationInput): Promise<UserInvitationEntity> {
     const normalizedEmail = input.email.trim().toLowerCase();
@@ -71,6 +72,22 @@ export class DrizzleUserInvitationRepository implements IUserInvitationRepositor
       .update(userInvitations)
       .set({ isAccepted: true })
       .where(eq(userInvitations.id, id));
+  }
+
+  public async claimAndConsume(tokenHash: string): Promise<UserInvitationEntity | null> {
+    const [claimed] = await this.db
+      .update(userInvitations)
+      .set({ isAccepted: true })
+      .where(
+        and(
+          eq(userInvitations.tokenHash, tokenHash),
+          eq(userInvitations.isAccepted, false),
+          gt(userInvitations.expiresAt, new Date())
+        )
+      )
+      .returning();
+
+    return claimed ? this.mapToEntity(claimed) : null;
   }
 
   public async revokePendingByEmail(email: string): Promise<void> {

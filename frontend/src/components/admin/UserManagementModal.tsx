@@ -349,7 +349,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                   [CONTINGENCIA OPERATIVA / DESARROLLO]: Servidor de correo SMTP no configurado
                 </strong>
                 <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.82rem', color: '#cbd5e1' }}>
-                  El correo no fue despachado automáticamente porque el servidor SMTP no está configurado en este entorno. En producción es obligatorio un proveedor de correo saliente. Como contingencia operativa controlada, entregue este enlace seguro de activación de un solo uso directamente al integrante:
+                  El correo no fue despachado automáticamente porque el servidor SMTP no está configurado en este entorno. En producción es obligatorio un proveedor de correo saliente. Como contingencia operativa controlada, entregue este enlace seguro de activación de un solo uso (válido por 72 horas) directamente al integrante:
                 </p>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <input

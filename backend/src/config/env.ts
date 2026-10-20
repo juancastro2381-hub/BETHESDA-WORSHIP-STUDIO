@@ -18,37 +18,47 @@ if (isTestExecution && process.env.NODE_ENV !== 'test') {
   process.env.NODE_ENV = 'test';
 }
 
-const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().default(3001),
-  HOST: z.string().default('0.0.0.0'),
-  DATABASE_URL: z.string().url('DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
-  TEST_DATABASE_URL: z.string().url('TEST_DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
-  CORS_ORIGIN: z.string().default('http://localhost:5173'),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+const envSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().default(3001),
+    HOST: z.string().default('0.0.0.0'),
+    DATABASE_URL: z.string().url('DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
+    TEST_DATABASE_URL: z.string().url('TEST_DATABASE_URL debe ser una URL de conexión PostgreSQL válida').optional(),
+    CORS_ORIGIN: z.string().default('http://localhost:5173'),
+    LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
-  // Fase 2B: Seguridad & Autenticación
-  JWT_SECRET: z.string().min(32, 'El secreto JWT debe tener al menos 32 caracteres (256 bits)'),
-  COOKIE_SECRET: z.string().min(32, 'El secreto de cookies debe tener al menos 32 caracteres (256 bits)'),
-  JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
-  REFRESH_TOKEN_EXPIRES_IN_DAYS: z.coerce.number().default(7),
+    // Fase 2B: Seguridad & Autenticación
+    JWT_SECRET: z.string().min(32, 'El secreto JWT debe tener al menos 32 caracteres (256 bits)'),
+    COOKIE_SECRET: z.string().min(32, 'El secreto de cookies debe tener al menos 32 caracteres (256 bits)'),
+    JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
+    REFRESH_TOKEN_EXPIRES_IN_DAYS: z.coerce.number().default(7),
 
-  // Parámetros de Argon2id
-  ARGON2_MEMORY_COST: z.coerce.number().default(65536),
-  ARGON2_TIME_COST: z.coerce.number().default(3),
-  ARGON2_PARALLELISM: z.coerce.number().default(4),
+    // Parámetros de Argon2id
+    ARGON2_MEMORY_COST: z.coerce.number().default(65536),
+    ARGON2_TIME_COST: z.coerce.number().default(3),
+    ARGON2_PARALLELISM: z.coerce.number().default(4),
 
-  // Rate Limiting distribuido (Opcional en desarrollo, requerido en producción multi-instancia)
-  REDIS_URL: z.string().url().optional(),
+    // Rate Limiting distribuido (Opcional en desarrollo, requerido en producción multi-instancia)
+    REDIS_URL: z.string().url().optional(),
 
-  // Bootstrap Super Admin (Opcional para inicialización)
-  INITIAL_SUPERADMIN_EMAIL: z.string().email().optional(),
-  INITIAL_SUPERADMIN_PASSWORD: z.string().min(10).optional(),
+    // Bootstrap Super Admin (Opcional para inicialización)
+    INITIAL_SUPERADMIN_EMAIL: z.string().email().optional(),
+    INITIAL_SUPERADMIN_PASSWORD: z.string().min(10).optional(),
 
-  // Workstream A: Almacenamiento seguro de audio
-  AUDIO_STORAGE_PATH: z.string().default('storage/audio'),
-  MAX_AUDIO_FILE_SIZE_BYTES: z.coerce.number().default(50 * 1024 * 1024), // 50MB (Decisión U-03)
-});
+    // Workstream A: Almacenamiento seguro de audio
+    AUDIO_STORAGE_PATH: z.string().default('storage/audio'),
+    MAX_AUDIO_FILE_SIZE_BYTES: z.coerce.number().default(50 * 1024 * 1024), // 50MB (Decisión U-03)
+  })
+  .superRefine((data, ctx) => {
+    if (data.NODE_ENV === 'test' && !data.TEST_DATABASE_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'TEST_DATABASE_URL es obligatoria cuando NODE_ENV es "test".',
+        path: ['TEST_DATABASE_URL'],
+      });
+    }
+  });
 
 export type Env = z.infer<typeof envSchema>;
 

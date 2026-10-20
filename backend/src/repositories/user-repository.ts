@@ -35,7 +35,7 @@ export interface IUserRepository {
 }
 
 export class DrizzleUserRepository implements IUserRepository {
-  public constructor(private readonly db: Database = defaultDb) {}
+  public constructor(private readonly db: any = defaultDb) {}
 
   public async create(input: CreateUserInput): Promise<UserEntity> {
     const normalizedEmail = input.email.trim().toLowerCase();

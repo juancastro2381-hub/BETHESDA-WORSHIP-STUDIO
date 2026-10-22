@@ -451,7 +451,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
 
           {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
           <AudioPlayerBar
-            songId={persistedMeta?.songId ?? (activeSong as any)?.id ?? activeSong.title}
+            songId={persistedMeta?.songId ?? (activeSong as any)?.id}
             songTitle={activeSong.title}
           />
 

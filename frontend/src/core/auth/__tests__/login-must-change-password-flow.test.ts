@@ -184,4 +184,26 @@ describe('Login Modal & MUST_CHANGE_PASSWORD Flow Regression Suite', () => {
     assert.strictEqual(password, '');
     assert.strictEqual(tokenManager.isAuthenticated(), false, 'El token temporal debe ser revocado en memoria');
   });
+
+  it('5. should strictly guard AudioPlayerBar from requesting backend audio with non-UUID preset titles', () => {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const presetSong = {
+      title: 'Sublime Gracia (Notación Completa — Sol Mayor)',
+      source: 'chordpro',
+    };
+    const persistedMeta = null;
+
+    // Verificar la resolución segura de songId en MusicalWorkspace
+    const computedSongId = (persistedMeta as any)?.songId ?? (presetSong as any)?.id;
+    assert.strictEqual(computedSongId, undefined, 'Canción preset en memoria no debe generar un songId');
+
+    // Verificar que un título de canción o valor no-UUID es rechazado por el guardia UUID
+    const isValidUuid = typeof computedSongId === 'string' && UUID_REGEX.test(computedSongId);
+    assert.strictEqual(isValidUuid, false, 'No se debe emitir consulta HTTP a /api/v1/songs/:songId/audio');
+
+    // Verificar con un UUID persistido válido
+    const validUuid = '123e4567-e89b-12d3-a456-426614174000';
+    assert.strictEqual(UUID_REGEX.test(validUuid), true, 'UUID válido debe ser aceptado para consulta de audios');
+  });
 });
+

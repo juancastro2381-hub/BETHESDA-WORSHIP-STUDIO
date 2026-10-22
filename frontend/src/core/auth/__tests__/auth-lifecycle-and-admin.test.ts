@@ -290,4 +290,96 @@ describe('Frontend Auth Lifecycle & User Administration Suite', () => {
     assert.strictEqual(checkCanManageUsers('VIEWER'), false, 'VIEWER must NOT manage users');
     assert.strictEqual(checkCanManageUsers(undefined), false, 'Unauthenticated user must NOT manage users');
   });
+
+  it('7. refreshSession and logout do NOT send Content-Type: application/json header on empty-body requests', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+    const capturedHeaders: Array<{ path: string; hasContentType: boolean; contentTypeValue: string | null }> = [];
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const headers = new Headers(init?.headers);
+      capturedHeaders.push({
+        path: new URL(url).pathname,
+        hasContentType: headers.has('Content-Type'),
+        contentTypeValue: headers.get('Content-Type'),
+      });
+
+      if (url.includes('/auth/refresh')) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              accessToken: 'mock-token',
+              expiresIn: 900,
+              user: { id: 'u1', email: 'test@b.org', role: 'ADMIN', firstName: 'A', lastName: 'B' },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+
+    // 1. refreshSession
+    await apiClient.refreshSession();
+    // 2. logout
+    await apiClient.logout();
+
+    assert.strictEqual(capturedHeaders.length, 2);
+    assert.strictEqual(capturedHeaders[0]?.path, '/api/v1/auth/refresh');
+    assert.strictEqual(capturedHeaders[0]?.hasContentType, false, 'refreshSession must NOT send Content-Type header');
+
+    assert.strictEqual(capturedHeaders[1]?.path, '/api/v1/auth/logout');
+    assert.strictEqual(capturedHeaders[1]?.hasContentType, false, 'logout must NOT send Content-Type header');
+  });
+
+  it('8. login returns user with mustChangePassword: true for MUST_CHANGE_PASSWORD accounts', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+
+    globalThis.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            accessToken: 'token-must-change',
+            expiresIn: 900,
+            user: {
+              id: 'admin-id',
+              email: 'admin@bethesda.org',
+              firstName: 'Super',
+              lastName: 'Admin',
+              role: 'SUPER_ADMIN',
+              mustChangePassword: true,
+            },
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const result = await apiClient.login('admin@bethesda.org', 'InitialPassword!');
+    assert.strictEqual(result.user.mustChangePassword, true, 'User must have mustChangePassword = true');
+    assert.strictEqual(result.user.role, 'SUPER_ADMIN');
+    assert.strictEqual(result.accessToken, 'token-must-change');
+  });
+
+  it('9. changeInitialPassword sends current and new passwords with Content-Type application/json', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+    let capturedBody: any = null;
+    let capturedPath = '';
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedPath = new URL(typeof input === 'string' ? input : input.toString()).pathname;
+      capturedBody = init?.body ? JSON.parse(init.body.toString()) : null;
+      return new Response(JSON.stringify({ success: true, message: 'Password updated' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    await apiClient.changeInitialPassword('CurrentPass123!', 'NewDefinitivePass2026!');
+    assert.strictEqual(capturedPath, '/api/v1/auth/change-initial-password');
+    assert.strictEqual(capturedBody?.currentPassword, 'CurrentPass123!');
+    assert.strictEqual(capturedBody?.newPassword, 'NewDefinitivePass2026!');
+  });
 });

@@ -168,7 +168,6 @@ export class BethesdaApiClient {
       try {
         const res = await fetch(`${this.baseUrl}/auth/refresh`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
         });
 
@@ -193,7 +192,6 @@ export class BethesdaApiClient {
   public async logout(): Promise<void> {
     await fetch(`${this.baseUrl}/auth/logout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
     });
   }
@@ -643,7 +641,6 @@ export class BethesdaApiClient {
   public async resendInvitation(userId: string): Promise<InviteUserResponseData> {
     const res = await this.fetchWithAuth(`/users/${userId}/resend-invite`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -676,7 +673,6 @@ export class BethesdaApiClient {
   public async disableUser(userId: string): Promise<{ message: string }> {
     const res = await this.fetchWithAuth(`/users/${userId}/disable`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -692,7 +688,6 @@ export class BethesdaApiClient {
   public async enableUser(userId: string): Promise<{ message: string }> {
     const res = await this.fetchWithAuth(`/users/${userId}/enable`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));

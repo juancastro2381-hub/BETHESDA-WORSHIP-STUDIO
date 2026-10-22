@@ -21,8 +21,9 @@ export interface AuthUser {
   firstName: string;
   lastName: string;
   role: UserRole;
-  accountStatus: AccountStatus;
-  emailVerified: boolean;
+  accountStatus?: AccountStatus;
+  mustChangePassword?: boolean;
+  emailVerified?: boolean;
 }
 
 export interface AuthResponseData {

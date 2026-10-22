@@ -50,7 +50,36 @@ export function errorHandler(error: FastifyError | Error, request: FastifyReques
     });
   }
 
-  // 4. Errores 404 de ruta no encontrada
+  // 4. Errores de cliente o análisis de Fastify reconocidos (4xx: parser, media type, bad request)
+  const isFastifyClientError =
+    ('code' in error && typeof (error as any).code === 'string' && (error as any).code.startsWith('FST_ERR_')) ||
+    error.name === 'FastifyError';
+
+  if (
+    isFastifyClientError &&
+    'statusCode' in error &&
+    typeof error.statusCode === 'number' &&
+    error.statusCode >= 400 &&
+    error.statusCode < 500
+  ) {
+    const statusCode = error.statusCode;
+    const errorCode = (error as any).code || (statusCode === 404 ? 'NOT_FOUND' : 'BAD_REQUEST');
+    const safeMessage =
+      statusCode === 404
+        ? `Ruta no encontrada: ${request.method} ${request.url}`
+        : error.message;
+
+    return reply.status(statusCode).send({
+      error: {
+        code: errorCode,
+        message: safeMessage,
+        statusCode,
+        details: null,
+      },
+    });
+  }
+
+  // 5. Errores 404 de ruta no encontrada
   if ('statusCode' in error && error.statusCode === 404) {
     return reply.status(404).send({
       error: {

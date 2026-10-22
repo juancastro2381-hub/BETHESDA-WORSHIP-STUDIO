@@ -12,7 +12,7 @@ interface LoginModalProps {
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
-  const { login, changeInitialPassword } = useAuth();
+  const { login, logout, changeInitialPassword } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -24,16 +24,35 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
+  const handleModalClose = () => {
+    if (isSubmitting) return;
+    if (isMustChangeMode) {
+      logout().catch(() => {});
+    }
+    setIsMustChangeMode(false);
+    setEmail('');
+    setPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setErrorMessage(null);
+    onClose();
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setIsSubmitting(true);
 
     try {
-      await login(email, password);
-      // Limpiar formulario y cerrar
-      setPassword('');
-      onClose();
+      const userResult = await login(email, password);
+      if (userResult?.mustChangePassword || userResult?.accountStatus === 'MUST_CHANGE_PASSWORD') {
+        setIsMustChangeMode(true);
+        // Preservar la contraseña actual en memoria local ya que se requiere para changeInitialPassword
+      } else {
+        setPassword('');
+        setEmail('');
+        onClose();
+      }
     } catch (err: any) {
       if (err.message && err.message.includes('MUST_CHANGE_PASSWORD')) {
         setIsMustChangeMode(true);
@@ -62,11 +81,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     setIsSubmitting(true);
     try {
       await changeInitialPassword(password, newPassword);
-      setIsMustChangeMode(false);
-      setPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      onClose();
+      // Validar y activar la sesión mediante re-autenticación con la nueva contraseña confirmada por backend
+      const activeUser = await login(email, newPassword);
+      if (!activeUser?.mustChangePassword && activeUser?.accountStatus !== 'MUST_CHANGE_PASSWORD') {
+        setIsMustChangeMode(false);
+        setPassword('');
+        setEmail('');
+        setNewPassword('');
+        setConfirmPassword('');
+        onClose();
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Error al actualizar contraseña inicial.');
     } finally {
@@ -94,7 +118,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
           <button
             type="button"
             className="modal-close-button"
-            onClick={onClose}
+            onClick={handleModalClose}
             aria-label="Cerrar modal de inicio de sesión"
           >
             ✕
@@ -144,7 +168,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               <button
                 type="button"
                 className="action-button secondary"
-                onClick={onClose}
+                onClick={handleModalClose}
                 disabled={isSubmitting}
               >
                 Cancelar
@@ -193,6 +217,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
             </div>
 
             <div className="modal-actions">
+              <button
+                type="button"
+                className="action-button secondary"
+                onClick={handleModalClose}
+                disabled={isSubmitting}
+              >
+                Cancelar
+              </button>
               <button
                 type="submit"
                 className="action-button primary"

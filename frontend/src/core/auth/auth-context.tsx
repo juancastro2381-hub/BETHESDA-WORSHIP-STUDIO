@@ -19,7 +19,7 @@ export interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   canManageUsers: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<AuthUser>;
   logout: () => Promise<void>;
   changeInitialPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   hasRole: (roles: UserRole | UserRole[]) => boolean;
@@ -40,6 +40,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       const response = await apiClient.refreshSession();
       tokenManager.setToken(response.accessToken, response.expiresIn);
+
+      if (response.user?.mustChangePassword || response.user?.accountStatus === 'MUST_CHANGE_PASSWORD') {
+        tokenManager.clearToken();
+        setUser(null);
+        setAuthStatus('UNAUTHENTICATED');
+        return null;
+      }
+
       setUser(response.user);
       setAuthStatus('AUTHENTICATED');
 
@@ -83,15 +91,25 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
    * Iniciar sesión con correo y contraseña.
    */
   const login = useCallback(
-    async (email: string, password: string): Promise<void> => {
+    async (email: string, password: string): Promise<AuthUser> => {
       const response = await apiClient.login(email, password);
       tokenManager.setToken(response.accessToken, response.expiresIn);
+
+      // Si la cuenta requiere cambio forzoso de contraseña, no admitir al espacio musical autenticado
+      if (response.user?.mustChangePassword || response.user?.accountStatus === 'MUST_CHANGE_PASSWORD') {
+        setUser(null);
+        setAuthStatus('UNAUTHENTICATED');
+        return response.user;
+      }
+
       setUser(response.user);
       setAuthStatus('AUTHENTICATED');
 
       tokenManager.scheduleSilentRefresh(async () => {
         await performSilentRefresh();
       });
+
+      return response.user;
     },
     [apiClient, performSilentRefresh]
   );
@@ -122,12 +140,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const changeInitialPassword = useCallback(
     async (currentPassword: string, newPassword: string): Promise<void> => {
       await apiClient.changeInitialPassword(currentPassword, newPassword);
-      // Actualizar estado del usuario localmente a ACTIVE
-      if (user) {
-        setUser({ ...user, accountStatus: 'ACTIVE' });
-      }
     },
-    [apiClient, user]
+    [apiClient]
   );
 
   /**

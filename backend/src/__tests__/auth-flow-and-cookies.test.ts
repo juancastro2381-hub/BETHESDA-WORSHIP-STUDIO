@@ -222,4 +222,56 @@ describe('Phase 2B — Complete HTTP Auth Flow, HttpOnly Cookies & Session Rotat
     const viewerBody = JSON.parse(viewerRes.payload);
     assert.strictEqual(viewerBody.error.code, 'FORBIDDEN');
   });
+
+  it('7. POST /api/v1/auth/refresh with no JSON body does not fail because of an empty-body parsing error', async () => {
+    // Iniciar sesión para obtener una cookie de refresco válida
+    const loginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        email: testEmail,
+        password: testPassword,
+      },
+    });
+    assert.strictEqual(loginRes.statusCode, 200);
+    const setCookie = loginRes.headers['set-cookie'];
+    const cookiesList = Array.isArray(setCookie) ? setCookie : [setCookie as string];
+    const cookieStr = cookiesList.find((c) => c.includes('bethesda_refresh_token=')) || '';
+    const match = cookieStr.match(/bethesda_refresh_token=([^;]+)/);
+    assert.ok(match && match[1]);
+
+    // Petición POST a /refresh SIN cabecera Content-Type y SIN cuerpo (exacto como lo hace api-client.ts corregido)
+    const refreshRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      cookies: {
+        bethesda_refresh_token: match[1],
+      },
+    });
+
+    assert.strictEqual(refreshRes.statusCode, 200, 'Refresh sin cuerpo JSON debe procesarse correctamente sin error 400/500');
+    const refreshBody = JSON.parse(refreshRes.payload);
+    assert.strictEqual(refreshBody.success, true);
+    assert.ok(refreshBody.data.accessToken);
+    assert.strictEqual(refreshBody.data.user.email, testEmail);
+  });
+
+  it('8. Fastify client parsing errors preserve their intended HTTP status code (400 Bad Request) instead of degrading to 500', async () => {
+    // Si un cliente envía Content-Type: application/json pero omite el cuerpo, Fastify arroja FST_ERR_CTP_EMPTY_JSON_BODY (400)
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: {
+        'content-type': 'application/json',
+      },
+      // Sin payload / body
+    });
+
+    assert.strictEqual(res.statusCode, 400, 'El error de parser debe responder 400 Bad Request y no degradarse a 500');
+    const body = JSON.parse(res.payload);
+    assert.strictEqual(body.error.statusCode, 400);
+    assert.strictEqual(body.error.code, 'FST_ERR_CTP_EMPTY_JSON_BODY');
+    assert.match(body.error.message, /Body cannot be empty when content-type is set to 'application\/json'/);
+    assert.strictEqual(body.error.details, null, 'No debe exponer trazas internas ni detalles no controlados');
+  });
 });

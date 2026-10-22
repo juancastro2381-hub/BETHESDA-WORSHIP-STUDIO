@@ -123,6 +123,16 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     }
   }, [isOpen, fetchUsers]);
 
+  // Bloqueo de scroll del body mientras el modal está activo
+  useEffect(() => {
+    if (!isOpen) return;
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isOpen]);
+
   // Manejo de tecla Escape
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -267,12 +277,34 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     }
   };
 
+  // Cierre al hacer click en el backdrop exterior
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      if (userToModifyRole || userToToggleStatus) {
+        setUserToModifyRole(null);
+        setUserToToggleStatus(null);
+      } else if (showInviteForm) {
+        setShowInviteForm(false);
+      } else {
+        onClose();
+      }
+    }
+  };
+
+  const handleSubmodalBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      setUserToModifyRole(null);
+      setUserToToggleStatus(null);
+    }
+  };
+
   return (
     <div
       className="modal-backdrop user-mgmt-backdrop"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
+      onClick={handleBackdropClick}
     >
       <div className="modal-content user-mgmt-modal-container">
         {/* Cabecera Principal */}
@@ -287,10 +319,10 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               style={{ height: '34px', width: 'auto' }}
             />
             <div>
-              <h2 id={titleId} className="modal-title" style={{ fontSize: '1.2rem', margin: 0 }}>
+              <h2 id={titleId} className="modal-title" style={{ fontSize: '1.2rem', margin: 0, color: 'var(--text-primary)' }}>
                 Administración de Usuarios y Ministerio
               </h2>
-              <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>
                 Control de acceso RBAC, gestión de integrantes y credenciales
               </span>
             </div>
@@ -443,13 +475,13 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         {/* Formulario Desplegable de Invitación */}
         {showInviteForm && (
           <div className="user-mgmt-invite-drawer">
-            <h3 style={{ fontSize: '1rem', margin: '0 0 1rem 0', color: '#f8fafc' }}>
+            <h3 style={{ fontSize: '1rem', margin: '0 0 1rem 0', color: 'var(--text-primary, #f8fafc)' }}>
               Invitar a un Nuevo Integrante al Ministerio
             </h3>
             <form onSubmit={handleInviteSubmit} className="user-mgmt-invite-form">
               <div className="invite-form-grid">
                 <div className="form-group">
-                  <label htmlFor="invite-email" style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                  <label htmlFor="invite-email" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
                     Correo Electrónico *
                   </label>
                   <input
@@ -465,7 +497,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="invite-firstname" style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                  <label htmlFor="invite-firstname" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
                     Nombre *
                   </label>
                   <input
@@ -481,7 +513,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="invite-lastname" style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                  <label htmlFor="invite-lastname" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
                     Apellido *
                   </label>
                   <input
@@ -497,7 +529,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="invite-role" style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                  <label htmlFor="invite-role" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
                     Rol Asignado *
                   </label>
                   <select
@@ -580,7 +612,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                     <tr key={targetUser.id} className={isSelf ? 'user-row-self' : ''}>
                       <td>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
-                          <span style={{ fontWeight: 600, color: '#f8fafc' }}>
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary, #f8fafc)' }}>
                             {targetUser.firstName} {targetUser.lastName}
                             {isSelf && (
                               <span className="user-self-pill" title="Tu cuenta actual">
@@ -588,7 +620,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                               </span>
                             )}
                           </span>
-                          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{targetUser.email}</span>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>{targetUser.email}</span>
                         </div>
                       </td>
 
@@ -618,7 +650,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                         </span>
                       </td>
 
-                      <td style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>
                         {new Date(targetUser.createdAt).toLocaleDateString()}
                       </td>
 
@@ -711,8 +743,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
         {/* Pie del Modal con Resumen de Registros */}
         <div className="user-mgmt-footer">
-          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-            Total de integrantes registrados: <strong>{totalUsers}</strong>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>
+            Total de integrantes registrados: <strong style={{ color: 'var(--text-primary)' }}>{totalUsers}</strong>
           </span>
           <button
             type="button"
@@ -727,16 +759,22 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
         {/* Modal Secundario de Cambio de Rol */}
         {userToModifyRole && (
-          <div className="submodal-backdrop" role="dialog" aria-modal="true" aria-labelledby="change-role-title">
+          <div
+            className="submodal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="change-role-title"
+            onClick={handleSubmodalBackdropClick}
+          >
             <div className="submodal-content">
-              <h3 id="change-role-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0' }}>
+              <h3 id="change-role-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
                 Modificar Rol de {userToModifyRole.firstName} {userToModifyRole.lastName}
               </h3>
-              <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: '0 0 1rem 0' }}>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted, #94a3b8)', margin: '0 0 1rem 0' }}>
                 El cambio revocará todas las sesiones activas del usuario, forzándolo a iniciar sesión nuevamente con las nuevas atribuciones.
               </p>
               <div className="form-group" style={{ marginBottom: '1.25rem' }}>
-                <label htmlFor="select-new-role" style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                <label htmlFor="select-new-role" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
                   Nuevo Rol Asignado:
                 </label>
                 <select
@@ -778,12 +816,18 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
         {/* Modal Secundario de Confirmación de Suspensión / Reactivación */}
         {userToToggleStatus && (
-          <div className="submodal-backdrop" role="dialog" aria-modal="true" aria-labelledby="status-toggle-title">
+          <div
+            className="submodal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="status-toggle-title"
+            onClick={handleSubmodalBackdropClick}
+          >
             <div className="submodal-content">
-              <h3 id="status-toggle-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0' }}>
+              <h3 id="status-toggle-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
                 {statusActionType === 'SUSPEND' ? 'Confirmar Suspensión de Cuenta' : 'Confirmar Reactivación de Cuenta'}
               </h3>
-              <p style={{ fontSize: '0.85rem', color: '#cbd5e1', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary, #cbd5e1)', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
                 {statusActionType === 'SUSPEND' ? (
                   <>
                     ¿Está seguro de que desea suspender la cuenta de <strong>{userToToggleStatus.email}</strong>?

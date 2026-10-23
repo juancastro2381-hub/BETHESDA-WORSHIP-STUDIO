@@ -281,18 +281,32 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     importedMeta?.format === 'IMAGE' ||
     (activeSong as any)?.metadata?.isVisualOnly ||
     (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
-    (activeSong as any)?.metadata?.sourceFormat === 'IMAGE'
+    (activeSong as any)?.metadata?.sourceFormat === 'IMAGE' ||
+    (activeSong as any)?.sourceFormat === 'PDF' ||
+    (activeSong as any)?.sourceFormat === 'IMAGE'
   );
+
+  const visualStorageKey =
+    importedMeta?.storageKey ||
+    ((activeSong as any)?.metadata?.storageKey as string | undefined);
+
+  const visualPageCount =
+    importedMeta?.pageCount ||
+    ((activeSong as any)?.metadata?.pageCount as number | undefined) ||
+    1;
 
   const documentVisualUrl =
     importedMeta?.documentUrl ||
-    (importedMeta?.storageKey ? client.getDocumentFileUrl(importedMeta.storageKey) : undefined) ||
-    ((activeSong as any)?.metadata?.storageKey ? client.getDocumentFileUrl((activeSong as any).metadata.storageKey) : undefined);
+    ((activeSong as any)?.metadata?.documentUrl as string | undefined) ||
+    (visualStorageKey ? client.getDocumentFileUrl(visualStorageKey) : undefined);
 
   const visualMimeType =
-    importedMeta?.format === 'PDF' || (activeSong as any)?.metadata?.sourceFormat === 'PDF'
+    ((activeSong as any)?.metadata?.mimeType as string | undefined) ||
+    (importedMeta?.format === 'PDF' ||
+    (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
+    (activeSong as any)?.sourceFormat === 'PDF'
       ? 'application/pdf'
-      : 'image/png';
+      : 'image/png');
 
   return (
     <div className="musical-workspace-root">
@@ -436,6 +450,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             if (setlistExecution.loadedSetlist) {
               setlistExecution.notifyOffSetlistSongSelected(importedSong.title);
             }
+            setShowUploader(false);
           }}
           onCancel={() => setShowUploader(false)}
         />
@@ -468,6 +483,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             isPersisted={persistedMeta !== null}
             versionNumber={persistedMeta?.versionNumber}
             persistedSongId={persistedMeta?.songId}
+            isVisualDocument={isVisualDocument}
           />
 
           {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
@@ -529,8 +545,10 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               <VisualDocumentStand
                 title={activeSong.title || importedMeta?.sourceName || 'Documento Musical'}
                 documentUrl={documentVisualUrl}
+                storageKey={visualStorageKey}
                 mimeType={visualMimeType}
-                isSample={!documentVisualUrl}
+                pageCount={visualPageCount}
+                isSample={!documentVisualUrl && !visualStorageKey}
               />
             ) : activeSong.measures.length === 0 ? (
               <div className="workspace-empty-state" role="alert">

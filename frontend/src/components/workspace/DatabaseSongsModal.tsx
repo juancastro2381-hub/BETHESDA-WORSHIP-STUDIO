@@ -144,7 +144,9 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
           defaultBpm,
           timeSignature,
           status: 'APPROVED',
-          sourceFormat: activeSong.getAllNotes().length === 0 ? 'CHORD_PRO' : 'MUSIC_XML',
+          sourceFormat:
+            (activeSong.metadata?.sourceFormat as any) ??
+            (activeSong.getAllNotes().length === 0 ? 'CHORD_PRO' : 'MUSIC_XML'),
           canonicalPayload: activeSong.toJSON(),
         }),
       });

@@ -3,22 +3,27 @@
  * @description Componente accesible para lectura de partituras y documentos visuales (PDF e imágenes) en el atril digital (Fase B).
  *
  * Características:
+ * - Soporte de recuperación autenticada de documentos seguros vía Blob en memoria (zero 401 auth errors en <iframe>/<img>).
  * - Navegación multipágina con indicador "Página X de Y", botones Anterior / Siguiente y salto de página.
+ * - Extracción y presentación fidedigna de número real de páginas para documentos PDF multipágina.
  * - Controles ergonómicos de zoom (Ajustar al ancho, 50% a 200%).
  * - Rotación de documento (0°, 90°, 180°, 270°) para escaneos apaisados.
- * - Modo continuo y modo página única para compatibilidad óptima con autoscroll (WP-05).
- * - Soporte de temas Claro y Oscuro con contraste AA/AAA.
- * - Renderizado accesible mediante semantic tags y atajos de teclado accesibles.
+ * - Modo continuo y modo página única para compatibilidad con autoscroll (WP-05).
+ * - Tratamiento explícito de estados: Carga, Error de recuperación, Formato TIFF no soportado nativamente, y Visualización exitosa.
+ * - Ciclo de vida estricto con revocación automática de Object URLs para evitar fugas de memoria.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { BethesdaApiClient } from '../../core/api/api-client.ts';
+import { extractPdfPageCount } from '../../core/ingestion/pdf-utils.ts';
 
 export interface VisualDocumentStandProps {
   readonly title: string;
   readonly documentUrl?: string | undefined;
+  readonly storageKey?: string | undefined;
   readonly mimeType?: string | undefined;
   readonly pageCount?: number | undefined;
-  readonly pages?: readonly string[] | undefined; // URLs o DataURIs de páginas individuales
+  readonly pages?: readonly string[] | undefined;
   readonly isSample?: boolean | undefined;
   readonly onPageChange?: ((page: number) => void) | undefined;
 }
@@ -26,6 +31,7 @@ export interface VisualDocumentStandProps {
 export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
   title,
   documentUrl,
+  storageKey,
   mimeType = 'application/pdf',
   pageCount = 1,
   pages,
@@ -33,15 +39,179 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
   onPageChange,
 }) => {
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [zoomLevel, setZoomLevel] = useState<number>(100); // 50 a 200
+  const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [fitWidth, setFitWidth] = useState<boolean>(true);
-  const [rotationDegrees, setRotationDegrees] = useState<number>(0); // 0, 90, 180, 270
+  const [rotationDegrees, setRotationDegrees] = useState<number>(0);
   const [viewMode, setViewMode] = useState<'SINGLE' | 'CONTINUOUS'>('CONTINUOUS');
 
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [resolvedBlobUrl, setResolvedBlobUrl] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [detectedPageCount, setDetectedPageCount] = useState<number>(pageCount || 1);
 
-  const totalPages = pages && pages.length > 0 ? pages.length : Math.max(1, pageCount);
-  const isPdf = mimeType.toLowerCase().includes('pdf') || (documentUrl && documentUrl.toLowerCase().includes('.pdf'));
+  const containerRef = useRef<HTMLDivElement>(null);
+  const createdBlobUrlRef = useRef<string | null>(null);
+
+  const isPdf =
+    mimeType.toLowerCase().includes('pdf') ||
+    (storageKey && storageKey.toLowerCase().endsWith('.pdf')) ||
+    (documentUrl && documentUrl.toLowerCase().includes('.pdf'));
+
+  const isTiff =
+    mimeType.toLowerCase().includes('tiff') ||
+    mimeType.toLowerCase().includes('tif') ||
+    (storageKey && (storageKey.toLowerCase().endsWith('.tif') || storageKey.toLowerCase().endsWith('.tiff'))) ||
+    (documentUrl && (documentUrl.toLowerCase().includes('.tif') || documentUrl.toLowerCase().includes('.tiff')));
+
+  // SVG de partitura de muestra de alta fidelidad para pruebas directas en atril visual
+  const sampleScoreSvg = `data:image/svg+xml;utf8,${encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100" width="100%" height="100%" style="background:#ffffff; font-family:sans-serif;">
+      <!-- Encabezado de la Partitura -->
+      <text x="400" y="70" font-size="28" font-weight="bold" text-anchor="middle" fill="#0f172a">GRANDE ES TU FIDELIDAD</text>
+      <text x="400" y="100" font-size="16" font-style="italic" text-anchor="middle" fill="#475569">Arreglo para Alabanza y Adoración — Bethesda Madrid</text>
+      <text x="100" y="140" font-size="14" font-weight="bold" fill="#0f172a">Tono: D Mayor  |  Tempo: ♩ = 84  |  Compás: 3/4</text>
+      <text x="700" y="140" font-size="14" text-anchor="end" fill="#64748b">Página 1 de 2</text>
+
+      <!-- Pentagrama 1 -->
+      <g stroke="#334155" stroke-width="1.5">
+        <line x1="80" y1="180" x2="720" y2="180"/>
+        <line x1="80" y1="195" x2="720" y2="195"/>
+        <line x1="80" y1="210" x2="720" y2="210"/>
+        <line x1="80" y1="225" x2="720" y2="225"/>
+        <line x1="80" y1="240" x2="720" y2="240"/>
+        <line x1="80" y1="180" x2="80" y2="240" stroke-width="2"/>
+        <line x1="240" y1="180" x2="240" y2="240"/>
+        <line x1="400" y1="180" x2="400" y2="240"/>
+        <line x1="560" y1="180" x2="560" y2="240"/>
+        <line x1="720" y1="180" x2="720" y2="240" stroke-width="2"/>
+      </g>
+      <text x="90" y="230" font-size="44" fill="#0f172a">𝄞</text>
+      <text x="135" y="215" font-size="22" font-weight="bold" fill="#0284c7">D</text>
+      <text x="295" y="215" font-size="22" font-weight="bold" fill="#0284c7">G/D</text>
+      <text x="455" y="215" font-size="22" font-weight="bold" fill="#0284c7">A7</text>
+      <text x="615" y="215" font-size="22" font-weight="bold" fill="#0284c7">D</text>
+
+      <circle cx="170" cy="225" r="7" fill="#0f172a"/>
+      <line x1="177" y1="225" x2="177" y2="170" stroke="#0f172a" stroke-width="2"/>
+      <text x="170" y="265" font-size="14" text-anchor="middle" fill="#334155">Oh</text>
+
+      <circle cx="330" cy="210" r="7" fill="#0f172a"/>
+      <line x1="337" y1="210" x2="337" y2="160" stroke="#0f172a" stroke-width="2"/>
+      <text x="330" y="265" font-size="14" text-anchor="middle" fill="#334155">Dios</text>
+
+      <circle cx="490" cy="195" r="7" fill="#0f172a"/>
+      <line x1="497" y1="195" x2="497" y2="150" stroke="#0f172a" stroke-width="2"/>
+      <text x="490" y="265" font-size="14" text-anchor="middle" fill="#334155">e -</text>
+
+      <circle cx="650" cy="225" r="7" fill="#0f172a"/>
+      <line x1="657" y1="225" x2="657" y2="170" stroke="#0f172a" stroke-width="2"/>
+      <text x="650" y="265" font-size="14" text-anchor="middle" fill="#334155">ter - no</text>
+
+      <!-- Pie de página -->
+      <line x1="80" y1="1020" x2="720" y2="1020" stroke="#cbd5e1" stroke-width="1"/>
+      <text x="400" y="1050" font-size="12" text-anchor="middle" fill="#94a3b8">© Bethesda Worship Studio — Atril Digital de Notación y Documentos Visuales</text>
+    </svg>
+  `)}`;
+
+  // Función para resolver y descargar el documento visual de manera autorizada
+  const resolveDocument = useCallback(async () => {
+    // 1. Limpieza de Object URL previo creado por este componente
+    if (createdBlobUrlRef.current) {
+      URL.revokeObjectURL(createdBlobUrlRef.current);
+      createdBlobUrlRef.current = null;
+    }
+
+    // 2. Si ya viene una URL en memoria (blob: o data:) creada en la sesión activa
+    if (documentUrl && (documentUrl.startsWith('blob:') || documentUrl.startsWith('data:'))) {
+      setResolvedBlobUrl(documentUrl);
+      setIsLoading(false);
+      setError(null);
+
+      // Si es PDF y el número de páginas es 1 o por defecto, intentar extraer el conteo real
+      if (isPdf && typeof fetch !== 'undefined') {
+        try {
+          const res = await fetch(documentUrl);
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            const count = extractPdfPageCount(buf);
+            if (count > 0) setDetectedPageCount(count);
+          }
+        } catch {
+          // Ignorar error de extracción de páginas
+        }
+      }
+      return;
+    }
+
+    // 3. Si se cuenta con storageKey para documento persistido en servidor
+    if (storageKey) {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const client = BethesdaApiClient.getInstance();
+        const { blob } = await client.downloadDocumentBlob(storageKey);
+
+        if (blob.size === 0) {
+          throw new Error('El documento recibido del servidor tiene tamaño binario cero.');
+        }
+
+        // Extracción de número real de páginas para PDF
+        if (isPdf) {
+          try {
+            const arrayBuf = await blob.arrayBuffer();
+            const count = extractPdfPageCount(arrayBuf);
+            if (count > 0) setDetectedPageCount(count);
+          } catch {
+            // Mantener pageCount original
+          }
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        createdBlobUrlRef.current = objectUrl;
+        setResolvedBlobUrl(objectUrl);
+        setIsLoading(false);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`Error al recuperar el documento visual: ${msg}`);
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // 4. Si viene una URL genérica (sin storageKey)
+    if (documentUrl) {
+      setResolvedBlobUrl(documentUrl);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+
+    // 5. Fallback a muestra o estado vacío
+    if (isSample) {
+      setResolvedBlobUrl(sampleScoreSvg);
+      setDetectedPageCount(2);
+    } else {
+      setResolvedBlobUrl(null);
+    }
+    setIsLoading(false);
+    setError(null);
+  }, [documentUrl, storageKey, isPdf, isSample, sampleScoreSvg]);
+
+  useEffect(() => {
+    // Resetear a página 1 al cambiar de documento
+    setCurrentPage(1);
+    setDetectedPageCount(pageCount || 1);
+    resolveDocument();
+
+    return () => {
+      if (createdBlobUrlRef.current) {
+        URL.revokeObjectURL(createdBlobUrlRef.current);
+        createdBlobUrlRef.current = null;
+      }
+    };
+  }, [documentUrl, storageKey, pageCount, resolveDocument]);
+
+  const totalPages = pages && pages.length > 0 ? pages.length : Math.max(1, detectedPageCount);
 
   // Navegación de páginas
   const goToPreviousPage = () => {
@@ -100,90 +270,10 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [totalPages]);
 
-  // SVG de partitura de muestra de alta fidelidad para pruebas directas en navegador
-  const sampleScoreSvg = `data:image/svg+xml;utf8,${encodeURIComponent(`
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100" width="100%" height="100%" style="background:#ffffff; font-family:sans-serif;">
-      <!-- Encabezado de la Partitura -->
-      <text x="400" y="70" font-size="28" font-weight="bold" text-anchor="middle" fill="#0f172a">GRANDE ES TU FIDELIDAD</text>
-      <text x="400" y="100" font-size="16" font-style="italic" text-anchor="middle" fill="#475569">Arreglo para Alabanza y Adoración — Bethesda Madrid</text>
-      <text x="100" y="140" font-size="14" font-weight="bold" fill="#0f172a">Tono: D Mayor  |  Tempo: ♩ = 84  |  Compás: 3/4</text>
-      <text x="700" y="140" font-size="14" text-anchor="end" fill="#64748b">Página 1 de 2</text>
-
-      <!-- Pentagrama 1 -->
-      <g stroke="#334155" stroke-width="1.5">
-        <line x1="80" y1="180" x2="720" y2="180"/>
-        <line x1="80" y1="195" x2="720" y2="195"/>
-        <line x1="80" y1="210" x2="720" y2="210"/>
-        <line x1="80" y1="225" x2="720" y2="225"/>
-        <line x1="80" y1="240" x2="720" y2="240"/>
-        <!-- Barras de compás -->
-        <line x1="80" y1="180" x2="80" y2="240" stroke-width="2"/>
-        <line x1="240" y1="180" x2="240" y2="240"/>
-        <line x1="400" y1="180" x2="400" y2="240"/>
-        <line x1="560" y1="180" x2="560" y2="240"/>
-        <line x1="720" y1="180" x2="720" y2="240" stroke-width="2"/>
-      </g>
-      <!-- Clave de Sol y Armadura -->
-      <text x="90" y="230" font-size="44" fill="#0f172a">𝄞</text>
-      <text x="135" y="215" font-size="22" font-weight="bold" fill="#0284c7">D</text>
-      <text x="295" y="215" font-size="22" font-weight="bold" fill="#0284c7">G/D</text>
-      <text x="455" y="215" font-size="22" font-weight="bold" fill="#0284c7">A7</text>
-      <text x="615" y="215" font-size="22" font-weight="bold" fill="#0284c7">D</text>
-
-      <!-- Notas musicales compás 1 -->
-      <circle cx="170" cy="225" r="7" fill="#0f172a"/>
-      <line x1="177" y1="225" x2="177" y2="170" stroke="#0f172a" stroke-width="2"/>
-      <text x="170" y="265" font-size="14" text-anchor="middle" fill="#334155">Oh</text>
-
-      <!-- Notas musicales compás 2 -->
-      <circle cx="330" cy="210" r="7" fill="#0f172a"/>
-      <line x1="337" y1="210" x2="337" y2="160" stroke="#0f172a" stroke-width="2"/>
-      <text x="330" y="265" font-size="14" text-anchor="middle" fill="#334155">Dios</text>
-
-      <!-- Notas musicales compás 3 -->
-      <circle cx="490" cy="195" r="7" fill="#0f172a"/>
-      <line x1="497" y1="195" x2="497" y2="150" stroke="#0f172a" stroke-width="2"/>
-      <text x="490" y="265" font-size="14" text-anchor="middle" fill="#334155">e -</text>
-
-      <!-- Notas musicales compás 4 -->
-      <circle cx="650" cy="225" r="7" fill="#0f172a"/>
-      <line x1="657" y1="225" x2="657" y2="170" stroke="#0f172a" stroke-width="2"/>
-      <text x="650" y="265" font-size="14" text-anchor="middle" fill="#334155">ter - no</text>
-
-      <!-- Pentagrama 2 -->
-      <g stroke="#334155" stroke-width="1.5">
-        <line x1="80" y1="320" x2="720" y2="320"/>
-        <line x1="80" y1="335" x2="720" y2="335"/>
-        <line x1="80" y1="350" x2="720" y2="350"/>
-        <line x1="80" y1="365" x2="720" y2="365"/>
-        <line x1="80" y1="380" x2="720" y2="380"/>
-        <line x1="80" y1="320" x2="80" y2="380" stroke-width="2"/>
-        <line x1="240" y1="320" x2="240" y2="380"/>
-        <line x1="400" y1="320" x2="400" y2="380"/>
-        <line x1="560" y1="320" x2="560" y2="380"/>
-        <line x1="720" y1="320" x2="720" y2="380" stroke-width="2"/>
-      </g>
-      <text x="90" y="370" font-size="44" fill="#0f172a">𝄞</text>
-      <text x="135" y="305" font-size="22" font-weight="bold" fill="#0284c7">G</text>
-      <text x="295" y="305" font-size="22" font-weight="bold" fill="#0284c7">D/F#</text>
-      <text x="455" y="305" font-size="22" font-weight="bold" fill="#0284c7">E7</text>
-      <text x="615" y="305" font-size="22" font-weight="bold" fill="#0284c7">A</text>
-
-      <text x="170" y="405" font-size="14" text-anchor="middle" fill="#334155">Tu</text>
-      <text x="330" y="405" font-size="14" text-anchor="middle" fill="#334155">fiel -</text>
-      <text x="490" y="405" font-size="14" text-anchor="middle" fill="#334155">da -</text>
-      <text x="650" y="405" font-size="14" text-anchor="middle" fill="#334155">ad</text>
-
-      <!-- Pie de página -->
-      <line x1="80" y1="1020" x2="720" y2="1020" stroke="#cbd5e1" stroke-width="1"/>
-      <text x="400" y="1050" font-size="12" text-anchor="middle" fill="#94a3b8">© Bethesda Worship Studio — Atril Digital de Notación y Documentos Visuales</text>
-    </svg>
-  `)}`;
-
   const activePageUrl =
     pages && pages.length > 0
       ? pages[currentPage - 1]
-      : documentUrl || (isSample ? sampleScoreSvg : sampleScoreSvg);
+      : resolvedBlobUrl || (isSample ? sampleScoreSvg : sampleScoreSvg);
 
   return (
     <section
@@ -196,7 +286,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
         {/* Título y Badge */}
         <div className="visual-toolbar-info">
           <span className="visual-doc-badge">
-            {isPdf ? '📄 Partitura PDF' : '🖼️ Imagen Escaneada'}
+            {isPdf ? '📄 Partitura PDF' : isTiff ? '🖼️ Documento TIFF' : '🖼️ Imagen Escaneada'}
           </span>
           <h2 className="visual-doc-title" title={title}>
             {title}
@@ -209,7 +299,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
             type="button"
             className="btn-visual-nav"
             onClick={goToPreviousPage}
-            disabled={currentPage <= 1}
+            disabled={currentPage <= 1 || isLoading}
             aria-label="Página anterior"
             title="Página anterior (Flecha Izquierda)"
           >
@@ -224,7 +314,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
             type="button"
             className="btn-visual-nav"
             onClick={goToNextPage}
-            disabled={currentPage >= totalPages}
+            disabled={currentPage >= totalPages || isLoading}
             aria-label="Página siguiente"
             title="Página siguiente (Flecha Derecha)"
           >
@@ -249,7 +339,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
               type="button"
               className="btn-visual-zoom"
               onClick={handleZoomOut}
-              disabled={zoomLevel <= 50}
+              disabled={zoomLevel <= 50 || isLoading}
               aria-label="Reducir zoom"
               title="Reducir zoom (-25%)"
             >
@@ -260,7 +350,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
               type="button"
               className="btn-visual-zoom"
               onClick={handleZoomIn}
-              disabled={zoomLevel >= 200}
+              disabled={zoomLevel >= 200 || isLoading}
               aria-label="Aumentar zoom"
               title="Aumentar zoom (+25%)"
             >
@@ -304,36 +394,69 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
             transition: 'transform 0.15s ease-out',
           }}
         >
-          {isPdf && documentUrl ? (
-            /* Visualización nativa de PDF mediante objeto embebido */
-            <object
-              data={`${documentUrl}#toolbar=0&navpanes=0&page=${currentPage}`}
-              type="application/pdf"
+          {isLoading ? (
+            /* Estado de Carga Autenticada */
+            <div className="visual-loading-state" role="status">
+              <div className="visual-loading-spinner" aria-hidden="true" />
+              <p>Cargando partitura visual autorizada...</p>
+            </div>
+          ) : error ? (
+            /* Estado de Error de Recuperación */
+            <div className="visual-error-state" role="alert">
+              <div className="visual-error-icon">⚠️</div>
+              <h3>No se pudo mostrar el documento</h3>
+              <p>{error}</p>
+              <button
+                type="button"
+                className="btn-visual-action active"
+                onClick={() => resolveDocument()}
+              >
+                Reintentar carga
+              </button>
+            </div>
+          ) : isTiff ? (
+            /* Tratamiento Explícito de TIFF: Formato no decodificable nativamente en navegadores modernos */
+            <div className="visual-error-state" role="status">
+              <div className="visual-error-icon">🖼️</div>
+              <h3>Documento en Formato TIFF</h3>
+              <p>
+                Los navegadores web modernos no soportan la decodificación nativa de imágenes TIFF directamente en pantalla.
+                Puede descargar el archivo original para visualizarlo en una aplicación de diseño o convertirlo a formato PDF/PNG.
+              </p>
+              {resolvedBlobUrl && (
+                <a
+                  href={resolvedBlobUrl}
+                  download={title.endsWith('.tif') || title.endsWith('.tiff') ? title : `${title}.tiff`}
+                  className="btn-visual-action active"
+                  style={{ textDecoration: 'none', display: 'inline-flex', marginTop: '1rem' }}
+                >
+                  ⬇ Descargar archivo original (.tiff)
+                </a>
+              )}
+            </div>
+          ) : isPdf && resolvedBlobUrl ? (
+            /* Visualización nativa de PDF mediante iframe sandboxed de alta fidelidad */
+            <iframe
+              key={`${resolvedBlobUrl}-p${currentPage}`}
+              src={`${resolvedBlobUrl}#page=${currentPage}&toolbar=0&navpanes=0`}
               className="visual-pdf-embed"
-              aria-label={`Partitura PDF: ${title}`}
-            >
-              <div className="pdf-fallback-container">
-                <img
-                  src={sampleScoreSvg}
-                  alt={`Partitura: ${title}`}
-                  className="visual-sheet-image"
-                />
-                <p className="pdf-fallback-note">
-                  Visualizando vista previa de la partitura. Para visualizar el PDF completo en visor externo,{' '}
-                  <a href={documentUrl} target="_blank" rel="noopener noreferrer">
-                    haz clic aquí para abrir el archivo
-                  </a>.
-                </p>
-              </div>
-            </object>
-          ) : (
-            /* Visualización de Imágenes Raster o SVG */
+              title={`Partitura PDF: ${title} — Página ${currentPage} de ${totalPages}`}
+            />
+          ) : resolvedBlobUrl || isSample ? (
+            /* Visualización de Imágenes Raster (PNG, JPEG, WEBP) o Muestra SVG */
             <img
-              src={activePageUrl}
+              src={resolvedBlobUrl || activePageUrl}
               alt={`Partitura visual: ${title} — Página ${currentPage} de ${totalPages}`}
               className="visual-sheet-image"
               loading="eager"
             />
+          ) : (
+            /* Estado Vacío de Documento */
+            <div className="visual-empty-container" role="status">
+              <div className="visual-empty-icon">📄</div>
+              <h3>Documento No Disponible</h3>
+              <p>No se encontró un archivo binario válido asociado a esta partitura visual.</p>
+            </div>
           )}
         </div>
       </main>

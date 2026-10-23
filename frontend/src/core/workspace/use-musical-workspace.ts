@@ -63,11 +63,11 @@ export interface UseMusicalWorkspaceOptions {
 export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   readonly viewResult: IWorkspaceViewResult;
   readonly availableInstruments: readonly InstrumentProfile[];
-  readonly importedMeta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined } | null;
+  readonly importedMeta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined; pageCount?: number | undefined } | null;
   readonly persistedMeta: { isPersisted: boolean; songId: string; versionNumber: number } | null;
   readonly applyPreset: (presetId: GoldenScenarioId) => void;
   readonly selectSong: (song: CanonicalMusicPayload) => void;
-  readonly importSong: (song: CanonicalMusicPayload, meta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined }) => void;
+  readonly importSong: (song: CanonicalMusicPayload, meta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined; pageCount?: number | undefined }) => void;
   readonly selectPersistedSong: (song: CanonicalMusicPayload, meta: { isPersisted: boolean; songId: string; versionNumber: number }) => void;
   readonly selectInstrument: (instrumentId: InstrumentId) => void;
   readonly setPrimaryRepresentation: (representation: ViewRepresentation) => void;
@@ -93,6 +93,7 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     isVisualOnly?: boolean | undefined;
     documentUrl?: string | undefined;
     storageKey?: string | undefined;
+    pageCount?: number | undefined;
   } | null>(null);
   const [persistedMeta, setPersistedMeta] = useState<{ isPersisted: boolean; songId: string; versionNumber: number } | null>(null);
 
@@ -135,7 +136,26 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   // Cambiar canción activa del catálogo
   const selectSong = useCallback((song: CanonicalMusicPayload) => {
     setActiveSong(song);
-    setImportedMeta(null);
+    const songMeta = (song as any)?.metadata;
+    const isVisual = Boolean(
+      songMeta?.isVisualOnly ||
+      songMeta?.sourceFormat === 'PDF' ||
+      songMeta?.sourceFormat === 'IMAGE' ||
+      (song as any)?.sourceFormat === 'PDF' ||
+      (song as any)?.sourceFormat === 'IMAGE'
+    );
+    if (isVisual) {
+      setImportedMeta({
+        format: (songMeta?.sourceFormat as string) ?? ((song as any)?.sourceFormat as string) ?? 'PDF',
+        isVisualOnly: true,
+        sourceName: (songMeta?.filename as string) ?? (songMeta?.sourceName as string) ?? song.title,
+        storageKey: songMeta?.storageKey as string | undefined,
+        documentUrl: songMeta?.documentUrl as string | undefined,
+        pageCount: (songMeta?.pageCount as number | undefined) ?? 1,
+      });
+    } else {
+      setImportedMeta(null);
+    }
     setPersistedMeta(null);
     setState((prev) => {
       const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
@@ -153,6 +173,7 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
         isVisualOnly?: boolean | undefined;
         documentUrl?: string | undefined;
         storageKey?: string | undefined;
+        pageCount?: number | undefined;
       }
     ) => {
       setActiveSong(song);
@@ -169,7 +190,26 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   // Cargar canción persistida desde base de datos PostgreSQL
   const selectPersistedSong = useCallback((song: CanonicalMusicPayload, meta: { isPersisted: boolean; songId: string; versionNumber: number }) => {
     setActiveSong(song);
-    setImportedMeta(null);
+    const songMeta = (song as any)?.metadata;
+    const isVisual = Boolean(
+      songMeta?.isVisualOnly ||
+      songMeta?.sourceFormat === 'PDF' ||
+      songMeta?.sourceFormat === 'IMAGE' ||
+      (song as any)?.sourceFormat === 'PDF' ||
+      (song as any)?.sourceFormat === 'IMAGE'
+    );
+    if (isVisual) {
+      setImportedMeta({
+        format: (songMeta?.sourceFormat as string) ?? ((song as any)?.sourceFormat as string) ?? 'PDF',
+        isVisualOnly: true,
+        sourceName: (songMeta?.filename as string) ?? (songMeta?.sourceName as string) ?? song.title,
+        storageKey: songMeta?.storageKey as string | undefined,
+        documentUrl: songMeta?.documentUrl as string | undefined,
+        pageCount: (songMeta?.pageCount as number | undefined) ?? 1,
+      });
+    } else {
+      setImportedMeta(null);
+    }
     setPersistedMeta(meta);
     setState((prev) => {
       const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);

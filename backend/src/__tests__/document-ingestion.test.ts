@@ -349,5 +349,75 @@ describe('Fase B — Ingesta de Documentos y Partituras Visuales (Backend Suite)
 
       assert.ok(res.statusCode >= 400);
     });
+
+    it('3.6 should reject GET /api/v1/documents/:storageKey/file without Bearer or Ticket (401)', async () => {
+      assert.ok(savedStorageKey);
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file`,
+      });
+      assert.equal(res.statusCode, 401);
+      const json = JSON.parse(res.body);
+      const message = json.error?.message ?? json.message;
+      assert.match(message, /Autenticación requerida/i);
+    });
+
+    it('3.7 should issue single-use / short-lived document viewing ticket via POST /:storageKey/ticket', async () => {
+      assert.ok(savedStorageKey);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/documents/${savedStorageKey}/ticket`,
+        headers: {
+          authorization: `Bearer ${leaderToken}`,
+        },
+      });
+
+      assert.equal(res.statusCode, 200);
+      const json = JSON.parse(res.body);
+      assert.ok(json.data.ticket);
+      assert.equal(json.data.expiresInSeconds, 60);
+
+      // 3.8 Visualizar documento usando el ticket emitido SIN encabezado de autorización
+      const viewRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(json.data.ticket)}`,
+      });
+
+      assert.equal(viewRes.statusCode, 200);
+      assert.equal(viewRes.headers['content-type'], 'application/pdf');
+      assert.equal(viewRes.rawPayload.length, validPdfBuffer.length);
+    });
+
+    it('3.9 should reject GET /api/v1/documents/:storageKey/file with invalid ticket (401)', async () => {
+      assert.ok(savedStorageKey);
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=invalid-or-fake-ticket`,
+      });
+      assert.equal(res.statusCode, 401);
+    });
+
+    it('3.10 should detect page count accurately for a multipage PDF', async () => {
+      const multiPagePdf = Buffer.from(
+        '%PDF-1.4\n' +
+        '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n' +
+        '2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>\nendobj\n' +
+        '3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n' +
+        '4 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n' +
+        '5 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n' +
+        'trailer\n<< /Root 1 0 R >>\n%%EOF',
+        'utf-8'
+      );
+
+      const inspected = await documentService.inspectAndStoreDocument({
+        buffer: multiPagePdf,
+        filename: 'Multipage_Hymn.pdf',
+        mimeType: 'application/pdf',
+        userId: testUserId,
+      });
+
+      assert.equal(inspected.pageCount, 3, 'Debe detectar exactamente 3 páginas');
+      assert.equal(inspected.isVisualOnly, true);
+    });
   });
 });

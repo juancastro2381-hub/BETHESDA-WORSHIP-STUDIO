@@ -15,6 +15,7 @@ import {
   sanitizeSafeFilename,
   validateDocumentFileSignature,
 } from '../domain/documents/document-validation.ts';
+import { extractPdfPageCount } from '../domain/documents/pdf-utils.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
 import { type SongService } from './song-service.ts';
 import { type SongWithVersion } from '../repositories/song-repository.ts';
@@ -77,6 +78,7 @@ export class DocumentService {
     // 3. Almacenar físicamente con UUID único y calcular SHA-256
     const saveResult = await this.storageProvider.save(safeFilename, buffer);
     const documentId = crypto.randomUUID();
+    const pageCount = detectedFormat === 'PDF' ? extractPdfPageCount(buffer) : 1;
 
     const metadata: DocumentMetadata = {
       documentId,
@@ -89,6 +91,7 @@ export class DocumentService {
       isVisualOnly: true,
       uploadedAt: new Date().toISOString(),
       uploadedByUserId: userId,
+      pageCount,
     };
 
     this.registeredDocuments.set(documentId, metadata);
@@ -103,6 +106,7 @@ export class DocumentService {
       detectedFormat: metadata.detectedFormat,
       isVisualOnly: true,
       uploadedAt: metadata.uploadedAt,
+      pageCount,
     };
   }
 
@@ -160,6 +164,10 @@ export class DocumentService {
     const baseName = path.basename(safeFilename, path.extname(safeFilename));
     const finalTitle = (title && title.trim()) || baseName || 'Partitura Visual';
 
+    // Obtener metadatos del archivo para el registro de procedencia
+    const fileData = await this.getDocumentFile(storageKey);
+    const pageCount = isPdf ? extractPdfPageCount(fileData.buffer) : 1;
+
     // Crear CanonicalMusicPayload limpio (0 notas, 0 acordes inventados)
     const timeline = new Timeline({
       totalDurationTicks: 0,
@@ -172,12 +180,19 @@ export class DocumentService {
       measures: [],
       sections: [],
       instrumentTracks: [],
+      metadata: {
+        isVisualOnly: true,
+        sourceFormat,
+        storageKey,
+        mimeType,
+        filename: safeFilename,
+        fileSizeBytes: fileData.fileSizeBytes,
+        checksumSha256: fileData.checksumSha256,
+        pageCount,
+      },
     });
 
     const canonicalJSON = CanonicalSerializer.serialize(canonicalPayload);
-
-    // Obtener metadatos del archivo para el registro de procedencia
-    const fileData = await this.getDocumentFile(storageKey);
 
     const sourceRecordContent = JSON.stringify({
       storageKey,
@@ -186,6 +201,7 @@ export class DocumentService {
       fileSizeBytes: fileData.fileSizeBytes,
       checksumSha256: fileData.checksumSha256,
       isVisualOnly: true,
+      pageCount,
       importedAt: new Date().toISOString(),
     });
 

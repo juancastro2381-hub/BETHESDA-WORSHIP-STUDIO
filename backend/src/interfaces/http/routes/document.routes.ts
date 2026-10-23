@@ -15,6 +15,10 @@ import { SongService } from '../../../application/song-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 
+import { UnauthorizedError } from '../../../domain/errors.ts';
+import { ROLE_PERMISSIONS, type UserRole } from '../../../domain/auth-types.ts';
+import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
+
 const InspectDocumentBodySchema = z.object({
   filename: z.string().min(1).max(255),
   mimeType: z.string().min(1).max(64),
@@ -94,14 +98,71 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 3. GET /api/v1/documents/:storageKey/file - Descargar / Visualizar documento físico seguro
-  fastify.get(
-    '/:storageKey/file',
+  // 3a. POST /api/v1/documents/:storageKey/ticket - Emitir ticket temporal para visualización de documentos en <iframe>/<object>
+  fastify.post(
+    '/:storageKey/ticket',
     {
       preHandler: [authGuard.requirePermission('songs:read')],
     },
     async (request, reply) => {
       const { storageKey } = StorageKeyParamSchema.parse(request.params);
+      const user = request.user!;
+
+      // Validar que el archivo físico exista antes de otorgar ticket
+      await documentService.getDocumentFile(storageKey);
+
+      const ticket = globalStreamTicketService.issueTicket({
+        userId: user.sub,
+        role: user.role,
+        resourceId: storageKey,
+        purpose: 'DOCUMENT_VIEW',
+      });
+
+      return reply.status(200).send({
+        data: {
+          ticket,
+          expiresInSeconds: 60,
+        },
+      });
+    }
+  );
+
+  // 3b. GET /api/v1/documents/:storageKey/file - Descargar / Visualizar documento físico seguro (con soporte de ticket o Bearer)
+  fastify.get(
+    '/:storageKey/file',
+    async (request, reply) => {
+      const { storageKey } = StorageKeyParamSchema.parse(request.params);
+      const ticketQuery = (request.query as any)?.ticket as string | undefined;
+
+      let authenticatedUserId: string | null = null;
+
+      if (ticketQuery) {
+        // Validar ticket multimedia sin quemar inmediatamente para permitir visualización continua y recargas
+        const ticketData = globalStreamTicketService.consumeTicket(
+          {
+            ticket: ticketQuery,
+            resourceId: storageKey,
+            purpose: 'DOCUMENT_VIEW',
+          },
+          false
+        );
+        authenticatedUserId = ticketData.userId;
+      } else {
+        await authGuard.authenticate(request, reply);
+        if (request.user) {
+          const permissions = ROLE_PERMISSIONS[request.user.role as UserRole] || [];
+          if (permissions.includes('songs:read')) {
+            authenticatedUserId = request.user.sub;
+          }
+        }
+      }
+
+      if (!authenticatedUserId) {
+        throw new UnauthorizedError(
+          'Autenticación requerida para acceder al documento. Provea un ticket de visualización o encabezado Bearer.'
+        );
+      }
+
       const fileData = await documentService.getDocumentFile(storageKey);
 
       // Determinar Content-Type según extensión o por defecto

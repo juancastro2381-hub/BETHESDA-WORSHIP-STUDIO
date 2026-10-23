@@ -12,7 +12,7 @@
  */
 
 import React, { useRef, useState } from 'react';
-import { type CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
+import { CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
 import { IngestionService } from '../../core/ingestion/ingestion-service.ts';
 import {
   MAX_SAFE_FILE_SIZE_BYTES,
@@ -21,6 +21,7 @@ import {
 } from '../../core/ingestion/validation.ts';
 import { BethesdaApiClient } from '../../core/api/api-client.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
+import { extractPdfPageCount } from '../../core/ingestion/pdf-utils.ts';
 
 const ingestionService = new IngestionService();
 
@@ -33,6 +34,7 @@ export interface SourceFileUploaderProps {
       isVisualOnly?: boolean | undefined;
       documentUrl?: string | undefined;
       storageKey?: string | undefined;
+      pageCount?: number | undefined;
     }
   ) => void;
   readonly onImportError?: (message: string, code: string) => void;
@@ -73,15 +75,32 @@ export const SourceFileUploader: React.FC<SourceFileUploaderProps> = ({
       // 1. Si es un documento visual (PDF o imagen raster)
       if (isVisualDoc) {
         let storageKey: string | undefined;
-        let fileUrl: string | undefined;
+        // Priorizar URL blob en memoria para renderizado instantáneo y sin fricción de red en sesión activa
+        const localBlobUrl = typeof URL !== 'undefined' && URL.createObjectURL ? URL.createObjectURL(file) : undefined;
+        let fileUrl: string | undefined = localBlobUrl;
+        let detectedPageCount = 1;
 
-        // Si el usuario está autenticado, registrar en servidor con validación de magic bytes
+        if (detected === 'PDF') {
+          try {
+            const arrayBuffer = await file.arrayBuffer();
+            detectedPageCount = extractPdfPageCount(arrayBuffer);
+          } catch {
+            detectedPageCount = 1;
+          }
+        }
+
+        // Si el usuario está autenticado, registrar en servidor con validación de magic bytes y persistencia
         if (user) {
           try {
             const client = BethesdaApiClient.getInstance();
             const inspected = await client.inspectDocument(file);
             storageKey = inspected.storageKey;
-            fileUrl = client.getDocumentFileUrl(inspected.storageKey);
+            if (inspected.pageCount) {
+              detectedPageCount = inspected.pageCount;
+            }
+            if (!fileUrl) {
+              fileUrl = client.getDocumentFileUrl(inspected.storageKey);
+            }
 
             // Persistir opcionalmente en catálogo canónico
             await client.importVisualDocumentSong({
@@ -107,12 +126,33 @@ export const SourceFileUploader: React.FC<SourceFileUploaderProps> = ({
           const formatLabel = detected === 'PDF' ? 'PDF' : 'Imagen';
           const msg = `"${result.payload.title}" cargada con éxito en modo Atril Visual (${formatLabel}).`;
           setSuccessInfo(msg);
-          onSongImported(result.payload, {
+
+          const payloadWithMetadata = new CanonicalMusicPayload({
+            version: result.payload.version,
+            title: result.payload.title,
+            timeline: result.payload.timeline,
+            sections: [...result.payload.sections],
+            measures: [...result.payload.measures],
+            instrumentTracks: [...result.payload.instrumentTracks],
+            metadata: {
+              ...(result.payload.metadata ?? {}),
+              isVisualOnly: true,
+              sourceFormat: detected,
+              documentUrl: fileUrl,
+              storageKey,
+              filename: file.name,
+              mimeType: file.type || (detected === 'PDF' ? 'application/pdf' : 'image/png'),
+              pageCount: detectedPageCount,
+            },
+          });
+
+          onSongImported(payloadWithMetadata, {
             sourceName: file.name,
             format: detected,
             isVisualOnly: true,
             documentUrl: fileUrl,
             storageKey,
+            pageCount: detectedPageCount,
           });
         } else {
           const firstError = result.diagnostics.find((d) => d.severity === 'ERROR');

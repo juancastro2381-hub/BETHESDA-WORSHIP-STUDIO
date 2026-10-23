@@ -27,6 +27,7 @@ export interface DocumentMetadata {
   readonly isVisualOnly: true;
   readonly uploadedAt: string;
   readonly uploadedByUserId?: string | undefined;
+  readonly pageCount?: number | undefined;
 }
 
 export interface DocumentInspectionResult {
@@ -39,6 +40,7 @@ export interface DocumentInspectionResult {
   readonly detectedFormat: DocumentDetectedFormat;
   readonly isVisualOnly: true;
   readonly uploadedAt: string;
+  readonly pageCount?: number | undefined;
 }
 
 export interface DocumentSaveResult {

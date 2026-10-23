@@ -186,6 +186,12 @@ export class IngestionService {
         measures: [],
         sections: [],
         instrumentTracks: [],
+        metadata: {
+          isVisualOnly: true,
+          sourceFormat: detectedFormat,
+          filename: file.name,
+          mimeType: file.type || (detectedFormat === 'PDF' ? 'application/pdf' : 'image/png'),
+        },
       });
 
       return new IngestionResult({

@@ -20,6 +20,7 @@ export interface CanonicalMusicPayloadJSON {
   sections: SectionJSON[];
   measures: MeasureJSON[];
   instrumentTracks: InstrumentTrackJSON[];
+  metadata?: Record<string, unknown> | undefined;
 }
 
 export class CanonicalMusicPayload {
@@ -31,6 +32,7 @@ export class CanonicalMusicPayload {
   public readonly sections: readonly Section[];
   public readonly measures: readonly Measure[];
   public readonly instrumentTracks: readonly InstrumentTrack[];
+  public readonly metadata?: Readonly<Record<string, unknown>> | undefined;
 
   public constructor(init: {
     version?: string;
@@ -39,6 +41,7 @@ export class CanonicalMusicPayload {
     sections?: Section[];
     measures?: Measure[];
     instrumentTracks?: InstrumentTrack[];
+    metadata?: Record<string, unknown> | undefined;
   }) {
     if (!init.title || typeof init.title !== 'string') {
       throw new Error(`Título de obra requerido e inválido: ${init.title}`);
@@ -53,6 +56,7 @@ export class CanonicalMusicPayload {
     this.sections = Object.freeze([...(init.sections ?? [])]);
     this.measures = Object.freeze([...(init.measures ?? [])]);
     this.instrumentTracks = Object.freeze([...(init.instrumentTracks ?? [])]);
+    this.metadata = init.metadata ? Object.freeze({ ...init.metadata }) : undefined;
   }
 
   public getMeasure(measureNumber: number): Measure | undefined {
@@ -114,7 +118,7 @@ export class CanonicalMusicPayload {
   }
 
   public toJSON(): CanonicalMusicPayloadJSON {
-    return {
+    const json: CanonicalMusicPayloadJSON = {
       version: this.version,
       title: this.title,
       timeline: this.timeline.toJSON(),
@@ -122,6 +126,10 @@ export class CanonicalMusicPayload {
       measures: this.measures.map((m) => m.toJSON()),
       instrumentTracks: this.instrumentTracks.map((t) => t.toJSON()),
     };
+    if (this.metadata) {
+      json.metadata = { ...this.metadata };
+    }
+    return json;
   }
 
   public static fromJSON(
@@ -144,6 +152,7 @@ export class CanonicalMusicPayload {
       sections,
       measures,
       instrumentTracks,
+      metadata: json.metadata,
     });
   }
 }

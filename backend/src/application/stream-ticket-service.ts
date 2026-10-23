@@ -14,7 +14,7 @@
 import crypto from 'node:crypto';
 import { UnauthorizedError } from '../domain/errors.ts';
 
-export type TicketPurpose = 'SSE_STREAM' | 'AUDIO_STREAM';
+export type TicketPurpose = 'SSE_STREAM' | 'AUDIO_STREAM' | 'DOCUMENT_VIEW';
 
 export interface StreamTicketPayload {
   readonly ticket: string;

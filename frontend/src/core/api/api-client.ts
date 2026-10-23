@@ -272,7 +272,32 @@ export class BethesdaApiClient {
    * para su integración en ProjectionService y renderizado visual.
    */
   public static toCanonicalPayload(response: BackendSongResponse): CanonicalMusicPayload {
-    return CanonicalMusicPayload.fromJSON(response.version.canonicalPayload);
+    const rawPayload = response.version.canonicalPayload;
+    const isVisual = response.version.sourceFormat === 'PDF' || response.version.sourceFormat === 'IMAGE';
+
+    let storageKey = (rawPayload.metadata?.storageKey as string) ?? undefined;
+    if (!storageKey && (response.version as any).sourceRecord?.rawContent) {
+      try {
+        const parsed = JSON.parse((response.version as any).sourceRecord.rawContent);
+        if (parsed.storageKey) storageKey = parsed.storageKey;
+      } catch {
+        // Ignorar si no es JSON válido
+      }
+    }
+
+    const metadata: Record<string, unknown> = {
+      ...(rawPayload.metadata ?? {}),
+      isVisualOnly: isVisual || Boolean(rawPayload.metadata?.isVisualOnly),
+      sourceFormat: response.version.sourceFormat,
+      ...(storageKey ? { storageKey } : {}),
+      songId: response.song.id,
+      versionNumber: response.version.versionNumber,
+    };
+
+    return CanonicalMusicPayload.fromJSON({
+      ...rawPayload,
+      metadata,
+    });
   }
 
   // ==========================================================================
@@ -762,6 +787,46 @@ export class BethesdaApiClient {
   public getDocumentFileUrl(storageKey: string): string {
     return `${this.baseUrl}/documents/${encodeURIComponent(storageKey)}/file`;
   }
+
+  /**
+   * Obtiene una URL de visualización autenticada para un documento mediante un ticket temporal (Fase B).
+   * Compatible con visores nativos sin requerir encabezados Authorization en el request de medios.
+   */
+  public async getDocumentViewTicketUrl(storageKey: string): Promise<string> {
+    const res = await this.fetchWithAuth(`/documents/${encodeURIComponent(storageKey)}/ticket`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    const ticket = json.data?.ticket;
+    return `${this.baseUrl}/documents/${encodeURIComponent(storageKey)}/file?ticket=${encodeURIComponent(ticket)}`;
+  }
+
+  /**
+   * Descarga el documento visual como Blob binario autenticado (Fase B).
+   * Genera un objeto binario seguro en memoria que puede ser visualizado sin exponer tokens JWT.
+   */
+  public async downloadDocumentBlob(
+    storageKey: string
+  ): Promise<{ blob: Blob; filename: string; mimeType: string }> {
+    const res = await this.fetchWithAuth(`/documents/${encodeURIComponent(storageKey)}/file`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    let filename = storageKey;
+    const match = disposition.match(/filename="?([^";]+)"?/);
+    if (match && match[1]) {
+      filename = decodeURIComponent(match[1]);
+    }
+    const mimeType = res.headers.get('content-type') || blob.type || (storageKey.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/png');
+    return { blob, filename, mimeType };
+  }
 }
 
 export interface DocumentInspectionResultDTO {
@@ -774,6 +839,7 @@ export interface DocumentInspectionResultDTO {
   detectedFormat: 'PDF' | 'IMAGE';
   isVisualOnly: true;
   uploadedAt: string;
+  pageCount?: number;
 }
 
 export interface ListUsersParams {

@@ -17,6 +17,7 @@ export interface SongHeaderProps {
   readonly isPersisted?: boolean;
   readonly versionNumber?: number | undefined;
   readonly persistedSongId?: string | undefined;
+  readonly isVisualDocument?: boolean | undefined;
 }
 
 export const SongHeader: React.FC<SongHeaderProps> = ({
@@ -27,6 +28,7 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
   isPersisted,
   versionNumber,
   persistedSongId,
+  isVisualDocument,
 }) => {
   const tempoBpm = song.timeline.tempoMap.events[0]?.bpm ?? 120;
   const firstMeasure = song.measures[0];
@@ -80,7 +82,11 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
               {totalSections} secciones
             </span>
           )}
-          {totalNotes === 0 ? (
+          {isVisualDocument ? (
+            <span className="badge-meta badge-visual-doc" title="Documento visual presentado en Atril Digital">
+              📄 Atril Visual ({importedFormat ?? 'PDF / Imagen'})
+            </span>
+          ) : totalNotes === 0 ? (
             <span className="badge-meta badge-lead-pure" title="Fuente Lead Sheet pura (CERO notas de melodía)">
               Lead Sheet Puro (0 notas melódicas)
             </span>

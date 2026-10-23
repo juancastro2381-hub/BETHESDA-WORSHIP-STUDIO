@@ -3,6 +3,7 @@ import { BethesdaApiClient, type BackendSongItem } from '../../core/api/api-clie
 import { CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
+import { ModalCloseButton, DatabaseIcon, SaveIcon } from '../common/Icons.tsx';
 
 export interface DatabaseSongsModalProps {
   readonly activeSong: CanonicalMusicPayload;
@@ -25,6 +26,17 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [persisting, setPersisting] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Soporte de tecla Escape para cerrar modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   const loadData = async () => {
     setLoading(true);
@@ -152,88 +164,114 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
   };
 
   return (
-    <div className="source-uploader-overlay" role="dialog" aria-modal="true" aria-labelledby="db-modal-title">
-      <div className="source-uploader-card db-modal-card">
-        <div className="uploader-header">
-          <h3 id="db-modal-title">💾 Catálogo en Base de Datos (PostgreSQL)</h3>
-          <button type="button" className="btn-close-uploader" onClick={onClose} aria-label="Cerrar ventana">
-            ✕
-          </button>
-        </div>
-
-        <div className="db-health-banner">
-          {health?.database === 'connected' ? (
-            <span className="db-status-badge db-connected">
-              🟢 PostgreSQL: Conectado y Operativo
+    <div
+      className="modal-backdrop db-modal-backdrop"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="db-modal-title"
+    >
+      <div
+        className="modal-content db-modal-card"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <div className="modal-title-group">
+            <span className="modal-title-icon" aria-hidden="true">
+              <DatabaseIcon size={24} />
             </span>
-          ) : (
-            <span className="db-status-badge db-disconnected">
-              🔴 PostgreSQL: No Conectado ({health?.database ?? 'Verificando...'})
-            </span>
-          )}
-          <button
-            type="button"
-            className="btn-save-current"
-            onClick={handlePersistCurrent}
-            disabled={persisting || loading}
-          >
-            {persisting ? '⏳ Guardando...' : '💾 Guardar Canción Actual en BD'}
-          </button>
-        </div>
-
-        {successMsg && (
-          <div className="uploader-alert alert-success" role="status">
-            {successMsg}
-          </div>
-        )}
-
-        {error && (
-          <div className="uploader-alert alert-error" role="alert">
-            {error}
-          </div>
-        )}
-
-        <div className="db-songs-list-container">
-          {loading ? (
-            <p className="db-loading-text">Cargando canciones desde PostgreSQL...</p>
-          ) : songs.length === 0 ? (
-            <div className="db-empty-list">
-              <p>No hay canciones guardadas aún en la base de datos.</p>
-              <p>Puedes guardar la canción activa usando el botón de arriba.</p>
+            <div>
+              <h2 id="db-modal-title" className="modal-title">Catálogo en Base de Datos</h2>
+              <p className="modal-subtitle">Canciones canónicas persistidas en PostgreSQL — Iglesia Bethesda</p>
             </div>
-          ) : (
-            <ul className="db-songs-list" role="list">
-              {songs.map((s) => (
-                <li key={s.id} className="db-song-item">
-                  <div className="db-song-info">
-                    <strong className="db-song-title">{s.title}</strong>
-                    <span className="db-song-meta">
-                      {s.artist ? `${s.artist} • ` : ''}Tono: {s.defaultKey} • ♩ = {s.defaultBpm} BPM • {s.timeSignature}
-                    </span>
-                  </div>
-                  <div className="db-song-actions">
-                    <DownloadActionButton
-                      resourceId={s.id}
-                      resourceType="SONG"
-                      title={s.title}
-                      compact={true}
-                    />
-                    <button
-                      type="button"
-                      className="btn-load-db-song"
-                      onClick={() => handleSelectSong(s.id)}
-                    >
-                      Abrir en Atril
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          </div>
+          <ModalCloseButton
+            onClick={onClose}
+            label="Cerrar catálogo de canciones"
+            id="btn-close-db-modal"
+          />
         </div>
 
-        <div className="uploader-actions">
-          <button type="button" className="btn-uploader-cancel" onClick={onClose}>
+        <div className="db-modal-body">
+          <div className="db-health-banner">
+            {health?.database === 'connected' ? (
+              <span className="db-status-badge db-connected">
+                <span className="status-dot online" aria-hidden="true">●</span> PostgreSQL: Conectado y Operativo
+              </span>
+            ) : (
+              <span className="db-status-badge db-disconnected">
+                <span className="status-dot offline" aria-hidden="true">●</span> PostgreSQL: No Conectado ({health?.database ?? 'Verificando...'})
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn-save-current"
+              onClick={handlePersistCurrent}
+              disabled={persisting || loading}
+            >
+              <SaveIcon size={16} />
+              <span>{persisting ? 'Guardando...' : 'Guardar Canción Actual en BD'}</span>
+            </button>
+          </div>
+
+          {successMsg && (
+            <div className="uploader-alert alert-success" role="status">
+              {successMsg}
+            </div>
+          )}
+
+          {error && (
+            <div className="uploader-alert alert-error" role="alert">
+              {error}
+            </div>
+          )}
+
+          <div className="db-songs-list-container">
+            {loading ? (
+              <div className="db-loading-state">
+                <div className="loading-spinner" aria-hidden="true" />
+                <p className="db-loading-text">Cargando canciones desde PostgreSQL...</p>
+              </div>
+            ) : songs.length === 0 ? (
+              <div className="db-empty-list" role="status">
+                <span className="empty-icon" aria-hidden="true">🎼</span>
+                <p className="empty-title">No hay canciones guardadas aún en la base de datos.</p>
+                <p className="empty-hint">Puedes persistir la canción activa en atril usando el botón superior.</p>
+              </div>
+            ) : (
+              <ul className="db-songs-list" role="list">
+                {songs.map((s) => (
+                  <li key={s.id} className="db-song-item">
+                    <div className="db-song-info">
+                      <strong className="db-song-title">{s.title}</strong>
+                      <span className="db-song-meta">
+                        {s.artist ? `${s.artist} • ` : ''}Tono: {s.defaultKey} • ♩ = {s.defaultBpm} BPM • {s.timeSignature}
+                      </span>
+                    </div>
+                    <div className="db-song-actions">
+                      <DownloadActionButton
+                        resourceId={s.id}
+                        resourceType="SONG"
+                        title={s.title}
+                        compact={true}
+                      />
+                      <button
+                        type="button"
+                        className="btn-load-db-song"
+                        onClick={() => handleSelectSong(s.id)}
+                      >
+                        Abrir en Atril
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="modal-actions db-modal-actions">
+          <button type="button" className="action-button secondary" onClick={onClose} id="btn-db-modal-cancel">
             Cerrar
           </button>
         </div>
@@ -241,3 +279,4 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     </div>
   );
 };
+

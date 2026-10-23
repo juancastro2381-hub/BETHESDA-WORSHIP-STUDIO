@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/use-auth.ts';
+import { ModalCloseButton } from '../common/Icons.tsx';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -126,14 +127,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               {isMustChangeMode ? 'Actualizar Contraseña Inicial' : 'Acceso a Bethesda Worship Studio'}
             </h2>
           </div>
-          <button
-            type="button"
-            className="modal-close-button"
+          <ModalCloseButton
             onClick={handleModalClose}
-            aria-label="Cerrar modal de inicio de sesión"
-          >
-            ✕
-          </button>
+            label="Cerrar modal de inicio de sesión"
+            id="btn-close-login-modal"
+          />
         </div>
 
         {errorMessage && (

@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import { BethesdaApiClient, type FrontendUserEntity } from '../../core/api/api-client.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import type { UserRole, AccountStatus } from '../../core/auth/types.ts';
+import { ModalCloseButton } from '../common/Icons.tsx';
 
 const ROLE_LABELS: Record<UserRole, string> = {
   SUPER_ADMIN: 'Super Administrador',
@@ -314,15 +315,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               </span>
             </div>
           </div>
-          <button
-            type="button"
-            className="modal-close-button"
+          <ModalCloseButton
             onClick={onClose}
-            aria-label="Cerrar modal de administración de usuarios"
+            label="Cerrar modal de administración de usuarios"
             id="close-user-mgmt-button"
-          >
-            ✕
-          </button>
+          />
         </div>
 
         {/* Banners de Notificación */}

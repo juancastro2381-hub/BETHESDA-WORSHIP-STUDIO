@@ -9,6 +9,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BethesdaApiClient, type AudioAssetDTO } from '../../core/api/api-client.ts';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 import { useOffline } from '../../core/offline/use-offline.ts';
+import { CloseIcon } from '../common/Icons.tsx';
 
 export interface AudioPlayerBarProps {
   readonly songId?: string | undefined;
@@ -300,8 +301,9 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
             className="btn-close-player"
             onClick={onClose}
             aria-label="Cerrar reproductor de audio"
+            title="Cerrar reproductor"
           >
-            ✕
+            <CloseIcon size={16} />
           </button>
         )}
       </div>

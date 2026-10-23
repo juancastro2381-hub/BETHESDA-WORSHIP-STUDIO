@@ -45,9 +45,58 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Helpers de validación de elegibilidad para Cache API y almacenamiento seguro
+/**
+ * Valida si una solicitud y su respuesta son estrictamente elegibles para almacenarse en la Cache API.
+ * 
+ * Reglas de elegibilidad:
+ * 1. El esquema de la URL debe ser estrictamente 'http:' o 'https:'.
+ * 2. El método HTTP debe ser 'GET' (Cache API specification RFC 7231 / W3C).
+ * 3. La respuesta debe existir y tener código HTTP 200 (OK).
+ * 4. La respuesta debe ser de tipo 'basic' o 'cors' (no opaque ni error).
+ * 5. La ruta no debe pertenecer a endpoints protegidos de la API REST (/api/).
+ */
+function isCacheEligible(request, response, url) {
+  if (!request || !response || !url) return false;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  if (request.method !== 'GET') return false;
+  if (response.status !== 200) return false;
+  if (response.type !== 'basic' && response.type !== 'cors') return false;
+  if (url.pathname.startsWith('/api/')) return false;
+  return true;
+}
+
+/**
+ * Ejecuta una escritura segura en la Cache API, capturando fallos de almacenamiento
+ * (p. ej. cuota excedida, aborto de conexión o restricciones del navegador)
+ * sin interrumpir el flujo de red hacia el cliente ni generar excepciones no controladas.
+ */
+async function safelyPutInCache(cacheName, request, response) {
+  try {
+    const cache = await caches.open(cacheName);
+    await cache.put(request, response);
+  } catch (cacheError) {
+    // Si falla el almacenamiento en caché (p. ej. QuotaExceededError),
+    // se registra de forma limpia sin exponer parámetros sensibles de la URL.
+    const sanitizedUrl = typeof request.url === 'string' ? request.url.split('?')[0] : 'unknown';
+    console.warn('[ServiceWorker] No se pudo escribir en Cache API:', {
+      url: sanitizedUrl,
+      error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+    });
+  }
+}
+
 // 3. Estrategia de Enrutamiento y Fetch
 self.addEventListener('fetch', (event) => {
   const request = event.request;
+
+  // REGLA CRÍTICA DE ESQUEMA:
+  // Ignorar inmediatamente esquemas no HTTP(S) como chrome-extension:, chrome:, file:, blob:, data:.
+  // El navegador manejará estas peticiones de forma nativa sin pasar por la Cache API.
+  if (!request.url.startsWith('http://') && !request.url.startsWith('https://')) {
+    return;
+  }
+
   const url = new URL(request.url);
 
   // INVARIANTE DE SEGURIDAD Y AISLAMIENTO:
@@ -75,15 +124,12 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Solicitudes de Navegación (HTML de la aplicación SPA): Network-First con fallback a cache
-  if (request.mode === 'navigate') {
+  if (request.mode === 'navigate' && request.method === 'GET') {
     event.respondWith(
       fetch(request)
-        .then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            const responseToCache = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(request, responseToCache);
-            });
+        .then(async (networkResponse) => {
+          if (isCacheEligible(request, networkResponse, url)) {
+            await safelyPutInCache(CACHE_NAME, request, networkResponse.clone());
           }
           return networkResponse;
         })
@@ -102,17 +148,9 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
       const fetchPromise = fetch(request)
-        .then((networkResponse) => {
-          if (
-            networkResponse &&
-            networkResponse.status === 200 &&
-            request.method === 'GET' &&
-            !url.pathname.startsWith('/api/')
-          ) {
-            const responseToCache = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(request, responseToCache);
-            });
+        .then(async (networkResponse) => {
+          if (isCacheEligible(request, networkResponse, url)) {
+            await safelyPutInCache(CACHE_NAME, request, networkResponse.clone());
           }
           return networkResponse;
         })
@@ -125,3 +163,4 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
+

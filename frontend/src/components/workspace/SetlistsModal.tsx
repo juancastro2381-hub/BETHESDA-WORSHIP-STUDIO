@@ -28,6 +28,7 @@ import { useAuth } from '../../core/auth/use-auth.ts';
 import { SetlistDetailEditor } from './SetlistDetailEditor.tsx';
 import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
 import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
+import { ModalCloseButton, SetlistIcon, TrashIcon } from '../common/Icons.tsx';
 
 export type SetlistTab = 'ALL' | 'ACTIVE' | 'PLANNING' | 'HISTORY';
 
@@ -305,7 +306,7 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
         <div className="modal-header">
           <div className="setlists-modal-title-group">
             <span className="setlists-modal-icon" aria-hidden="true">
-              📋
+              <SetlistIcon size={24} />
             </span>
             <div>
               <h2 id={titleId} className="modal-title">
@@ -318,14 +319,11 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="modal-close-button"
+          <ModalCloseButton
             onClick={onClose}
-            aria-label="Cerrar ventana de repertorios"
-          >
-            ✕
-          </button>
+            label="Cerrar ventana de repertorios"
+            id="btn-close-setlists-modal"
+          />
         </div>
 
         {/* Mensajes de Alerta y Éxito en vista de catálogo */}
@@ -610,7 +608,7 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
                               title="Eliminar este repertorio"
                               aria-label={`Eliminar repertorio ${s.title}`}
                             >
-                              🗑️
+                              <TrashIcon size={16} />
                             </button>
                           )}
                         </div>

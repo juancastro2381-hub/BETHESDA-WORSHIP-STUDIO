@@ -8,6 +8,7 @@ import React, { useState, useEffect, useId } from 'react';
 import { useOffline } from '../../core/offline/use-offline.ts';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 import type { OfflineResourceMetadata, OfflineResourceType } from '../../core/offline/types.ts';
+import { ModalCloseButton, CloseIcon, TrashIcon } from '../common/Icons.tsx';
 
 export interface OfflineInventoryModalProps {
   readonly isOpen: boolean;
@@ -130,14 +131,11 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="btn-modal-close"
+          <ModalCloseButton
             onClick={onClose}
-            aria-label="Cerrar inventario"
-          >
-            ✕
-          </button>
+            label="Cerrar inventario"
+            id="btn-close-offline-modal"
+          />
         </div>
 
         {/* Resumen de Almacenamiento */}
@@ -244,8 +242,9 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                 setPlayingAudioUrl(null);
               }}
               title="Cerrar reproductor"
+              aria-label="Cerrar reproductor"
             >
-              ✕
+              <CloseIcon size={16} />
             </button>
           </div>
         )}
@@ -393,7 +392,8 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                     title="Eliminar solo de este dispositivo"
                     id={`btn-delete-offline-${item.id}`}
                   >
-                    {deletingId === item.id ? '...' : '🗑️ Eliminar'}
+                    <TrashIcon size={14} />
+                    <span>{deletingId === item.id ? '...' : 'Eliminar'}</span>
                   </button>
                 </div>
               </div>

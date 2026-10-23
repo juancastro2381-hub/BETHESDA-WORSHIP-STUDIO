@@ -487,12 +487,12 @@ body {
 .scenario-name {
   font-size: 1.1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .scenario-desc {
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   line-height: 1.4;
 }
 
@@ -522,9 +522,9 @@ body {
 }
 
 .btn-toggle {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-main);
+  background: var(--bg-surface-elevated, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-medium, var(--border-subtle));
+  color: var(--text-primary, var(--text-main));
   padding: 0.4rem 0.85rem;
   border-radius: 6px;
   font-size: 0.85rem;
@@ -533,7 +533,9 @@ body {
 }
 
 .btn-toggle:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--bg-card-hover, rgba(255, 255, 255, 0.1));
+  color: var(--gold-primary);
+  border-color: var(--gold-primary);
 }
 
 .btn-toggle.active {
@@ -759,12 +761,12 @@ body {
 .preset-title {
   font-size: 1.1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .preset-desc {
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   line-height: 1.4;
 }
 
@@ -806,7 +808,7 @@ body {
 .song-title {
   font-size: 1.45rem;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--text-primary);
   letter-spacing: 0.02em;
 }
 
@@ -938,9 +940,9 @@ body {
 }
 
 .pill-btn {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-subtle);
-  color: #d1d5db;
+  background: var(--bg-surface-elevated, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-medium, var(--border-subtle));
+  color: var(--text-primary, #d1d5db);
   padding: 0.35rem 0.75rem;
   border-radius: 9999px;
   font-size: 0.8rem;
@@ -950,8 +952,9 @@ body {
 
 .pill-btn:hover,
 .pill-btn:focus-visible {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: var(--bg-card-hover, rgba(255, 255, 255, 0.12));
+  color: var(--gold-primary);
+  border-color: var(--gold-primary);
 }
 
 .pill-btn.active {
@@ -5676,38 +5679,69 @@ body {
    LIGHT THEME ADAPTATIONS & ELEVATIONS (WORKSTREAM B)
    ========================================================================= */
 
+/* Scenario Presets & Cards */
+[data-theme="light"] .preset-card,
 [data-theme="light"] .scenario-card {
-  background: var(--bg-card);
-  border-color: var(--border-subtle);
+  background: #ffffff;
+  border: 1px solid var(--border-subtle);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
+[data-theme="light"] .preset-card:hover,
+[data-theme="light"] .preset-card:focus-visible,
 [data-theme="light"] .scenario-card:hover {
-  background: var(--bg-card-hover);
-  border-color: var(--border-active);
-  box-shadow: 0 8px 24px rgba(217, 119, 6, 0.12);
-}
-
-[data-theme="light"] .scenario-card.active {
-  background: rgba(217, 119, 6, 0.08);
+  background: #f8fafc;
   border-color: var(--gold-primary);
-  box-shadow: 0 0 16px rgba(217, 119, 6, 0.15);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(217, 119, 6, 0.12);
 }
 
+[data-theme="light"] .preset-card.active,
+[data-theme="light"] .scenario-card.active {
+  background: #fffbeb;
+  border: 2px solid var(--gold-primary);
+  box-shadow: 0 0 0 1px var(--gold-primary), 0 4px 12px rgba(217, 119, 6, 0.14);
+}
+
+[data-theme="light"] .preset-title,
+[data-theme="light"] .scenario-name {
+  color: #0f172a !important;
+}
+
+[data-theme="light"] .preset-desc,
+[data-theme="light"] .scenario-desc {
+  color: #334155 !important;
+}
+
+[data-theme="light"] .preset-badge {
+  color: #b45309;
+}
+
+[data-theme="light"] .active-indicator {
+  background: #d97706;
+  color: #ffffff;
+}
+
+/* Control Cards & Workspace Labels */
 [data-theme="light"] .control-card {
-  background: var(--bg-card);
+  background: #ffffff;
   border-color: var(--border-subtle);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 [data-theme="light"] .control-card-label {
-  color: var(--text-muted);
+  color: #1e293b;
+  font-weight: 700;
+}
+
+[data-theme="light"] .control-card-hint {
+  color: #475569;
 }
 
 [data-theme="light"] .workspace-select {
-  background: var(--bg-input);
+  background: #ffffff;
   border-color: var(--border-medium);
-  color: var(--text-primary);
+  color: #0f172a;
 }
 
 [data-theme="light"] .workspace-select:focus {
@@ -5715,23 +5749,212 @@ body {
   box-shadow: 0 0 0 2px var(--gold-glow);
 }
 
-[data-theme="light"] .pill-btn {
-  background: var(--bg-surface-elevated);
+/* Song Selector & Catalog Pills */
+[data-theme="light"] .song-selector-container {
+  background: #ffffff;
   border-color: var(--border-subtle);
-  color: var(--text-secondary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-[data-theme="light"] .pill-btn:hover {
-  background: var(--border-medium);
-  color: var(--text-primary);
+[data-theme="light"] .pill-btn {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+  font-weight: 500;
+}
+
+[data-theme="light"] .pill-btn:hover,
+[data-theme="light"] .pill-btn:focus-visible {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+  color: #0f172a;
 }
 
 [data-theme="light"] .pill-btn.active {
-  background: var(--gold-primary);
+  background: linear-gradient(135deg, #d97706, #b45309);
   color: #ffffff;
-  border-color: var(--gold-primary);
+  border-color: #b45309;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(217, 119, 6, 0.25);
 }
 
+/* Generic Toggle Buttons (Capo, Chords, Steps, etc.) */
+[data-theme="light"] .btn-toggle {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+  font-weight: 500;
+}
+
+[data-theme="light"] .btn-toggle:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+[data-theme="light"] .btn-toggle.active {
+  background: linear-gradient(135deg, #d97706, #b45309);
+  color: #ffffff;
+  border-color: #b45309;
+  font-weight: 700;
+}
+
+/* Action Trigger Buttons in Catalog Bar */
+[data-theme="light"] .btn-toggle-setlists-modal {
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+  font-weight: 600;
+}
+
+[data-theme="light"] .btn-toggle-setlists-modal:hover {
+  background: #fef3c7;
+  border-color: #d97706;
+  color: #78350f;
+}
+
+[data-theme="light"] .btn-toggle-setlists-modal.active {
+  background: #d97706;
+  color: #ffffff;
+  border-color: #b45309;
+}
+
+[data-theme="light"] .btn-toggle-db-modal {
+  background: #f0f9ff;
+  border: 1px solid #7dd3fc;
+  color: #0369a1;
+  font-weight: 600;
+}
+
+[data-theme="light"] .btn-toggle-db-modal:hover {
+  background: #e0f2fe;
+  border-color: #0284c7;
+  color: #075985;
+}
+
+[data-theme="light"] .btn-toggle-db-modal.active {
+  background: #0284c7;
+  color: #ffffff;
+  border-color: #0369a1;
+}
+
+[data-theme="light"] .btn-toggle-uploader {
+  background: #faf5ff;
+  border: 1px solid #d8b4fe;
+  color: #6b21a8;
+  font-weight: 600;
+}
+
+[data-theme="light"] .btn-toggle-uploader:hover {
+  background: #f3e8ff;
+  border-color: #9333ea;
+  color: #581c87;
+}
+
+[data-theme="light"] .btn-toggle-uploader.active {
+  background: #9333ea;
+  color: #ffffff;
+  border-color: #7e22ce;
+}
+
+/* Active Song Header & Badges */
+[data-theme="light"] .workspace-song-header {
+  background: #ffffff;
+  border-color: var(--border-subtle);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .song-title {
+  color: #0f172a;
+}
+
+[data-theme="light"] .badge-meter {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #1e293b;
+}
+
+[data-theme="light"] .badge-key {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+  color: #0369a1;
+}
+
+[data-theme="light"] .badge-tempo {
+  background: #fef3c7;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+[data-theme="light"] .badge-measures {
+  background: #e0e7ff;
+  border-color: #c7d2fe;
+  color: #3730a3;
+}
+
+[data-theme="light"] .badge-sections {
+  background: #f3e8ff;
+  border-color: #e9d5ff;
+  color: #6b21a8;
+}
+
+[data-theme="light"] .badge-lead-pure {
+  background: #d1fae5;
+  border-color: #a7f3d0;
+  color: #065f46;
+}
+
+/* Reading Formats Selector */
+[data-theme="light"] .reading-format-selector-card {
+  background: #ffffff;
+  border-color: var(--border-subtle);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .btn-reading-format {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+[data-theme="light"] .btn-reading-format:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: var(--gold-primary);
+  box-shadow: 0 4px 12px rgba(217, 119, 6, 0.1);
+}
+
+[data-theme="light"] .btn-reading-format.active {
+  background: #fffbeb;
+  border-color: var(--gold-primary);
+  box-shadow: 0 0 12px rgba(217, 119, 6, 0.12);
+}
+
+[data-theme="light"] .fmt-label {
+  color: #0f172a;
+}
+
+[data-theme="light"] .fmt-desc {
+  color: #475569;
+}
+
+[data-theme="light"] .btn-save-preference {
+  background: #fffbeb;
+  border-color: #f59e0b;
+  color: #b45309;
+}
+
+[data-theme="light"] .btn-save-preference:hover:not(:disabled) {
+  background: #fef3c7;
+  border-color: #d97706;
+  color: #92400e;
+}
+
+[data-theme="light"] .btn-save-preference.is-preferred {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #065f46;
+}
+
+/* Renderer Status & Transposition */
 [data-theme="light"] .renderer-status-container {
   background: var(--bg-card);
   border-color: var(--border-subtle);
@@ -5739,9 +5962,99 @@ body {
 }
 
 [data-theme="light"] .transposition-display {
-  background: rgba(0, 0, 0, 0.04);
+  background: #f8fafc;
   border-color: var(--border-medium);
   color: var(--gold-primary);
+  font-weight: 700;
+}
+
+/* Service Moment & Setlist Navigation in Light Mode */
+[data-theme="light"] .setlist-item-title {
+  color: #0f172a;
+}
+
+[data-theme="light"] .setlist-item-musical-detail {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+[data-theme="light"] .item-mode-badge.song {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+  color: #0369a1;
+}
+
+[data-theme="light"] .item-mode-badge.service-moment {
+  background: #f3e8ff;
+  border-color: #d8b4fe;
+  color: #7e22ce;
+}
+
+[data-theme="light"] .btn-nav-touch {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+[data-theme="light"] .btn-nav-touch:hover:not(:disabled) {
+  background: #e2e8f0;
+  border-color: var(--gold-primary);
+  color: #b45309;
+}
+
+[data-theme="light"] .btn-nav-next {
+  background: #fffbeb;
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+[data-theme="light"] .position-current {
+  color: #0f172a;
+}
+
+[data-theme="light"] .setlist-offsetlist-banner {
+  background: #fffbeb;
+  border-color: #f59e0b;
+}
+
+[data-theme="light"] .offsetlist-text {
+  color: #92400e;
+}
+
+[data-theme="light"] .service-moment-card {
+  background: #ffffff;
+  border-color: rgba(217, 119, 6, 0.4);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .service-moment-title {
+  color: #0f172a;
+}
+
+[data-theme="light"] .service-moment-notes-block {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+[data-theme="light"] .service-moment-notes-text {
+  color: #1e293b;
+}
+
+[data-theme="light"] .section-subtitle {
+  color: #475569;
+}
+
+[data-theme="light"] .service-moment-transition-block {
+  background: #fffbeb;
+  border-left-color: #d97706;
+}
+
+[data-theme="light"] .transition-subtitle {
+  color: #92400e;
+}
+
+[data-theme="light"] .transition-notes-text {
+  color: #78350f;
 }
 
 [data-theme="light"] .setlist-navigation-toolbar {

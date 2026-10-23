@@ -237,6 +237,7 @@ All visual evidence has been captured and archived in `docs/reports/screenshots/
 | **Mobile Compact** | `375×812` | Dark | `mobile_header_375x812_dark_1792768310602.png` | Zero text truncation, emblem intact, no clipped action buttons. |
 | **Mobile Compact** | `375×812` | Light | `mobile_header_375x812_light_1792768349218.png` | High-contrast light header, clean touch-friendly icons. |
 | **Mobile Modal** | `390×844` | Light | `mobile_modal_390x844_light_1792768444500.png` | Full-width responsive modal card, internal scrolling body, sticky close button. |
+| **Workspace Light Text Remediation** | `1440×900` | Light | `light_mode_text_legibility_remediated.png` | Verified fix for scenario titles (A, B, C, D), song pills, catalog action buttons, and active song header with 100% legibility and WCAG AA contrast. |
 
 ---
 

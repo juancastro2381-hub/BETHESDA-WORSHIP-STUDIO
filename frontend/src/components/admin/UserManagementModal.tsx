@@ -13,6 +13,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { BethesdaApiClient, type FrontendUserEntity } from '../../core/api/api-client.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import type { UserRole, AccountStatus } from '../../core/auth/types.ts';
@@ -25,14 +26,6 @@ const ROLE_LABELS: Record<UserRole, string> = {
   VIEWER: 'Lector / Espectador',
 };
 
-const ROLE_COLORS: Record<UserRole, string> = {
-  SUPER_ADMIN: '#ec4899', // Rosa
-  ADMIN: '#8b5cf6', // Púrpura
-  WORSHIP_LEADER: '#3b82f6', // Azul
-  MUSICIAN: '#10b981', // Verde
-  VIEWER: '#64748b', // Gris
-};
-
 const STATUS_LABELS: Record<AccountStatus, string> = {
   ACTIVE: 'Activo',
   PENDING_INVITATION: 'Invitación Pendiente',
@@ -40,15 +33,6 @@ const STATUS_LABELS: Record<AccountStatus, string> = {
   SUSPENDED: 'Suspendido',
   LOCKED: 'Bloqueado Temporalmente',
   DISABLED: 'Deshabilitado',
-};
-
-const STATUS_COLORS: Record<AccountStatus, { bg: string; text: string; border: string }> = {
-  ACTIVE: { bg: 'rgba(16, 185, 129, 0.15)', text: '#34d399', border: 'rgba(16, 185, 129, 0.4)' },
-  PENDING_INVITATION: { bg: 'rgba(245, 158, 11, 0.15)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.4)' },
-  MUST_CHANGE_PASSWORD: { bg: 'rgba(56, 189, 248, 0.15)', text: '#38bdf8', border: 'rgba(56, 189, 248, 0.4)' },
-  SUSPENDED: { bg: 'rgba(239, 68, 68, 0.15)', text: '#f87171', border: 'rgba(239, 68, 68, 0.4)' },
-  LOCKED: { bg: 'rgba(225, 29, 72, 0.15)', text: '#fb7185', border: 'rgba(225, 29, 72, 0.4)' },
-  DISABLED: { bg: 'rgba(100, 116, 139, 0.15)', text: '#94a3b8', border: 'rgba(100, 116, 139, 0.4)' },
 };
 
 export interface UserManagementModalProps {
@@ -128,6 +112,9 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     if (!isOpen) return;
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    if (typeof window !== 'undefined' && window.scrollX > 0) {
+      window.scrollTo({ left: 0, top: window.scrollY });
+    }
     return () => {
       document.body.style.overflow = originalOverflow;
     };
@@ -298,7 +285,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     }
   };
 
-  return (
+  const modalContent = (
     <div
       className="modal-backdrop user-mgmt-backdrop"
       role="dialog"
@@ -364,7 +351,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
             <button
               type="button"
               onClick={() => setSuccessMessage(null)}
-              style={{ background: 'none', border: 'none', color: '#86efac', cursor: 'pointer' }}
+              className="btn-dismiss-success"
+              aria-label="Cerrar mensaje de éxito"
             >
               ✕
             </button>
@@ -377,10 +365,10 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
               <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>⚠️</span>
               <div style={{ flex: 1 }}>
-                <strong style={{ color: '#fde047', display: 'block', marginBottom: '0.25rem' }}>
+                <strong className="user-mgmt-invite-link-title">
                   [CONTINGENCIA OPERATIVA / DESARROLLO]: Servidor de correo SMTP no configurado
                 </strong>
-                <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.82rem', color: '#cbd5e1' }}>
+                <p className="user-mgmt-invite-link-desc">
                   El correo no fue despachado automáticamente porque el servidor SMTP no está configurado en este entorno. En producción es obligatorio un proveedor de correo saliente. Como contingencia operativa controlada, entregue este enlace seguro de activación de un solo uso (válido por 72 horas) directamente al integrante:
                 </p>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -388,8 +376,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                     type="text"
                     readOnly
                     value={generatedInviteLink}
-                    className="auth-input"
-                    style={{ fontSize: '0.8rem', padding: '0.35rem 0.6rem', flex: 1, background: '#0f172a' }}
+                    className="auth-input user-mgmt-invite-link-input"
                     id="generated-invite-url-input"
                   />
                   <button
@@ -601,18 +588,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                   const cannotModifyDueToRole = !isSuperAdmin && isTargetSuperAdmin;
                   const isActionPending = actionInProgressId === targetUser.id;
 
-                  const roleColor = ROLE_COLORS[targetUser.role] || '#64748b';
-                  const statusStyle = STATUS_COLORS[targetUser.accountStatus] || {
-                    bg: 'rgba(100, 116, 139, 0.2)',
-                    text: '#94a3b8',
-                    border: 'rgba(100, 116, 139, 0.4)',
-                  };
-
                   return (
                     <tr key={targetUser.id} className={isSelf ? 'user-row-self' : ''}>
                       <td>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
-                          <span style={{ fontWeight: 600, color: 'var(--text-primary, #f8fafc)' }}>
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
                             {targetUser.firstName} {targetUser.lastName}
                             {isSelf && (
                               <span className="user-self-pill" title="Tu cuenta actual">
@@ -620,37 +600,23 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                               </span>
                             )}
                           </span>
-                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>{targetUser.email}</span>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{targetUser.email}</span>
                         </div>
                       </td>
 
                       <td>
-                        <span
-                          className="user-role-badge"
-                          style={{
-                            backgroundColor: `${roleColor}22`,
-                            color: roleColor,
-                            borderColor: roleColor,
-                          }}
-                        >
+                        <span className={`user-role-badge role-${targetUser.role}`}>
                           {ROLE_LABELS[targetUser.role] || targetUser.role}
                         </span>
                       </td>
 
                       <td>
-                        <span
-                          className="user-status-pill"
-                          style={{
-                            backgroundColor: statusStyle.bg,
-                            color: statusStyle.text,
-                            borderColor: statusStyle.border,
-                          }}
-                        >
+                        <span className={`user-status-pill status-${targetUser.accountStatus}`}>
                           {STATUS_LABELS[targetUser.accountStatus] || targetUser.accountStatus}
                         </span>
                       </td>
 
-                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted, #94a3b8)' }}>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                         {new Date(targetUser.createdAt).toLocaleDateString()}
                       </td>
 
@@ -770,11 +736,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               <h3 id="change-role-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
                 Modificar Rol de {userToModifyRole.firstName} {userToModifyRole.lastName}
               </h3>
-              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted, #94a3b8)', margin: '0 0 1rem 0' }}>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '0 0 1rem 0' }}>
                 El cambio revocará todas las sesiones activas del usuario, forzándolo a iniciar sesión nuevamente con las nuevas atribuciones.
               </p>
               <div className="form-group" style={{ marginBottom: '1.25rem' }}>
-                <label htmlFor="select-new-role" style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #cbd5e1)' }}>
+                <label htmlFor="select-new-role" style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                   Nuevo Rol Asignado:
                 </label>
                 <select
@@ -827,7 +793,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               <h3 id="status-toggle-title" style={{ fontSize: '1.05rem', margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
                 {statusActionType === 'SUSPEND' ? 'Confirmar Suspensión de Cuenta' : 'Confirmar Reactivación de Cuenta'}
               </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary, #cbd5e1)', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
                 {statusActionType === 'SUSPEND' ? (
                   <>
                     ¿Está seguro de que desea suspender la cuenta de <strong>{userToToggleStatus.email}</strong>?
@@ -869,4 +835,12 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       </div>
     </div>
   );
+
+  // Renderizar a través de React Portal directamente en document.body
+  // para neutralizar interferencias de stacking context causadas por backdrop-filter en cabeceras o contenedores padre.
+  if (typeof document !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+
+  return modalContent;
 };

@@ -3,7 +3,8 @@
  * @description Modal de autenticación de Bethesda Worship Studio con soporte para MUST_CHANGE_PASSWORD (Fase 2B).
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/use-auth.ts';
 
 interface LoginModalProps {
@@ -21,6 +22,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Bloqueo de scroll del body mientras el modal está activo
+  useEffect(() => {
+    if (!isOpen) return;
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -98,7 +109,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  return (
+  const modalContent = (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
       <div className="modal-content auth-modal">
         <div className="modal-header">
@@ -238,4 +249,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+
+  return modalContent;
 };

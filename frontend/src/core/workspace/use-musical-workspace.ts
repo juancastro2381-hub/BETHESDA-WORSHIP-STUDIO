@@ -63,11 +63,11 @@ export interface UseMusicalWorkspaceOptions {
 export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   readonly viewResult: IWorkspaceViewResult;
   readonly availableInstruments: readonly InstrumentProfile[];
-  readonly importedMeta: { sourceName?: string; format: string } | null;
+  readonly importedMeta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined } | null;
   readonly persistedMeta: { isPersisted: boolean; songId: string; versionNumber: number } | null;
   readonly applyPreset: (presetId: GoldenScenarioId) => void;
   readonly selectSong: (song: CanonicalMusicPayload) => void;
-  readonly importSong: (song: CanonicalMusicPayload, meta: { sourceName?: string; format: string }) => void;
+  readonly importSong: (song: CanonicalMusicPayload, meta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined }) => void;
   readonly selectPersistedSong: (song: CanonicalMusicPayload, meta: { isPersisted: boolean; songId: string; versionNumber: number }) => void;
   readonly selectInstrument: (instrumentId: InstrumentId) => void;
   readonly setPrimaryRepresentation: (representation: ViewRepresentation) => void;
@@ -87,7 +87,13 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     options.initialSong ?? initialPreset.canonicalSongFactory()
   );
 
-  const [importedMeta, setImportedMeta] = useState<{ sourceName?: string; format: string } | null>(null);
+  const [importedMeta, setImportedMeta] = useState<{
+    sourceName?: string | undefined;
+    format: string;
+    isVisualOnly?: boolean | undefined;
+    documentUrl?: string | undefined;
+    storageKey?: string | undefined;
+  } | null>(null);
   const [persistedMeta, setPersistedMeta] = useState<{ isPersisted: boolean; songId: string; versionNumber: number } | null>(null);
 
   // Referencia a la preferencia o formato deseado por el usuario (F-04).
@@ -138,15 +144,27 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   }, []);
 
   // Importar partitura desde archivo real
-  const importSong = useCallback((song: CanonicalMusicPayload, meta: { sourceName?: string; format: string }) => {
-    setActiveSong(song);
-    setImportedMeta(meta);
-    setPersistedMeta(null);
-    setState((prev) => {
-      const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
-      return transitionSelectSong(prev, song, profile, preferredFormatRef.current);
-    });
-  }, []);
+  const importSong = useCallback(
+    (
+      song: CanonicalMusicPayload,
+      meta: {
+        sourceName?: string | undefined;
+        format: string;
+        isVisualOnly?: boolean | undefined;
+        documentUrl?: string | undefined;
+        storageKey?: string | undefined;
+      }
+    ) => {
+      setActiveSong(song);
+      setImportedMeta(meta);
+      setPersistedMeta(null);
+      setState((prev) => {
+        const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
+        return transitionSelectSong(prev, song, profile, preferredFormatRef.current);
+      });
+    },
+    []
+  );
 
   // Cargar canción persistida desde base de datos PostgreSQL
   const selectPersistedSong = useCallback((song: CanonicalMusicPayload, meta: { isPersisted: boolean; songId: string; versionNumber: number }) => {

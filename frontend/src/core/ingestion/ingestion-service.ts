@@ -11,12 +11,14 @@
  * 6. Garantizar que el modelo canónico producido es la única fuente de verdad y permanece inmutable.
  */
 
+import { CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
+import { Timeline } from '../canonical-model/timeline.ts';
 import { CanonicalModelValidator } from '../canonical-model/validator.ts';
 import { IngestionResult } from './importer-contract.ts';
 import { ProvenanceManager } from './provenance.ts';
 import { type ImportOptions, type IngestionStatus } from './types.ts';
 import { UnifiedMusicImporter } from './unified-importer.ts';
-import { IngestionValidator, MAX_SAFE_FILE_SIZE_BYTES } from './validation.ts';
+import { IngestionValidator, MAX_SAFE_FILE_SIZE_BYTES, MAX_DOCUMENT_FILE_SIZE_BYTES } from './validation.ts';
 
 export class IngestionService {
   private readonly unifiedImporter: UnifiedMusicImporter;
@@ -145,11 +147,16 @@ export class IngestionService {
    * Importa un archivo File provisto por la API del navegador (drag-and-drop o input file).
    */
   public async importBrowserFile(file: File, options?: ImportOptions): Promise<IngestionResult> {
-    if (file.size > MAX_SAFE_FILE_SIZE_BYTES) {
+    const detectedFormat = IngestionValidator.detectFormat('', file.name);
+    const isVisualDoc = detectedFormat === 'PDF' || detectedFormat === 'IMAGE';
+    const maxLimit = isVisualDoc ? MAX_DOCUMENT_FILE_SIZE_BYTES : MAX_SAFE_FILE_SIZE_BYTES;
+
+    if (file.size > maxLimit) {
+      const maxMb = (maxLimit / (1024 * 1024)).toFixed(0);
       return new IngestionResult({
         status: 'FAILED',
         provenance: ProvenanceManager.create({
-          sourceFormat: IngestionValidator.detectFormat('', file.name) === 'MUSIC_XML' ? 'MUSIC_XML' : 'CHORD_PRO',
+          sourceFormat: detectedFormat !== 'UNKNOWN' ? detectedFormat : 'CHORD_PRO',
           sourceName: file.name,
           importer: 'IngestionService',
           importerVersion: '1.0.0',
@@ -158,10 +165,44 @@ export class IngestionService {
           {
             code: 'INVALID_SOURCE',
             severity: 'ERROR',
-            message: `El archivo "${file.name}" excede el límite máximo permitido de 5 MB (${(file.size / (1024 * 1024)).toFixed(2)} MB).`,
-            context: { filename: file.name, size: file.size, limit: MAX_SAFE_FILE_SIZE_BYTES },
+            message: `El archivo "${file.name}" excede el límite máximo permitido de ${maxMb} MB (${(file.size / (1024 * 1024)).toFixed(2)} MB).`,
+            context: { filename: file.name, size: file.size, limit: maxLimit },
           },
         ],
+      });
+    }
+
+    // Si es un documento visual (PDF o imagen raster), generar resultado de atril visual sin fabricar notas
+    if (isVisualDoc) {
+      const baseName = file.name.replace(/\.[^/.]+$/, '');
+      const timeline = new Timeline({
+        totalDurationTicks: 0,
+        measureCount: 0,
+      });
+
+      const payload = new CanonicalMusicPayload({
+        title: baseName || 'Partitura Visual',
+        timeline,
+        measures: [],
+        sections: [],
+        instrumentTracks: [],
+      });
+
+      return new IngestionResult({
+        status: 'SUCCESS',
+        provenance: ProvenanceManager.create({
+          sourceFormat: detectedFormat,
+          sourceName: file.name,
+          importer: 'IngestionService',
+          importerVersion: '1.0.0',
+          inputMetadata: {
+            isVisualOnly: true,
+            fileSize: file.size,
+            mimeType: file.type || (detectedFormat === 'PDF' ? 'application/pdf' : 'image/png'),
+          },
+        }),
+        diagnostics: [],
+        payload,
       });
     }
 

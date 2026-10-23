@@ -53,7 +53,7 @@ export interface BackendVersionItem {
   versionNumber: number;
   name: string;
   description: string | null;
-  sourceFormat: 'MUSIC_XML' | 'CHORD_PRO' | 'INTERNAL';
+  sourceFormat: 'MUSIC_XML' | 'CHORD_PRO' | 'INTERNAL' | 'PDF' | 'IMAGE';
   canonicalPayload: CanonicalMusicPayloadJSON;
   totalMeasures: number;
   totalNotes: number;
@@ -696,6 +696,84 @@ export class BethesdaApiClient {
     const json = await res.json();
     return { message: json.message };
   }
+
+  /**
+   * Inspecciona y almacena un documento visual (PDF o imagen raster) validando firmas binarias.
+   */
+  public async inspectDocument(file: File): Promise<DocumentInspectionResultDTO> {
+    const dataBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result.includes(',') ? result.split(',')[1]! : result;
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error('Fallo al leer archivo para subida en base64'));
+      reader.readAsDataURL(file);
+    });
+
+    const res = await this.fetchWithAuth('/documents/inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/png'),
+        dataBase64,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al inspeccionar documento: HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Persiste un documento visual inspeccionado como canción en el catálogo canónico (modo Atril Visual).
+   */
+  public async importVisualDocumentSong(payload: {
+    storageKey: string;
+    filename: string;
+    mimeType: string;
+    title?: string;
+    artist?: string;
+  }): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth('/documents/import-song', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message ?? `Error al importar partitura visual: HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Retorna la URL directa autenticada para visualizar o descargar un documento físico.
+   */
+  public getDocumentFileUrl(storageKey: string): string {
+    return `${this.baseUrl}/documents/${encodeURIComponent(storageKey)}/file`;
+  }
+}
+
+export interface DocumentInspectionResultDTO {
+  documentId: string;
+  filename: string;
+  storageKey: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  checksumSha256: string;
+  detectedFormat: 'PDF' | 'IMAGE';
+  isVisualOnly: true;
+  uploadedAt: string;
 }
 
 export interface ListUsersParams {

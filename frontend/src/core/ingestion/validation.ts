@@ -11,7 +11,8 @@
 
 import { type Diagnostic, type ImportFormat } from './types.ts';
 
-export const MAX_SAFE_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_SAFE_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB para archivos estructurados (MusicXML, ChordPro)
+export const MAX_DOCUMENT_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB para documentos visuales (PDF, imágenes)
 
 export interface SourceValidationResult {
   readonly valid: boolean;
@@ -36,6 +37,19 @@ export class IngestionValidator {
         lower.endsWith('.crd')
       ) {
         return 'CHORD_PRO';
+      }
+      if (lower.endsWith('.pdf')) {
+        return 'PDF';
+      }
+      if (
+        lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.webp') ||
+        lower.endsWith('.tiff') ||
+        lower.endsWith('.tif')
+      ) {
+        return 'IMAGE';
       }
     }
 
@@ -68,16 +82,24 @@ export class IngestionValidator {
     filename?: string,
     sizeBytes?: number
   ): SourceValidationResult {
-    // 1. Verificación de tamaño seguro
+    // 1. Verificación de formato y tamaño seguro
+    const detected = IngestionValidator.detectFormat(source, filename);
+    const maxAllowed =
+      detected === 'PDF' || detected === 'IMAGE'
+        ? MAX_DOCUMENT_FILE_SIZE_BYTES
+        : MAX_SAFE_FILE_SIZE_BYTES;
+
     const effectiveSize = sizeBytes ?? new TextEncoder().encode(source).length;
-    if (effectiveSize > MAX_SAFE_FILE_SIZE_BYTES) {
+    if (effectiveSize > maxAllowed) {
+      const maxMb = (maxAllowed / (1024 * 1024)).toFixed(0);
       return {
         valid: false,
+        format: detected !== 'UNKNOWN' ? detected : undefined,
         diagnostic: {
           code: 'INVALID_SOURCE',
           severity: 'ERROR',
-          message: `El archivo excede el tamaño máximo permitido de 5 MB (tamaño recibido: ${(effectiveSize / (1024 * 1024)).toFixed(2)} MB).`,
-          context: { effectiveSize, maxAllowed: MAX_SAFE_FILE_SIZE_BYTES, filename },
+          message: `El archivo excede el tamaño máximo permitido de ${maxMb} MB (tamaño recibido: ${(effectiveSize / (1024 * 1024)).toFixed(2)} MB).`,
+          context: { effectiveSize, maxAllowed, filename },
         },
       };
     }

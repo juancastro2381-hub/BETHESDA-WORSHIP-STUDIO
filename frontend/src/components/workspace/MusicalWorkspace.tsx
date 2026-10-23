@@ -43,6 +43,7 @@ import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
 import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
+import { VisualDocumentStand } from './VisualDocumentStand.tsx';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -273,6 +274,26 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
 
   const concertKeyStr = derivedView?.concertKey.toString() ?? 'Sol Mayor';
 
+  // Detección de partitura o documento visual (PDF o imagen escaneada - Fase B)
+  const isVisualDocument = Boolean(
+    importedMeta?.isVisualOnly ||
+    importedMeta?.format === 'PDF' ||
+    importedMeta?.format === 'IMAGE' ||
+    (activeSong as any)?.metadata?.isVisualOnly ||
+    (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
+    (activeSong as any)?.metadata?.sourceFormat === 'IMAGE'
+  );
+
+  const documentVisualUrl =
+    importedMeta?.documentUrl ||
+    (importedMeta?.storageKey ? client.getDocumentFileUrl(importedMeta.storageKey) : undefined) ||
+    ((activeSong as any)?.metadata?.storageKey ? client.getDocumentFileUrl((activeSong as any).metadata.storageKey) : undefined);
+
+  const visualMimeType =
+    importedMeta?.format === 'PDF' || (activeSong as any)?.metadata?.sourceFormat === 'PDF'
+      ? 'application/pdf'
+      : 'image/png';
+
   return (
     <div className="musical-workspace-root">
       {/* 0. Barra de Navegación de Atril Litúrgico (WS7: Decisión 1 Aprobada: Top en Desktop/Tablet, Bottom en Mobile) */}
@@ -489,7 +510,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           {/* 5b. AutoscrollControl: Desplazamiento Automático Manos Libres (WP-05 — Sin Pedales) */}
           <AutoscrollControl
             controller={autoscroll}
-            isVisible={activeSong.measures.length > 0}
+            isVisible={activeSong.measures.length > 0 || isVisualDocument}
           />
 
           {/* 6. Viewport de Renderizado Musical Real */}
@@ -504,6 +525,13 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
                 <span className="auth-spinner" aria-hidden="true" />
                 <p>Cargando partitura del repertorio...</p>
               </div>
+            ) : isVisualDocument ? (
+              <VisualDocumentStand
+                title={activeSong.title || importedMeta?.sourceName || 'Documento Musical'}
+                documentUrl={documentVisualUrl}
+                mimeType={visualMimeType}
+                isSample={!documentVisualUrl}
+              />
             ) : activeSong.measures.length === 0 ? (
               <div className="workspace-empty-state" role="alert">
                 <div className="empty-icon">𝄞</div>

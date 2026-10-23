@@ -5,7 +5,7 @@
 
 import { CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 
-export type ImportFormat = 'MUSIC_XML' | 'CHORD_PRO';
+export type ImportFormat = 'MUSIC_XML' | 'CHORD_PRO' | 'PDF' | 'IMAGE';
 
 export type IngestionStatus = 'SUCCESS' | 'SUCCESS_WITH_WARNINGS' | 'FAILED';
 

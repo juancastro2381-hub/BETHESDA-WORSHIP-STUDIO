@@ -66,7 +66,7 @@ export class UnifiedMusicImporter {
         {
           code: 'UNSUPPORTED_FORMAT',
           severity: 'ERROR',
-          message: `Formato no soportado para el archivo "${filename ?? 'sin_nombre'}". Se requiere MusicXML 4.0 o ChordPro.`,
+          message: `Formato no soportado para el archivo "${filename ?? 'sin_nombre'}". Se admiten partituras MusicXML 4.0, cifrados ChordPro, documentos PDF e imágenes (PNG, JPG, WEBP, TIFF).`,
         },
       ],
     });

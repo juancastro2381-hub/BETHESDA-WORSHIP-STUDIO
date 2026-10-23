@@ -6,7 +6,7 @@
 import { z } from 'zod';
 
 export const SongReviewStatusSchema = z.enum(['DRAFT', 'APPROVED', 'ARCHIVED']);
-export const SongSourceFormatSchema = z.enum(['MUSIC_XML', 'CHORD_PRO', 'INTERNAL']);
+export const SongSourceFormatSchema = z.enum(['MUSIC_XML', 'CHORD_PRO', 'INTERNAL', 'PDF', 'IMAGE']);
 
 export const ListSongsQuerySchema = z.object({
   search: z.string().optional(),

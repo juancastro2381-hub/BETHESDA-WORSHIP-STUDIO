@@ -37,6 +37,16 @@ const StorageKeyParamSchema = z.object({
   storageKey: z.string().min(1),
 });
 
+const ConvertSongBodySchema = z.object({
+  pageNumber: z.number().int().min(1).default(1),
+  title: z.string().min(1).max(255),
+  artist: z.string().max(255).optional(),
+  key: z.string().max(16).default('C'),
+  targetFormat: z.enum(['SHEET_MUSIC', 'CHORDS_WITH_LYRICS', 'LYRICS_ONLY', 'TABLATURE']),
+  chordProContent: z.string().min(1),
+  lyricsOnlyContent: z.string().optional(),
+});
+
 export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const userRepo = new DrizzleUserRepository();
@@ -137,7 +147,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
       let authenticatedUserId: string | null = null;
 
       if (ticketQuery) {
-        // Validar ticket multimedia sin quemar inmediatamente para permitir visualización continua y recargas
+        // Validar ticket multimedia acotado por TTL (60s) y cuota máxima (25 peticiones)
         const ticketData = globalStreamTicketService.consumeTicket(
           {
             ticket: ticketQuery,
@@ -146,6 +156,14 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
           },
           false
         );
+
+        // Defensa en profundidad: Validar que el rol del ticket conserve el permiso songs:read
+        const permissions = ROLE_PERMISSIONS[ticketData.role as UserRole] || [];
+        if (!permissions.includes('songs:read')) {
+          throw new UnauthorizedError(
+            'El rol del usuario en el ticket no tiene permisos para visualizar documentos.'
+          );
+        }
         authenticatedUserId = ticketData.userId;
       } else {
         await authGuard.authenticate(request, reply);
@@ -177,11 +195,55 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
       reply.header('Content-Type', contentType);
       reply.header('Content-Length', fileData.fileSizeBytes);
       reply.header('Content-Disposition', `inline; filename="${encodeURIComponent(storageKey)}"`);
-      reply.header('Cache-Control', 'private, max-age=86400');
+      // F-01: Evitar exposición de credenciales y fuga de URLs temporales
+      reply.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+      reply.header('Pragma', 'no-cache');
+      reply.header('Referrer-Policy', 'no-referrer');
+      reply.header('X-Content-Type-Options', 'nosniff');
       reply.header('X-Checksum-Sha256', fileData.checksumSha256);
       reply.header('ETag', `"${fileData.checksumSha256}"`);
 
       return reply.status(200).send(fileData.buffer);
+    }
+  );
+
+  // 4. POST /api/v1/documents/:storageKey/analyze - Analizar documento y extraer canciones/acordes/letras
+  fastify.post(
+    '/:storageKey/analyze',
+    {
+      preHandler: [authGuard.requirePermission('songs:read')],
+    },
+    async (request, reply) => {
+      const { storageKey } = StorageKeyParamSchema.parse(request.params);
+      const result = await documentService.analyzeDocument(storageKey);
+      return reply.status(200).send({ data: result });
+    }
+  );
+
+  // 5. POST /api/v1/documents/:storageKey/convert-song - Convertir y persistir canción en formato de atril
+  fastify.post(
+    '/:storageKey/convert-song',
+    {
+      preHandler: [authGuard.requirePermission('songs:create')],
+    },
+    async (request, reply) => {
+      const { storageKey } = StorageKeyParamSchema.parse(request.params);
+      const body = ConvertSongBodySchema.parse(request.body);
+      const userId = request.user?.sub;
+
+      const created = await documentService.convertAndSaveSong({
+        storageKey,
+        pageNumber: body.pageNumber,
+        title: body.title,
+        artist: body.artist,
+        key: body.key,
+        targetFormat: body.targetFormat,
+        chordProContent: body.chordProContent,
+        lyricsOnlyContent: body.lyricsOnlyContent,
+        userId,
+      });
+
+      return reply.status(201).send({ data: created });
     }
   );
 };

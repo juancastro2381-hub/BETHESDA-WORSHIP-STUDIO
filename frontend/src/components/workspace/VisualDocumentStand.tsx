@@ -1,21 +1,25 @@
 /**
  * @file VisualDocumentStand.tsx
- * @description Componente accesible para lectura de partituras y documentos visuales (PDF e imágenes) en el atril digital (Fase B).
+ * @description Componente accesible para lectura de partituras y documentos visuales (PDF e imágenes) en el atril digital (Fase B / F-02 / F-03).
  *
- * Características:
- * - Soporte de recuperación autenticada de documentos seguros vía Blob en memoria (zero 401 auth errors en <iframe>/<img>).
- * - Navegación multipágina con indicador "Página X de Y", botones Anterior / Siguiente y salto de página.
- * - Extracción y presentación fidedigna de número real de páginas para documentos PDF multipágina.
- * - Controles ergonómicos de zoom (Ajustar al ancho, 50% a 200%).
- * - Rotación de documento (0°, 90°, 180°, 270°) para escaneos apaisados.
- * - Modo continuo y modo página única para compatibilidad con autoscroll (WP-05).
- * - Tratamiento explícito de estados: Carga, Error de recuperación, Formato TIFF no soportado nativamente, y Visualización exitosa.
+ * Características avanzadas:
+ * - Soporte de recuperación autenticada de documentos seguros vía Blob en memoria (zero 401 auth errors).
+ * - Distinción fidedigna entre modo PÁGINA ÚNICA (SINGLE) y FLUJO CONTINUO (CONTINUOUS):
+ *   * En modo CONTINUOUS con imágenes multipágina, renderiza la secuencia completa en pila vertical
+ *     con tarjetas de página y numeración visible, permitiendo autoscroll continuo (WP-05).
+ *   * En modo CONTINUOUS con PDF, habilita el flujo de documento continuo nativo con scroll vertical y anclaje por página.
+ *   * En modo SINGLE, aísla estrictamente la página activa en pantalla.
+ * - Manejo explícito de estado de verificación de páginas (isVerified): si el PDF tiene páginas no indexadas o comprimidas,
+ *   no bloquea la navegación ni afirma falsamente "de 1", permitiendo avanzar libremente.
+ * - Desplazamiento inteligente entre páginas en modo continuo (smooth scroll al elemento de página).
+ * - Controles ergonómicos de zoom (Ajustar al ancho, 50% a 200%) y rotación (0°, 90°, 180°, 270°).
+ * - Tratamiento explícito de TIFF con aviso descriptivo y descarga del archivo original.
  * - Ciclo de vida estricto con revocación automática de Object URLs para evitar fugas de memoria.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BethesdaApiClient } from '../../core/api/api-client.ts';
-import { extractPdfPageCount } from '../../core/ingestion/pdf-utils.ts';
+import { inspectPdfPageCount, extractPdfPageCount } from '../../core/ingestion/pdf-utils.ts';
 
 export interface VisualDocumentStandProps {
   readonly title: string;
@@ -48,6 +52,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [detectedPageCount, setDetectedPageCount] = useState<number>(pageCount || 1);
+  const [isPageCountVerified, setIsPageCountVerified] = useState<boolean>(true);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const createdBlobUrlRef = useRef<string | null>(null);
@@ -66,13 +71,11 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
   // SVG de partitura de muestra de alta fidelidad para pruebas directas en atril visual
   const sampleScoreSvg = `data:image/svg+xml;utf8,${encodeURIComponent(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100" width="100%" height="100%" style="background:#ffffff; font-family:sans-serif;">
-      <!-- Encabezado de la Partitura -->
       <text x="400" y="70" font-size="28" font-weight="bold" text-anchor="middle" fill="#0f172a">GRANDE ES TU FIDELIDAD</text>
       <text x="400" y="100" font-size="16" font-style="italic" text-anchor="middle" fill="#475569">Arreglo para Alabanza y Adoración — Bethesda Madrid</text>
       <text x="100" y="140" font-size="14" font-weight="bold" fill="#0f172a">Tono: D Mayor  |  Tempo: ♩ = 84  |  Compás: 3/4</text>
       <text x="700" y="140" font-size="14" text-anchor="end" fill="#64748b">Página 1 de 2</text>
 
-      <!-- Pentagrama 1 -->
       <g stroke="#334155" stroke-width="1.5">
         <line x1="80" y1="180" x2="720" y2="180"/>
         <line x1="80" y1="195" x2="720" y2="195"/>
@@ -107,7 +110,6 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
       <line x1="657" y1="225" x2="657" y2="170" stroke="#0f172a" stroke-width="2"/>
       <text x="650" y="265" font-size="14" text-anchor="middle" fill="#334155">ter - no</text>
 
-      <!-- Pie de página -->
       <line x1="80" y1="1020" x2="720" y2="1020" stroke="#cbd5e1" stroke-width="1"/>
       <text x="400" y="1050" font-size="12" text-anchor="middle" fill="#94a3b8">© Bethesda Worship Studio — Atril Digital de Notación y Documentos Visuales</text>
     </svg>
@@ -127,17 +129,22 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
       setIsLoading(false);
       setError(null);
 
-      // Si es PDF y el número de páginas es 1 o por defecto, intentar extraer el conteo real
+      // Si es PDF, intentar inspeccionar el conteo y verificación
       if (isPdf && typeof fetch !== 'undefined') {
         try {
           const res = await fetch(documentUrl);
           if (res.ok) {
             const buf = await res.arrayBuffer();
-            const count = extractPdfPageCount(buf);
-            if (count > 0) setDetectedPageCount(count);
+            const inspection = inspectPdfPageCount(buf);
+            if (inspection.isVerified && inspection.pageCount && inspection.pageCount > 0) {
+              setDetectedPageCount(inspection.pageCount);
+              setIsPageCountVerified(true);
+            } else {
+              setIsPageCountVerified(false);
+            }
           }
         } catch {
-          // Ignorar error de extracción de páginas
+          setIsPageCountVerified(false);
         }
       }
       return;
@@ -155,14 +162,19 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
           throw new Error('El documento recibido del servidor tiene tamaño binario cero.');
         }
 
-        // Extracción de número real de páginas para PDF
+        // Extracción e inspección de número real de páginas para PDF
         if (isPdf) {
           try {
             const arrayBuf = await blob.arrayBuffer();
-            const count = extractPdfPageCount(arrayBuf);
-            if (count > 0) setDetectedPageCount(count);
+            const inspection = inspectPdfPageCount(arrayBuf);
+            if (inspection.isVerified && inspection.pageCount && inspection.pageCount > 0) {
+              setDetectedPageCount(inspection.pageCount);
+              setIsPageCountVerified(true);
+            } else {
+              setIsPageCountVerified(false);
+            }
           } catch {
-            // Mantener pageCount original
+            setIsPageCountVerified(false);
           }
         }
 
@@ -190,17 +202,24 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
     if (isSample) {
       setResolvedBlobUrl(sampleScoreSvg);
       setDetectedPageCount(2);
+      setIsPageCountVerified(true);
     } else {
       setResolvedBlobUrl(null);
+      setIsPageCountVerified(false);
     }
     setIsLoading(false);
     setError(null);
   }, [documentUrl, storageKey, isPdf, isSample, sampleScoreSvg]);
 
   useEffect(() => {
-    // Resetear a página 1 al cambiar de documento
+    // Resetear al cambiar de documento para evitar estado inconsistente o fugas
     setCurrentPage(1);
+    setZoomLevel(100);
+    setRotationDegrees(0);
+    setError(null);
     setDetectedPageCount(pageCount || 1);
+    setIsPageCountVerified(true);
+
     resolveDocument();
 
     return () => {
@@ -213,19 +232,33 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
 
   const totalPages = pages && pages.length > 0 ? pages.length : Math.max(1, detectedPageCount);
 
+  // Desplazamiento suave al elemento de página en modo continuo
+  const scrollToPageElement = useCallback((pageNum: number) => {
+    if (viewMode === 'CONTINUOUS' && containerRef.current) {
+      const pageEl = containerRef.current.querySelector(`#visual-page-${pageNum}`);
+      if (pageEl) {
+        pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  }, [viewMode]);
+
   // Navegación de páginas
   const goToPreviousPage = () => {
     setCurrentPage((prev) => {
       const next = Math.max(1, prev - 1);
       if (onPageChange && next !== prev) onPageChange(next);
+      scrollToPageElement(next);
       return next;
     });
   };
 
   const goToNextPage = () => {
     setCurrentPage((prev) => {
-      const next = Math.min(totalPages, prev + 1);
+      // Si el conteo no es verificado, permitir avanzar libremente
+      const maxLimit = isPageCountVerified ? totalPages : prev + 1;
+      const next = Math.min(maxLimit, prev + 1);
       if (onPageChange && next !== prev) onPageChange(next);
+      scrollToPageElement(next);
       return next;
     });
   };
@@ -263,17 +296,24 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
         goToNextPage();
       } else if (e.key === 'r' || e.key === 'R') {
         handleRotate();
+      } else if (e.key === 'f' || e.key === 'F') {
+        toggleFitWidth();
+      } else if (e.key === 'c' || e.key === 'C') {
+        setViewMode((prev) => (prev === 'SINGLE' ? 'CONTINUOUS' : 'SINGLE'));
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [totalPages]);
+  }, [totalPages, isPageCountVerified, fitWidth]);
 
   const activePageUrl =
     pages && pages.length > 0
       ? pages[currentPage - 1]
       : resolvedBlobUrl || (isSample ? sampleScoreSvg : sampleScoreSvg);
+
+  const isNextDisabled =
+    isLoading || (isPageCountVerified && currentPage >= totalPages);
 
   return (
     <section
@@ -307,14 +347,23 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
           </button>
 
           <span className="visual-page-indicator" aria-live="polite">
-            Pág. <strong>{currentPage}</strong> de {totalPages}
+            {isPageCountVerified ? (
+              <>
+                Pág. <strong>{currentPage}</strong> de {totalPages}
+              </>
+            ) : (
+              <>
+                Pág. <strong>{currentPage}</strong>
+                <span className="visual-unverified-tag" title="Número de páginas no verificado por compresión de stream"> (flujo libre)</span>
+              </>
+            )}
           </span>
 
           <button
             type="button"
             className="btn-visual-nav"
             onClick={goToNextPage}
-            disabled={currentPage >= totalPages || isLoading}
+            disabled={isNextDisabled}
             aria-label="Página siguiente"
             title="Página siguiente (Flecha Derecha)"
           >
@@ -329,7 +378,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
             className={`btn-visual-action ${fitWidth ? 'active' : ''}`}
             onClick={toggleFitWidth}
             aria-pressed={fitWidth}
-            title="Ajustar al ancho de la pantalla"
+            title="Ajustar al ancho de la pantalla (F)"
           >
             ↔ Ajustar Ancho
           </button>
@@ -362,7 +411,7 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
             type="button"
             className="btn-visual-action"
             onClick={handleRotate}
-            title="Girar partitura 90 grados a la derecha"
+            title="Girar partitura 90 grados a la derecha (R)"
             aria-label={`Girar partitura (actual: ${rotationDegrees} grados)`}
           >
             ↻ Girar ({rotationDegrees}°)
@@ -370,9 +419,9 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
 
           <button
             type="button"
-            className="btn-visual-action"
+            className={`btn-visual-action ${viewMode === 'CONTINUOUS' ? 'active' : ''}`}
             onClick={() => setViewMode((prev) => (prev === 'SINGLE' ? 'CONTINUOUS' : 'SINGLE'))}
-            title="Alternar entre página única y flujo continuo para autoscroll"
+            title="Alternar entre página única y flujo continuo para autoscroll (C)"
             aria-pressed={viewMode === 'CONTINUOUS'}
           >
             {viewMode === 'CONTINUOUS' ? '📜 Flujo Continuo' : '📄 Página Única'}
@@ -380,10 +429,11 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
         </div>
       </header>
 
-      {/* Viewport del Documento con Soporte de Desplazamiento y Autoscroll */}
+      {/* Viewport del Documento con Soporte de Desplazamiento y Autoscroll (WP-05) */}
       <main
         ref={containerRef}
         className={`visual-document-viewport ${fitWidth ? 'fit-width' : ''} ${viewMode.toLowerCase()}`}
+        data-scrollable="true"
         tabIndex={0}
       >
         <div
@@ -435,27 +485,55 @@ export const VisualDocumentStand: React.FC<VisualDocumentStandProps> = ({
               )}
             </div>
           ) : isPdf && resolvedBlobUrl ? (
-            /* Visualización nativa de PDF mediante iframe sandboxed de alta fidelidad */
-            <iframe
-              key={`${resolvedBlobUrl}-p${currentPage}`}
-              src={`${resolvedBlobUrl}#page=${currentPage}&toolbar=0&navpanes=0`}
-              className="visual-pdf-embed"
-              title={`Partitura PDF: ${title} — Página ${currentPage} de ${totalPages}`}
-            />
-          ) : resolvedBlobUrl || isSample ? (
-            /* Visualización de Imágenes Raster (PNG, JPEG, WEBP) o Muestra SVG */
-            <img
-              src={resolvedBlobUrl || activePageUrl}
-              alt={`Partitura visual: ${title} — Página ${currentPage} de ${totalPages}`}
-              className="visual-sheet-image"
-              loading="eager"
-            />
+            /* Visualización de PDF: Distinción de modo SINGLE vs CONTINUOUS */
+            viewMode === 'CONTINUOUS' ? (
+              <iframe
+                key={`${resolvedBlobUrl}-continuous`}
+                src={`${resolvedBlobUrl}#page=${currentPage}&view=FitH&pagemode=none&toolbar=0&navpanes=0`}
+                className="visual-pdf-embed continuous"
+                title={`Partitura PDF: ${title} — Flujo Continuo`}
+              />
+            ) : (
+              <iframe
+                key={`${resolvedBlobUrl}-single-p${currentPage}`}
+                src={`${resolvedBlobUrl}#page=${currentPage}&view=Fit&toolbar=0&navpanes=0`}
+                className="visual-pdf-embed single"
+                title={`Partitura PDF: ${title} — Página ${currentPage} de ${totalPages}`}
+              />
+            )
+          ) : viewMode === 'CONTINUOUS' && pages && pages.length > 1 ? (
+            /* Modo CONTINUO para secuencia de imágenes raster multipágina */
+            <div className="visual-continuous-wrapper">
+              {pages.map((pageUrl, idx) => {
+                const pageNum = idx + 1;
+                return (
+                  <div
+                    key={pageNum}
+                    id={`visual-page-${pageNum}`}
+                    className={`visual-page-card ${currentPage === pageNum ? 'current-page' : ''}`}
+                  >
+                    <span className="visual-page-number-tag">
+                      Página {pageNum} de {totalPages}
+                    </span>
+                    <img
+                      src={pageUrl}
+                      alt={`Partitura visual: ${title} — Página ${pageNum} de ${totalPages}`}
+                      className="visual-sheet-image"
+                      loading={pageNum === 1 ? 'eager' : 'lazy'}
+                    />
+                  </div>
+                );
+              })}
+            </div>
           ) : (
-            /* Estado Vacío de Documento */
-            <div className="visual-empty-container" role="status">
-              <div className="visual-empty-icon">📄</div>
-              <h3>Documento No Disponible</h3>
-              <p>No se encontró un archivo binario válido asociado a esta partitura visual.</p>
+            /* Modo PÁGINA ÚNICA (o imagen única / muestra) */
+            <div className="visual-single-page-wrapper">
+              <img
+                src={resolvedBlobUrl || activePageUrl}
+                alt={`Partitura visual: ${title} — Página ${currentPage} de ${totalPages}`}
+                className="visual-sheet-image"
+                loading="eager"
+              />
             </div>
           )}
         </div>

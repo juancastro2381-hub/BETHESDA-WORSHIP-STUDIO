@@ -22,6 +22,8 @@ import { type SongWithVersion } from '../repositories/song-repository.ts';
 import { CanonicalMusicPayload } from '../../../frontend/src/core/canonical-model/canonical-music-payload.ts';
 import { Timeline } from '../../../frontend/src/core/canonical-model/timeline.ts';
 import { CanonicalSerializer } from '../domain/canonical-serializer.ts';
+import { PdfTextExtractor, type ExtractedDocument } from '../domain/documents/pdf-text-extractor.ts';
+import { ChordProImporter } from '../../../frontend/src/core/ingestion/chordpro/chordpro-importer.ts';
 
 export interface InspectDocumentParams {
   readonly buffer: Buffer;
@@ -225,6 +227,116 @@ export class DocumentService {
       metadata: {
         notes: `Importado como documento visual. Checksum SHA-256: ${fileData.checksumSha256}.`,
         tags: ['visual-stand', sourceFormat.toLowerCase()],
+      },
+    });
+
+    return created;
+  }
+
+  /**
+   * Analiza un documento almacenado y extrae canciones, acordes, letras y tablaturas estructuradas.
+   */
+  public async analyzeDocument(storageKey: string): Promise<{
+    storageKey: string;
+    totalPages: number;
+    songs: any[];
+    rawPagesText: any[];
+  }> {
+    const fileData = await this.getDocumentFile(storageKey);
+    const ext = path.extname(storageKey).toLowerCase();
+
+    if (ext === '.pdf') {
+      const extracted = PdfTextExtractor.extractFromBuffer(fileData.buffer);
+      return {
+        storageKey,
+        totalPages: extracted.totalPages,
+        songs: extracted.songs,
+        rawPagesText: extracted.rawPagesText,
+      };
+    }
+
+    return {
+      storageKey,
+      totalPages: 1,
+      songs: [],
+      rawPagesText: [],
+    };
+  }
+
+  /**
+   * Convierte y persiste una canción extraída hacia el catálogo de base de datos
+   * en el formato de atril seleccionado por el músico.
+   */
+  public async convertAndSaveSong(params: {
+    storageKey: string;
+    pageNumber: number;
+    title: string;
+    artist?: string | null | undefined;
+    key?: string | undefined;
+    targetFormat: 'SHEET_MUSIC' | 'CHORDS_WITH_LYRICS' | 'LYRICS_ONLY' | 'TABLATURE';
+    chordProContent: string;
+    lyricsOnlyContent?: string | null | undefined;
+    userId?: string | undefined;
+  }): Promise<SongWithVersion> {
+    const { storageKey, pageNumber, title, artist, key, targetFormat, chordProContent, lyricsOnlyContent } = params;
+
+    // Verificar existencia del archivo físico
+    const fileData = await this.getDocumentFile(storageKey);
+
+    // Invariante estricto: CERO fabricación de notas. La partitura tradicional requiere pentagramas/notas melódicas
+    if (targetFormat === 'SHEET_MUSIC') {
+      throw new ValidationError(
+        'El documento de origen es un cancionero de texto/cifrado sin pentagramas. No se puede generar una partitura tradicional de forma fidedigna sin inventar notas ficticias.'
+      );
+    }
+
+    // Normalizar mediante ChordProImporter hacia CanonicalMusicPayload
+    const importer = new ChordProImporter();
+    const ingestionResult = importer.import(chordProContent, {
+      sourceName: `${title}.chordpro`,
+      defaultKey: key || 'C',
+    });
+
+    if (ingestionResult.status !== 'SUCCESS' || !ingestionResult.payload) {
+      throw new ValidationError(
+        `Error al normalizar la canción hacia el modelo canónico: ${ingestionResult.diagnostics.map((d) => d.message).join(', ')}`
+      );
+    }
+
+    const canonicalJSON = CanonicalSerializer.serialize(ingestionResult.payload);
+
+    const formatLabels: Record<string, string> = {
+      CHORDS_WITH_LYRICS: 'Cifrado con Letra',
+      LYRICS_ONLY: 'Solo Letra',
+      TABLATURE: 'Tablatura y Acordes',
+    };
+
+    const created = await this.songService.createSong({
+      title: title.trim(),
+      artist: artist?.trim() || null,
+      defaultKey: key || 'C',
+      defaultBpm: 120,
+      timeSignature: '4/4',
+      status: 'APPROVED',
+      versionName: `${formatLabels[targetFormat] || 'Versión Convertida'} (Pág. ${pageNumber})`,
+      versionDescription: `Canción convertida a ${formatLabels[targetFormat] || targetFormat} desde documento ${storageKey} (Página ${pageNumber}).`,
+      sourceFormat: 'CHORD_PRO',
+      canonicalPayload: canonicalJSON,
+      sourceRecord: {
+        filename: `${title}.chordpro`,
+        rawContent: chordProContent,
+        importerName: 'ChordSheetConverter',
+        importerVersion: '1.0.0',
+      },
+      metadata: {
+        notes: JSON.stringify({
+          originalStorageKey: storageKey,
+          originalPageNumber: pageNumber,
+          targetFormat,
+          lyricsOnly: lyricsOnlyContent || null,
+          convertedAt: new Date().toISOString(),
+        }),
+        tags: ['converted', targetFormat.toLowerCase(), `page-${pageNumber}`],
       },
     });
 

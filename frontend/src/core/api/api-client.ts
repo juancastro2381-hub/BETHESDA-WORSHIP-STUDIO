@@ -827,6 +827,71 @@ export class BethesdaApiClient {
     const mimeType = res.headers.get('content-type') || blob.type || (storageKey.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/png');
     return { blob, filename, mimeType };
   }
+
+  /**
+   * Analiza un documento PDF o imagen almacenado y extrae canciones, acordes, letras y tablaturas.
+   */
+  public async analyzeDocument(storageKey: string): Promise<DocumentAnalysisResultDTO> {
+    const res = await this.fetchWithAuth(`/documents/${encodeURIComponent(storageKey)}/analyze`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Convierte y persiste una canción extraída hacia el catálogo canónico en el formato de atril seleccionado.
+   */
+  public async convertDocumentSong(payload: ConvertDocumentSongDTO): Promise<BackendSongResponse> {
+    const { storageKey, ...body } = payload;
+    const res = await this.fetchWithAuth(`/documents/${encodeURIComponent(storageKey)}/convert-song`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+}
+
+export interface DocumentAnalysisSongDTO {
+  id: string;
+  pageNumber: number;
+  title: string;
+  artist: string | null;
+  rawLines: string[];
+  column: 'LEFT' | 'RIGHT' | 'SINGLE';
+  hasChords: boolean;
+  hasTablature: boolean;
+  detectedKey: string | null;
+}
+
+export interface DocumentAnalysisResultDTO {
+  storageKey: string;
+  totalPages: number;
+  songs: DocumentAnalysisSongDTO[];
+  rawPagesText: Array<{
+    pageNumber: number;
+    text: string;
+    hasTwoColumns: boolean;
+  }>;
+}
+
+export interface ConvertDocumentSongDTO {
+  storageKey: string;
+  pageNumber: number;
+  title: string;
+  artist?: string | undefined;
+  key?: string | undefined;
+  targetFormat: 'SHEET_MUSIC' | 'CHORDS_WITH_LYRICS' | 'LYRICS_ONLY' | 'TABLATURE';
+  chordProContent: string;
+  lyricsOnlyContent?: string | undefined;
 }
 
 export interface DocumentInspectionResultDTO {

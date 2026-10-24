@@ -386,6 +386,10 @@ describe('Fase B — Ingesta de Documentos y Partituras Visuales (Backend Suite)
       assert.equal(viewRes.statusCode, 200);
       assert.equal(viewRes.headers['content-type'], 'application/pdf');
       assert.equal(viewRes.rawPayload.length, validPdfBuffer.length);
+      // F-01: Verificación de cabeceras de seguridad y control de caché
+      assert.equal(viewRes.headers['cache-control'], 'private, no-cache, no-store, must-revalidate');
+      assert.equal(viewRes.headers['referrer-policy'], 'no-referrer');
+      assert.equal(viewRes.headers['x-content-type-options'], 'nosniff');
     });
 
     it('3.9 should reject GET /api/v1/documents/:storageKey/file with invalid ticket (401)', async () => {
@@ -418,6 +422,147 @@ describe('Fase B — Ingesta de Documentos y Partituras Visuales (Backend Suite)
 
       assert.equal(inspected.pageCount, 3, 'Debe detectar exactamente 3 páginas');
       assert.equal(inspected.isVisualOnly, true);
+    });
+
+    it('3.11 should reject access when ticket is bound to a different storageKey (Resource Mismatch)', async () => {
+      assert.ok(savedStorageKey);
+      // Emitir ticket para documento A
+      const ticketRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/documents/${savedStorageKey}/ticket`,
+        headers: { authorization: `Bearer ${leaderToken}` },
+      });
+      const { ticket } = JSON.parse(ticketRes.body).data;
+
+      // Intentar usar ticket de A para acceder a otro storageKey
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/some-other-uuid.pdf/file?ticket=${encodeURIComponent(ticket)}`,
+      });
+      assert.equal(res.statusCode, 401);
+      assert.match(res.body, /no autoriza el acceso al recurso/i);
+    });
+
+    it('3.12 should reject access when ticket purpose is incompatible (AUDIO_STREAM vs DOCUMENT_VIEW)', async () => {
+      assert.ok(savedStorageKey);
+      // Emitir ticket con propósito AUDIO_STREAM
+      const { globalStreamTicketService } = await import('../application/stream-ticket-service.ts');
+      const audioTicket = globalStreamTicketService.issueTicket({
+        userId: testUserId,
+        role: 'WORSHIP_LEADER',
+        resourceId: savedStorageKey,
+        purpose: 'AUDIO_STREAM',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(audioTicket)}`,
+      });
+      assert.equal(res.statusCode, 401);
+      assert.match(res.body, /Propósito de ticket de transmisión incompatible/i);
+    });
+
+    it('3.13 should reject expired tickets immediately (TTL Expiry Enforcement)', async () => {
+      assert.ok(savedStorageKey);
+      const { globalStreamTicketService } = await import('../application/stream-ticket-service.ts');
+      // Emitir ticket con TTL = 1ms para forzar expiración
+      const expiredTicket = globalStreamTicketService.issueTicket({
+        userId: testUserId,
+        role: 'WORSHIP_LEADER',
+        resourceId: savedStorageKey,
+        purpose: 'DOCUMENT_VIEW',
+        ttlMs: 1,
+      });
+
+      // Esperar 10ms para asegurar superación del TTL
+      await new Promise((r) => setTimeout(r, 10));
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(expiredTicket)}`,
+      });
+      assert.equal(res.statusCode, 401);
+      assert.match(res.body, /ha expirado/i);
+    });
+
+    it('3.14 should allow intended reuse within 60s TTL up to maxUses quota (F-01)', async () => {
+      assert.ok(savedStorageKey);
+      const { globalStreamTicketService } = await import('../application/stream-ticket-service.ts');
+      // Emitir ticket con cuota pequeña de 3 usos para prueba controlada
+      const windowedTicket = globalStreamTicketService.issueTicket({
+        userId: testUserId,
+        role: 'WORSHIP_LEADER',
+        resourceId: savedStorageKey,
+        purpose: 'DOCUMENT_VIEW',
+        maxUses: 3,
+      });
+
+      // Petición 1: debe tener éxito
+      const res1 = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(windowedTicket)}`,
+      });
+      assert.equal(res1.statusCode, 200);
+
+      // Petición 2: debe tener éxito (simula Range request subsiguiente)
+      const res2 = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(windowedTicket)}`,
+      });
+      assert.equal(res2.statusCode, 200);
+
+      // Petición 3: debe tener éxito (último uso permitido)
+      const res3 = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(windowedTicket)}`,
+      });
+      assert.equal(res3.statusCode, 200);
+
+      // Petición 4: debe ser rechazada con 401 porque se agotó la cuota
+      const res4 = await app.inject({
+        method: 'GET',
+        url: `/api/v1/documents/${savedStorageKey}/file?ticket=${encodeURIComponent(windowedTicket)}`,
+      });
+      assert.equal(res4.statusCode, 401);
+      assert.match(res4.body, /inválido o ya consumido/i);
+    });
+
+    it('3.15 should detect page count from Linearized PDF dictionary (/N parameter) (F-02)', async () => {
+      const { inspectPdfPageCount } = await import('../domain/documents/pdf-utils.ts');
+      const linearizedPdf = '%PDF-1.4\n' +
+        '1 0 obj << /Linearized 1 /O 12 /H [ 600 120 ] /L 24500 /E 12345 /N 6 /T 24400 >> endobj\n' +
+        'trailer << /Root 1 0 R >> %%EOF';
+
+      const inspection = inspectPdfPageCount(linearizedPdf);
+      assert.equal(inspection.isVerified, true);
+      assert.equal(inspection.pageCount, 6);
+      assert.equal(inspection.detectionMethod, 'LINEARIZED_N');
+    });
+
+    it('3.16 should detect page count from Deflated Object Streams (/ObjStm) (F-02)', async () => {
+      const zlib = await import('node:zlib');
+      const { inspectPdfPageCount } = await import('../domain/documents/pdf-utils.ts');
+
+      const streamContent = '20 0 obj << /Type /Pages /Count 5 /Kids [21 0 R] >> endobj';
+      const deflated = zlib.deflateSync(Buffer.from(streamContent));
+      const header = Buffer.from('%PDF-1.5\n10 0 obj\n<< /Type /ObjStm /Length ' + deflated.length + ' /Filter /FlateDecode >>\nstream\n');
+      const footer = Buffer.from('\nendstream\nendobj\n%%EOF');
+      const mockPdf = Buffer.concat([header, deflated, footer]);
+
+      const inspection = inspectPdfPageCount(mockPdf);
+      assert.equal(inspection.isVerified, true);
+      assert.equal(inspection.pageCount, 5);
+      assert.equal(inspection.detectionMethod, 'OBJSTM_DEFLATE');
+    });
+
+    it('3.17 should return unverified status for malformed or corrupted PDF files (F-02)', async () => {
+      const { inspectPdfPageCount } = await import('../domain/documents/pdf-utils.ts');
+      const malformedPdf = '%PDF-1.4\ncorrupted-content-no-pages-catalog-nor-objects\n%%EOF';
+      const inspection = inspectPdfPageCount(malformedPdf);
+
+      assert.equal(inspection.isVerified, false, 'No debe afirmar falsamente que es verificado');
+      assert.equal(inspection.pageCount, null);
+      assert.equal(inspection.detectionMethod, 'UNKNOWN');
     });
   });
 });

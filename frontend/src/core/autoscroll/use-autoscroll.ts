@@ -1,8 +1,13 @@
 /**
  * @file use-autoscroll.ts
- * @description Hook de control de desplazamiento automático continuo para vistas de lectura musical (WP-05).
- * Diseñado con estabilidad temporal mediante requestAnimationFrame, prevención de loops duplicados,
- * soporte de interacción manual del usuario y cero dependencia de hardware externo.
+ * @description Hook de React para desplazamiento vertical automático suave a velocidad constante (WP-05).
+ *
+ * Características:
+ * - Animación por requestAnimationFrame para 60 FPS garantizados sin jank visual.
+ * - Pausa inteligente ante interacción táctil o rueda del usuario con tiempo de gracia (gracePeriodMs).
+ * - Pausa automática si la pestaña del navegador pierde visibilidad (Page Visibility API).
+ * - Soporte para resolución dinámica del contenedor desplazable (atril visual o partitura canónica).
+ * - Limpieza absoluta de temporizadores y frames al desmontar o detener.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -14,16 +19,38 @@ import {
   type AutoscrollStatus,
 } from './types.ts';
 
-const DEFAULT_BASE_PIXELS_PER_SECOND = 35;
 const AVAILABLE_SPEEDS: readonly AutoscrollSpeed[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+
+/**
+ * Resuelve el elemento que efectivamente posee desbordamiento desplazable en el DOM.
+ * Si el contenedor provisto directamente no posee scroll, busca en sus descendientes
+ * (.visual-document-viewport, .score-viewport-container o [data-scrollable="true"]).
+ */
+export function resolveScrollTarget(element: HTMLElement | null): HTMLElement | null {
+  if (!element) return null;
+
+  const rawMaxScroll = element.scrollHeight - element.clientHeight;
+  if (rawMaxScroll > 2) {
+    return element;
+  }
+
+  const nested = element.querySelector<HTMLElement>(
+    '.visual-document-viewport, .score-viewport-container, .workspace-viewport-area, [data-scrollable="true"]'
+  );
+  if (nested && nested.scrollHeight - nested.clientHeight > 2) {
+    return nested;
+  }
+
+  return element;
+}
 
 export function useAutoscroll(
   containerRef: React.RefObject<HTMLElement | null>,
   config?: AutoscrollConfig
 ): AutoscrollController {
-  const baseSpeed = config?.basePixelsPerSecond ?? DEFAULT_BASE_PIXELS_PER_SECOND;
+  const baseSpeed = config?.basePixelsPerSecond ?? 35; // px por segundo en velocidad 1.0x
   const pauseOnUserScroll = config?.pauseOnUserScroll ?? true;
-  const gracePeriodMs = config?.manualScrollGracePeriodMs ?? 800;
+  const gracePeriodMs = config?.manualScrollGracePeriodMs ?? 2000;
 
   const [status, setStatus] = useState<AutoscrollStatus>('IDLE');
   const [speed, setSpeed] = useState<AutoscrollSpeed>(1.0);
@@ -33,10 +60,11 @@ export function useAutoscroll(
 
   const animFrameIdRef = useRef<number | null>(null);
   const lastTimestampRef = useRef<number | null>(null);
+  const isUserScrollingRef = useRef<boolean>(false);
+  const userScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const speedRef = useRef<AutoscrollSpeed>(speed);
   const statusRef = useRef<AutoscrollStatus>(status);
-  const isUserScrollingRef = useRef<boolean>(false);
-  const userScrollTimeoutRef = useRef<any>(null);
 
   speedRef.current = speed;
   statusRef.current = status;
@@ -55,7 +83,7 @@ export function useAutoscroll(
   // Bucle de animación suave
   const scrollLoop = useCallback(
     (timestamp: number) => {
-      const container = containerRef.current;
+      const container = resolveScrollTarget(containerRef.current);
       if (!container || statusRef.current !== 'SCROLLING') {
         cancelLoop();
         return;
@@ -106,7 +134,7 @@ export function useAutoscroll(
 
   // Iniciar desplazamiento continuo
   const start = useCallback(() => {
-    const container = containerRef.current;
+    const container = resolveScrollTarget(containerRef.current);
     if (!container) return;
 
     // Si ya está desplazándose, no crear loop duplicado (idempotencia)
@@ -153,7 +181,7 @@ export function useAutoscroll(
   // Resetear scroll al inicio de la partitura
   const reset = useCallback(() => {
     cancelLoop();
-    const container = containerRef.current;
+    const container = resolveScrollTarget(containerRef.current);
     if (container) {
       container.scrollTop = 0;
       setCurrentScrollTop(0);
@@ -189,7 +217,7 @@ export function useAutoscroll(
 
   // 1. Detección de interacción manual del usuario (scroll táctil / rueda)
   useEffect(() => {
-    const container = containerRef.current;
+    const container = resolveScrollTarget(containerRef.current);
     if (!container || !pauseOnUserScroll) return;
 
     const handleUserInteraction = () => {

@@ -57,6 +57,13 @@
       "when": 1793655850665,
       "tag": "0007_eager_iron_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793657500000,
+      "tag": "0008_remediation_integrity_and_audit",
+      "breakpoints": true
     }
   ]
 }

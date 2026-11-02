@@ -11,10 +11,9 @@
  */
 
 import crypto from 'node:crypto';
-import type { OmrProposal, OmrRecognitionInput } from './types.ts';
+import { type OmrProposal, type OmrRecognitionInput, MAX_OMR_FILE_SIZE_BYTES } from './types.ts';
 import { ValidationError } from '../errors.ts';
 
-const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
   'image/png',

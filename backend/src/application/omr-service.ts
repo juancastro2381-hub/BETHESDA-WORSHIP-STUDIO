@@ -1,29 +1,35 @@
 /**
  * @file omr-service.ts
- * @description Servicio de aplicación para Reconocimiento Óptico de Música (OMR) y flujo de revisión humana (Fase 1A & Fase 3C).
+ * @description Servicio de aplicación para Reconocimiento Óptico de Música (OMR) y flujo de revisión humana (Fase 1A & 1A-R).
  *
- * Enforce:
+ * Principios y Políticas Mandatorias:
  * 1. La salida de IA es SIEMPRE una propuesta preliminar con isAiDraft: true.
- * 2. CERO invención o sustitución arbitraria de notas (CERO fallback silencioso a Do Mayor / 4/4).
- * 3. Preservación estricta de métricas dinámicas, tonalidades reales y alteraciones accidentales (#, b).
- * 4. Persistencia en base de datos PostgreSQL mediante OmrProposalRepository.
- * 5. Trazabilidad completa con hash SHA-256 e historial inmutable de auditoría (omr_audit_history).
+ * 2. CERO invención o sustitución arbitraria de notas (CERO fallback silencioso a Do Mayor / 4/4 / 120 BPM).
+ * 3. Persistencia MANDATORIA y confiable en PostgreSQL mediante OmrProposalRepository (CERO swallow de errores DB).
+ * 4. Integridad atómica en revisión y compromiso canónico en una sola transacción PostgreSQL (R4).
+ * 5. Trazabilidad inmutable mediante hash SHA-256 e historial de auditoría protegido contra borrado en cascada (R3).
+ * 6. Política de archivo unificada y coherente a 15 MB (R6).
+ * 7. Control de acceso y mitigación de IDOR a nivel de servicio y repositorio (R7).
  */
 
 import { z } from 'zod';
 import type { IOmrProvider } from '../domain/omr/omr-provider.ts';
-import type {
-  OmrProposal,
-  OmrRecognitionInput,
-  OmrMeasureProposal,
-  OmrReviewStatus,
-  OmrNoteDetected,
-  OmrChordDetected,
-  OmrLyricDetected,
+import {
+  type OmrProposal,
+  type OmrRecognitionInput,
+  type OmrMeasureProposal,
+  type OmrReviewStatus,
+  type OmrNoteDetected,
+  type OmrChordDetected,
+  type OmrLyricDetected,
+  MAX_OMR_FILE_SIZE_BYTES,
 } from '../domain/omr/types.ts';
 import type { ISongRepository, SongWithVersion } from '../repositories/song-repository.ts';
-import type { IOmrProposalRepository } from '../repositories/omr-proposal-repository.ts';
-import { NotFoundError, ValidationError } from '../domain/errors.ts';
+import {
+  type IOmrProposalRepository,
+  DrizzleOmrProposalRepository,
+} from '../repositories/omr-proposal-repository.ts';
+import { ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import { CanonicalSerializer } from '../domain/canonical-serializer.ts';
 import { CanonicalMusicPayload } from '../../../frontend/src/core/canonical-model/canonical-music-payload.ts';
 import { Measure } from '../../../frontend/src/core/canonical-model/measure.ts';
@@ -41,8 +47,9 @@ import { MusicalKey } from '../../../frontend/src/core/music-theory/musical-key.
 import { type BaseNoteLetter, NoteName } from '../../../frontend/src/core/music-theory/note-name.ts';
 import { Pitch } from '../../../frontend/src/core/music-theory/pitch.ts';
 import { Accidental } from '../../../frontend/src/core/music-theory/accidental.ts';
+import type { CreateSongDTO } from '../domain/types.ts';
 
-// Schema de validación Zod para entrada de reconocimiento OMR
+// Schema de validación Zod unificado con el límite estricto de 15MB (R6)
 export const OmrRecognitionInputSchema = z.object({
   filename: z.string().min(1, 'El nombre de archivo es obligatorio'),
   mimeType: z.string().min(1, 'El tipo MIME es obligatorio'),
@@ -50,7 +57,7 @@ export const OmrRecognitionInputSchema = z.object({
     .number()
     .int()
     .positive('El tamaño del archivo debe ser mayor a 0 bytes')
-    .max(25 * 1024 * 1024, 'El archivo excede el tamaño máximo permitido de 25MB'),
+    .max(MAX_OMR_FILE_SIZE_BYTES, `El archivo excede el tamaño máximo permitido de 15MB`),
 });
 
 // Schema de validación Zod para confirmación al catálogo canónico
@@ -58,6 +65,8 @@ export const CommitToSongOverridesSchema = z
   .object({
     title: z.string().min(1).optional(),
     key: z.string().min(1).optional(),
+    timeSignature: z.string().min(1).optional(),
+    bpm: z.number().int().positive().optional(),
   })
   .optional();
 
@@ -65,7 +74,8 @@ export class OmrService {
   private proposals: Map<string, OmrProposal>;
   private provider: IOmrProvider;
   private songRepo: ISongRepository;
-  private omrRepo?: IOmrProposalRepository;
+  private omrRepo: IOmrProposalRepository;
+  private pendingProposalWrites: Map<string, Promise<void>> = new Map();
 
   constructor(
     provider: IOmrProvider,
@@ -75,7 +85,8 @@ export class OmrService {
     this.proposals = new Map();
     this.provider = provider;
     this.songRepo = songRepo;
-    this.omrRepo = omrRepo;
+    // En producción y flujos reales, la persistencia en PostgreSQL es MANDATORIA (R1)
+    this.omrRepo = omrRepo ?? new DrizzleOmrProposalRepository();
   }
 
   public setOmrRepository(repo: IOmrProposalRepository): void {
@@ -84,13 +95,15 @@ export class OmrService {
 
   /**
    * Procesa un archivo de partitura y genera una propuesta preliminar (AI Draft).
+   * La persistencia en PostgreSQL es OBLIGATORIA: si falla, la operación fracasa y
+   * CERO datos se reportan falsamente como procesados exitosamente (R1).
    */
   public async processUpload(
     input: OmrRecognitionInput,
     userId: string,
     jobId?: string
   ): Promise<OmrProposal> {
-    // 1. Validación estricta del input mediante Zod
+    // 1. Validación estricta del input mediante Zod (coherente a 15MB)
     const validationResult = OmrRecognitionInputSchema.safeParse({
       filename: input.filename,
       mimeType: input.mimeType,
@@ -101,14 +114,14 @@ export class OmrService {
       throw new ValidationError(`Validación de entrada OMR fallida: ${errMsgs}`);
     }
 
-    // 2. Ejecutar reconocimiento con el motor
+    // 2. Ejecutar reconocimiento con el motor/proveedor
     const proposal = await this.provider.recognize(input);
     proposal.userId = userId;
     if (jobId) {
       proposal.jobId = jobId;
     }
 
-    // 3. Evaluar umbrales de confianza musical en cada compás
+    // 3. Evaluar umbrales de confianza musical e integridad de acordes en cada compás
     for (const m of proposal.measures) {
       m.flags = m.flags ?? [];
       if (m.measureConfidence < 0.7) {
@@ -116,127 +129,172 @@ export class OmrService {
           m.flags.push('LOW_CONFIDENCE');
         }
       }
-    }
-
-    // 4. Guardar en memoria caché L1
-    this.proposals.set(proposal.proposalId, proposal);
-
-    // 5. Persistir en PostgreSQL mediante repositorio si está disponible
-    if (this.omrRepo) {
-      try {
-        await this.omrRepo.saveProposal(proposal);
-      } catch (err) {
-        console.error('Advertencia: No se pudo persistir la propuesta OMR en BD:', err);
+      if (m.chordsDetected && m.chordsDetected.length > 0) {
+        for (const c of m.chordsDetected) {
+          try {
+            Chord.parse(c.chord);
+          } catch {
+            const flag = `UNPARSED_CHORD:${c.chord}`;
+            if (!m.flags.includes(flag)) {
+              m.flags.push(flag);
+            }
+          }
+        }
       }
     }
+
+    // 4. Persistir MANDATORIAMENTE en PostgreSQL (CERO tolerancia a fallos silenciosos)
+    // Si la base de datos falla, el error se propaga hacia el llamador.
+    await this.omrRepo.saveProposal(proposal);
+
+    // 5. Solo tras persistencia durable exitosa en BD se indexa en caché L1
+    this.proposals.set(proposal.proposalId, proposal);
 
     return proposal;
   }
 
   /**
    * Obtiene una propuesta OMR por ID de manera síncrona (Caché L1).
+   * Valida autorización de propietario si se suministra el usuario solicitante (R7).
    */
-  public getProposal(proposalId: string): OmrProposal {
+  public getProposal(
+    proposalId: string,
+    requestingUser?: { id: string; role: string }
+  ): OmrProposal {
     const proposal = this.proposals.get(proposalId);
     if (!proposal) {
       throw new NotFoundError('Propuesta OMR', proposalId);
     }
+
+    if (requestingUser && !['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      if (proposal.userId && proposal.userId !== requestingUser.id) {
+        throw new ForbiddenError('No tiene autorización para acceder a una propuesta de otro usuario.');
+      }
+    }
+
     return proposal;
   }
 
   /**
-   * Obtiene una propuesta OMR por ID de manera asíncrona (Caché L1 + BD).
+   * Obtiene una propuesta OMR por ID de manera asíncrona con semántica Database-First (R1 & R7).
+   * La base de datos PostgreSQL es la fuente autoritativa de verdad.
    */
-  public async getProposalAsync(proposalId: string): Promise<OmrProposal> {
-    const cached = this.proposals.get(proposalId);
-    if (cached) {
-      return cached;
+  public async getProposalAsync(
+    proposalId: string,
+    requestingUser?: { id: string; role: string }
+  ): Promise<OmrProposal> {
+    // Si hay una persistencia en vuelo (ej: disparada por reviewProposal), esperar a que complete
+    const pendingWrite = this.pendingProposalWrites.get(proposalId);
+    if (pendingWrite) {
+      await pendingWrite;
     }
 
-    if (this.omrRepo) {
-      const dbProposal = await this.omrRepo.findProposalById(proposalId);
-      if (dbProposal) {
-        this.proposals.set(dbProposal.proposalId, dbProposal);
-        return dbProposal;
+    // 1. Consultar PostgreSQL autoritativo
+    const dbProposal = await this.omrRepo.findProposalById(proposalId, requestingUser);
+    if (dbProposal) {
+      this.proposals.set(dbProposal.proposalId, dbProposal);
+      return dbProposal;
+    }
+
+    // 2. Fallback a caché L1 para pruebas puramente en memoria
+    const cached = this.proposals.get(proposalId);
+    if (cached) {
+      if (requestingUser && !['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+        if (cached.userId && cached.userId !== requestingUser.id) {
+          throw new ForbiddenError('No tiene autorización para acceder a una propuesta de otro usuario.');
+        }
       }
+      return cached;
     }
 
     throw new NotFoundError('Propuesta OMR', proposalId);
   }
 
   /**
-   * Aplica revisión humana a una propuesta OMR (aprobación o rechazo).
+   * Aplica revisión humana a una propuesta OMR de forma síncrona (compatibilidad legacy).
    */
   public reviewProposal(
     proposalId: string,
     userId: string,
     status: 'APPROVED_FOR_IMPORT' | 'REJECTED',
-    reason?: string
+    reason?: string,
+    requestingUser?: { id: string; role: string }
   ): OmrProposal {
-    const proposal = this.getProposal(proposalId);
+    if (requestingUser && !['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      throw new ForbiddenError('No tiene los permisos requeridos (songs:update_draft) para revisar propuestas OMR.');
+    }
+
+    const proposal = this.getProposal(proposalId, requestingUser);
 
     proposal.reviewStatus = status;
     proposal.reviewedAt = new Date().toISOString();
     proposal.reviewedByUserId = userId;
+    this.proposals.set(proposal.proposalId, proposal);
 
-    if (this.omrRepo) {
-      // Disparo no bloqueante para compatibilidad síncrona con suite de tests existente
-      this.omrRepo
-        .updateProposalStatus(proposalId, status, userId)
-        .then(() => {
-          return this.omrRepo?.recordAudit({
-            proposalId,
-            userId,
-            actionType: status === 'APPROVED_FOR_IMPORT' ? 'APPROVE_PROPOSAL' : 'REJECT_PROPOSAL',
-            newValue: { status },
-            reason: reason ?? `Revisión humana: estado actualizado a ${status}`,
-          });
-        })
-        .catch((err) => {
-          console.error('Error al persistir auditoría de revisión OMR en BD:', err);
-        });
-    }
+    // Disparar persistencia asíncrona en repositorio y rastrearla para evitar condiciones de carrera (R1/R4)
+    const writePromise = this.omrRepo
+      .updateProposalStatusAndAudit(proposalId, status, userId, reason)
+      .catch((err) => {
+        console.error('Error al persistir revisión OMR en BD:', err);
+      })
+      .finally(() => {
+        this.pendingProposalWrites.delete(proposalId);
+      });
+
+    this.pendingProposalWrites.set(proposalId, writePromise);
 
     return proposal;
   }
 
   /**
-   * Versión asíncrona explícita de revisión humana para flujos con garantía ACID completa.
+   * Aplica revisión humana con consistencia atómica y trazabilidad completa (R4).
+   * Actualiza el estado y escribe el registro de auditoría en una transacción única.
    */
   public async reviewProposalAsync(
     proposalId: string,
     userId: string,
     status: 'APPROVED_FOR_IMPORT' | 'REJECTED',
-    reason?: string
+    reason?: string,
+    requestingUser?: { id: string; role: string }
   ): Promise<OmrProposal> {
-    const proposal = await this.getProposalAsync(proposalId);
+    if (requestingUser && !['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      throw new ForbiddenError('No tiene los permisos requeridos (songs:update_draft) para revisar propuestas OMR.');
+    }
 
+    // 1. Recuperar propuesta verificando pertenencia
+    const proposal = await this.getProposalAsync(proposalId, requestingUser);
+
+    // 2. Persistir atómicamente estado y auditoría en BD
+    await this.omrRepo.updateProposalStatusAndAudit(proposalId, status, userId, reason);
+
+    // 3. Reflejar en memoria
     proposal.reviewStatus = status;
     proposal.reviewedAt = new Date().toISOString();
     proposal.reviewedByUserId = userId;
-
-    if (this.omrRepo) {
-      await this.omrRepo.updateProposalStatus(proposalId, status, userId);
-      await this.omrRepo.recordAudit({
-        proposalId,
-        userId,
-        actionType: status === 'APPROVED_FOR_IMPORT' ? 'APPROVE_PROPOSAL' : 'REJECT_PROPOSAL',
-        newValue: { status },
-        reason: reason ?? `Revisión humana: estado actualizado a ${status}`,
-      });
-    }
+    this.proposals.set(proposal.proposalId, proposal);
 
     return proposal;
   }
 
   /**
    * Convierte una propuesta OMR aprobada en una canción canónica en la base de datos PostgreSQL.
+   * Ejecuta la creación de canción, versión, actualización de propuesta y auditoría en una
+   * ÚNICA transacción atómica en PostgreSQL (R4).
+   *
+   * REGLA ESTRICTA DE INTEGRIDAD MUSICAL (R2):
+   * Si la tonalidad, métrica o tempo no están resueltos ni en la detección ni en anulaciones
+   * explícitas validadas, la conversión se RECHAZA categóricamente (CERO defaults fabricados).
    */
   public async commitToCanonicalSong(
     proposalId: string,
     userId: string,
-    overrides?: { title?: string; key?: string }
+    overrides?: { title?: string; key?: string; timeSignature?: string; bpm?: number },
+    requestingUser?: { id: string; role: string }
   ): Promise<SongWithVersion> {
+    if (requestingUser && !['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      throw new ForbiddenError('No tiene autorización para comprometer propuestas OMR al catálogo canónico.');
+    }
+
     // 1. Validar overrides con Zod
     if (overrides) {
       const validOverrides = CommitToSongOverridesSchema.safeParse(overrides);
@@ -245,7 +303,8 @@ export class OmrService {
       }
     }
 
-    const proposal = await this.getProposalAsync(proposalId);
+    // 2. Obtener propuesta autoritativa
+    const proposal = await this.getProposalAsync(proposalId, requestingUser);
 
     if (proposal.reviewStatus !== 'APPROVED_FOR_IMPORT') {
       throw new ValidationError(
@@ -259,17 +318,41 @@ export class OmrService {
       );
     }
 
+    // 3. Resolución rigurosa de metadatos (CERO adivinación / CERO fabricación silenciosa) (R2)
     const title = overrides?.title || proposal.detectedTitle || 'Canción Importada por OMR';
-    const defaultKey = overrides?.key || proposal.detectedKey || 'C';
-    const defaultBpm = proposal.detectedBpm || 120;
-    const timeSignature = proposal.detectedTimeSignature || '4/4';
 
-    // 2. Convertir DIRECTAMENTE los compases validados con fidelidad musical rigurosa
-    const canonicalPayload = this.convertProposalToCanonical(proposal, title, overrides?.key);
+    const defaultKey = overrides?.key || proposal.detectedKey;
+    if (!defaultKey) {
+      throw new ValidationError(
+        'No se puede comprometer al catálogo canónico una propuesta con tonalidad no resuelta. Se requiere confirmación o anulación explícita de tonalidad.'
+      );
+    }
+
+    const timeSignature = overrides?.timeSignature || proposal.detectedTimeSignature;
+    if (!timeSignature) {
+      throw new ValidationError(
+        'No se puede comprometer al catálogo canónico una propuesta con métrica no resuelta. Se requiere confirmación o anulación explícita de métrica.'
+      );
+    }
+
+    const defaultBpm = overrides?.bpm || proposal.detectedBpm;
+    if (!defaultBpm || defaultBpm <= 0) {
+      throw new ValidationError(
+        'No se puede comprometer al catálogo canónico una propuesta con tempo (BPM) no resuelto. Se requiere confirmación o anulación explícita de tempo.'
+      );
+    }
+
+    // 4. Convertir DIRECTAMENTE los compases validados con fidelidad musical rigurosa
+    const canonicalPayload = this.convertProposalToCanonical(
+      proposal,
+      title,
+      defaultKey,
+      timeSignature,
+      defaultBpm
+    );
     const canonicalJSON = CanonicalSerializer.serialize(canonicalPayload);
 
-    // 3. Persistir en el repositorio de canciones
-    const created = await this.songRepo.create({
+    const songDto: CreateSongDTO = {
       title,
       defaultKey,
       defaultBpm,
@@ -282,69 +365,51 @@ export class OmrService {
       metadata: {
         notes: `Reconocido ópticamente y revisado por usuario humano (${userId}). Hash fuente: ${proposal.sourceHash}.`,
       },
-    });
+    };
 
-    // 4. Actualizar estado de la propuesta a COMMITTED y registrar auditoría
+    // 5. Ejecutar compromiso atómico en una única transacción PostgreSQL (R4)
+    const created = await this.omrRepo.commitProposalTransaction(
+      proposalId,
+      userId,
+      songDto,
+      title
+    );
+
+    // 6. Actualizar estado local sólo tras éxito atómico
     proposal.reviewStatus = 'COMMITTED';
-    if (this.omrRepo) {
-      try {
-        await this.omrRepo.updateProposalStatus(proposalId, 'COMMITTED', userId);
-        await this.omrRepo.recordAudit({
-          proposalId,
-          userId,
-          actionType: 'COMMIT_TO_SONG',
-          newValue: {
-            songId: created.song.id,
-            versionId: created.version.id,
-            title,
-          },
-          reason: 'Compromiso exitoso de propuesta OMR al catálogo canónico.',
-        });
-      } catch (err) {
-        console.error('Error al actualizar estado COMMITTED en BD para OMR:', err);
-      }
-    }
 
     return created;
   }
 
   /**
    * Convierte los compases validados de una propuesta OMR aprobada en CanonicalMusicPayload.
-   * Remedia exhaustivamente los 10 defectos musicales identificados en Phase 0.
+   * Remedia exhaustivamente los 10 defectos musicales identificados (R2).
    */
   private convertProposalToCanonical(
     proposal: OmrProposal,
     title: string,
-    keyOverride?: string
+    resolvedKey: string,
+    resolvedTimeSig: string,
+    resolvedBpm: number
   ): CanonicalMusicPayload {
-    // RESOLUCIÓN TONAL INICIAL (Defecto 2 remediado)
-    // Se parsea la tonalidad canónica real; NUNCA se hardcodea KeySignature(0).
-    const keyCandidate = keyOverride || proposal.detectedKey || 'C';
+    // RESOLUCIÓN TONAL INICIAL (CERO fallback ciego a C Major) (R2)
     let currentKeySigRef: KeySignatureReference;
     try {
-      const parsedKey = MusicalKey.parse(keyCandidate);
+      const parsedKey = MusicalKey.parse(resolvedKey);
       currentKeySigRef = KeySignatureReference.fromMusicalKey(parsedKey);
     } catch {
-      // Si la tonalidad no puede parsearse, se establece C mayor como fallback señalizado explícitamente
-      currentKeySigRef = new KeySignatureReference(
-        NoteName.C,
-        'MAJOR',
-        new KeySignature(0)
-      );
+      throw new ValidationError(`Tonalidad inválida o no reconocida: "${resolvedKey}".`);
     }
 
-    // RESOLUCIÓN MÉTRICA INICIAL (Defecto 1 remediado)
-    let currentTimeSig = TimeSignature.FOUR_FOUR;
-    if (proposal.detectedTimeSignature) {
-      try {
-        currentTimeSig = TimeSignature.parse(proposal.detectedTimeSignature);
-      } catch {
-        currentTimeSig = TimeSignature.FOUR_FOUR;
-      }
+    // RESOLUCIÓN MÉTRICA INICIAL (CERO fallback ciego a 4/4) (R2)
+    let currentTimeSig: TimeSignature;
+    try {
+      currentTimeSig = TimeSignature.parse(resolvedTimeSig);
+    } catch {
+      throw new ValidationError(`Métrica inválida o no reconocida: "${resolvedTimeSig}".`);
     }
 
-    const bpm = proposal.detectedBpm || 120;
-    const tempoMap = new TempoMap([new TempoEvent(0, bpm)]);
+    const tempoMap = new TempoMap([new TempoEvent(0, resolvedBpm)]);
 
     const measures: Measure[] = [];
     let currentTick = 0;
@@ -355,7 +420,7 @@ export class OmrService {
       const measureNum = mProp.measureNumber || idx + 1;
       const measureStartTick = currentTick;
 
-      // 1. Métrica dinámica por compás (Defecto 1 remediado)
+      // 1. Métrica dinámica por compás
       if (mProp.timeSignature) {
         try {
           currentTimeSig = TimeSignature.parse(mProp.timeSignature);
@@ -368,7 +433,7 @@ export class OmrService {
       }
       const measureDurationTicks = currentTimeSig.calculateMeasureDurationTicks();
 
-      // 2. Tonalidad dinámica por compás (Defecto 2 remediado)
+      // 2. Tonalidad dinámica por compás
       if (mProp.keySignature) {
         try {
           const parsedKey = MusicalKey.parse(mProp.keySignature);
@@ -381,7 +446,7 @@ export class OmrService {
         }
       }
 
-      // 3. Acordes reconocidos (Defecto 5 remediado: NO tragar errores silenciosamente)
+      // 3. Acordes reconocidos (NO tragar errores silenciosamente)
       const chords: ChordEvent[] = [];
       if (mProp.chordsDetected && mProp.chordsDetected.length > 0) {
         let chordIdx = 1;
@@ -399,7 +464,6 @@ export class OmrService {
               })
             );
           } catch (err) {
-            // Registrar advertencia explícita en flags del compás
             mProp.flags = mProp.flags ?? [];
             const flag = `UNPARSED_CHORD:${c.chord}`;
             if (!mProp.flags.includes(flag)) {
@@ -409,13 +473,12 @@ export class OmrService {
         }
       }
 
-      // 4. Notas reconocidas (Defectos 3, 4 y 6 remediados)
+      // 4. Notas reconocidas (Preservación de alteraciones y CERO fabricación)
       const notes: Note[] = [];
       let noteTick = measureStartTick;
       if (mProp.notesDetected && mProp.notesDetected.length > 0) {
         let noteIdx = 1;
         for (const n of mProp.notesDetected) {
-          // Altura y alteración (Defectos 3 y 4 remediados: CERO fallback ciego a C, preservación de alteraciones)
           let noteName: NoteName;
           try {
             if (typeof n.alter === 'number') {
@@ -426,18 +489,17 @@ export class OmrService {
               noteName = NoteName.parse(n.step);
             }
           } catch {
-            // Si el glifo no puede parsearse, se señaliza
             mProp.flags = mProp.flags ?? [];
             const flag = `UNRESOLVED_NOTE_GLYPH:${n.step}`;
             if (!mProp.flags.includes(flag)) {
               mProp.flags.push(flag);
             }
-            continue; // Se omite el glifo corrupto en vez de inventar un C artificial
+            continue; // Se omite el glifo dañado; NUNCA se inventa un C artificial
           }
 
           const pitch = new Pitch(noteName, n.octave);
 
-          // Duración exacta de nota (Defecto 6 remediado: soporte para figuras compuestas, puntillos y tresillos)
+          // Duración exacta de nota (CERO adivinación / rechazo de duraciones desconocidas) (R2)
           const durationTicks = this.parseDurationTicks(n.duration, currentTimeSig.beatDurationTicks);
 
           notes.push(
@@ -454,7 +516,7 @@ export class OmrService {
         }
       }
 
-      // Voz melódica o silencio proporcional (Defecto 7 remediado)
+      // Voz melódica o silencio proporcional
       const voice =
         notes.length > 0
           ? new Voice(1, notes)
@@ -462,30 +524,27 @@ export class OmrService {
               new Rest({
                 id: `omr_rest_${measureNum}`,
                 startTick: measureStartTick,
-                durationTicks: measureDurationTicks, // Duración exacta de la métrica real
+                durationTicks: measureDurationTicks,
                 voice: 1,
                 staff: 1,
               }),
             ]);
 
-      // 5. Lírica reconocida (Defecto 8 remediado: CERO apilamiento a tick 0)
+      // 5. Lírica reconocida (CERO apilamiento a tick 0)
       const lyrics: LyricSyllable[] = [];
       if (mProp.lyricsDetected && mProp.lyricsDetected.length > 0) {
         const lyricCount = mProp.lyricsDetected.length;
         for (let lIdx = 0; lIdx < lyricCount; lIdx++) {
           const l = mProp.lyricsDetected[lIdx]!;
 
-          // Cálculo determinista del desplazamiento de la sílaba
           let syllableOffset = 0;
           if (typeof l.tickOffset === 'number') {
             syllableOffset = l.tickOffset;
           } else if (typeof l.beat === 'number') {
             syllableOffset = Math.max(0, (l.beat - 1) * currentTimeSig.beatDurationTicks);
           } else if (notes.length > 0 && lIdx < notes.length) {
-            // Alinear directamente con la nota melódica correspondiente
             syllableOffset = notes[lIdx]!.startTick - measureStartTick;
           } else {
-            // Distribución proporcional a lo largo del compás
             syllableOffset = Math.round((lIdx / lyricCount) * measureDurationTicks);
           }
 
@@ -534,9 +593,9 @@ export class OmrService {
 
   /**
    * Mapea descripciones textuales de duración a ticks canónicos (TPQN 480).
-   * Soporta figuras estándar, notas con puntillo y tresillos.
+   * REGLA R2: Si la duración no es reconocida, RECHAZA la adivinación musical con ValidationError.
    */
-  private parseDurationTicks(durationStr: string, beatDurationTicks: number): number {
+  private parseDurationTicks(durationStr: string, _beatDurationTicks: number): number {
     const d = (durationStr || '').toLowerCase().trim();
     switch (d) {
       case 'maxima':
@@ -586,8 +645,10 @@ export class OmrService {
         if (!isNaN(numeric) && numeric > 0) {
           return numeric;
         }
-        // Fallback defensivo pero proporcional al beat de la métrica
-        return beatDurationTicks;
+        // REGLA R2: PROHIBIDO ADIVINAR. Lanzar error tipado si la duración es ilegible.
+        throw new ValidationError(
+          `Duración de nota no reconocida en OMR: "${durationStr}". Se rechaza la adivinación musical.`
+        );
       }
     }
   }

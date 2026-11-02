@@ -1,7 +1,7 @@
 /**
  * @file omr-persistence-and-integrity.test.ts
  * @description Suite de pruebas automatizadas para la persistencia ACID en PostgreSQL y la remediación
- * exhaustiva de los 10 defectos de integridad musical en OMR (Fase 1A).
+ * exhaustiva de los 10 defectos de integridad musical en OMR (Fase 1A & 1A-R).
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -19,13 +19,21 @@ import {
   backgroundJobs,
 } from '../db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { DrizzleOmrProposalRepository } from '../repositories/omr-proposal-repository.ts';
+import {
+  DrizzleOmrProposalRepository,
+  type IOmrProposalRepository,
+} from '../repositories/omr-proposal-repository.ts';
 import { DrizzleBackgroundJobRepository } from '../repositories/background-job-repository.ts';
 import { DrizzleSongRepository } from '../repositories/song-repository.ts';
 import { DrizzleUserRepository } from '../repositories/user-repository.ts';
 import { OmrService } from '../application/omr-service.ts';
 import type { IOmrProvider } from '../domain/omr/omr-provider.ts';
-import type { OmrProposal, OmrRecognitionInput } from '../domain/omr/types.ts';
+import {
+  type OmrProposal,
+  type OmrRecognitionInput,
+  MAX_OMR_FILE_SIZE_BYTES,
+} from '../domain/omr/types.ts';
+import { ValidationError, ForbiddenError } from '../domain/errors.ts';
 
 // Proveedor OMR programable para pruebas de integridad musical
 class MockOmrProvider implements IOmrProvider {
@@ -41,9 +49,18 @@ class MockOmrProvider implements IOmrProvider {
       sourceHash: hash,
       detectedTitle: this.customProposal?.detectedTitle ?? 'Partitura de Prueba',
       detectedArtist: this.customProposal?.detectedArtist ?? 'Artista de Prueba',
-      detectedKey: this.customProposal?.detectedKey ?? 'G',
-      detectedBpm: this.customProposal?.detectedBpm ?? 120,
-      detectedTimeSignature: this.customProposal?.detectedTimeSignature ?? '3/4',
+      detectedKey:
+        this.customProposal?.detectedKey !== undefined
+          ? this.customProposal.detectedKey
+          : 'G',
+      detectedBpm:
+        this.customProposal?.detectedBpm !== undefined
+          ? this.customProposal.detectedBpm
+          : 120,
+      detectedTimeSignature:
+        this.customProposal?.detectedTimeSignature !== undefined
+          ? this.customProposal.detectedTimeSignature
+          : '3/4',
       overallConfidence: this.customProposal?.overallConfidence ?? 0.88,
       isAiDraft: true,
       reviewStatus: this.customProposal?.reviewStatus ?? 'PENDING_REVIEW',
@@ -56,7 +73,7 @@ class MockOmrProvider implements IOmrProvider {
   }
 }
 
-describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
+describe('Fase 1A-R — Integridad Musical OMR, Persistencia Relacional y Seguridad', () => {
   let omrRepo: DrizzleOmrProposalRepository;
   let jobRepo: DrizzleBackgroundJobRepository;
   let songRepo: DrizzleSongRepository;
@@ -65,6 +82,9 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
   let omrService: OmrService;
 
   let testUserId: string;
+  let otherUserId: string;
+  let viewerUserId: string;
+
   const createdSongIds: string[] = [];
   const createdProposalIds: string[] = [];
   const createdJobIds: string[] = [];
@@ -79,8 +99,8 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     mockProvider = new MockOmrProvider();
     omrService = new OmrService(mockProvider, songRepo, omrRepo);
 
-    // Crear usuario de prueba
-    const testEmail = `musician_omr_${Date.now()}@bethesda.local`;
+    // 1. Crear usuario Worship Leader
+    const testEmail = `worship_leader_omr_${Date.now()}@bethesda.local`;
     const user = await userRepo.create({
       email: testEmail,
       passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
@@ -90,10 +110,33 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
       accountStatus: 'ACTIVE',
     });
     testUserId = user.id;
+
+    // 2. Crear segundo usuario Musician
+    const otherEmail = `musician_other_${Date.now()}@bethesda.local`;
+    const otherUser = await userRepo.create({
+      email: otherEmail,
+      passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
+      firstName: 'Pedro',
+      lastName: 'Músico',
+      role: 'MUSICIAN',
+      accountStatus: 'ACTIVE',
+    });
+    otherUserId = otherUser.id;
+
+    // 3. Crear tercer usuario Viewer
+    const viewerEmail = `viewer_${Date.now()}@bethesda.local`;
+    const viewerUser = await userRepo.create({
+      email: viewerEmail,
+      passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
+      firstName: 'Ana',
+      lastName: 'Observadora',
+      role: 'VIEWER',
+      accountStatus: 'ACTIVE',
+    });
+    viewerUserId = viewerUser.id;
   });
 
   after(async () => {
-    // Limpieza de datos creados en orden de claves foráneas
     for (const sId of createdSongIds) {
       await db.delete(songVersions).where(eq(songVersions.songId, sId));
       await db.delete(songs).where(eq(songs.id, sId));
@@ -106,13 +149,13 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     for (const jId of createdJobIds) {
       await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jId));
     }
-    if (testUserId) {
-      await db.delete(users).where(eq(users.id, testUserId));
-    }
+    if (testUserId) await db.delete(users).where(eq(users.id, testUserId));
+    if (otherUserId) await db.delete(users).where(eq(users.id, otherUserId));
+    if (viewerUserId) await db.delete(users).where(eq(users.id, viewerUserId));
   });
 
   // ==========================================================================
-  // 1. PERSISTENCIA ACID DE PROPUESTAS OMR EN POSTGRESQL
+  // 1. PERSISTENCIA ACID DE PROPUESTAS OMR EN POSTGRESQL (R1)
   // ==========================================================================
   it('1.1: should persist OMR proposals, measures and audit to PostgreSQL and survive cache clearing', async () => {
     mockProvider.customProposal = {
@@ -171,8 +214,50 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(loadedProposal.unrecognizedRegions.length, 1);
   });
 
+  it('1.2: should fail proposal creation and NOT populate cache when database write fails (R1)', async () => {
+    // Repositorio simulado que lanza fallo de persistencia
+    const failingRepo: IOmrProposalRepository = {
+      saveProposal: async () => {
+        throw new Error('Conexión perdida a PostgreSQL (falla simulada)');
+      },
+      findProposalById: async () => null,
+      updateProposalStatus: async () => {},
+      updateProposalStatusAndAudit: async () => {},
+      updateMeasure: async () => {},
+      recordAudit: async () => {},
+      getAuditHistory: async () => [],
+      commitProposalTransaction: async () => {
+        throw new Error('No implementado');
+      },
+      deleteProposal: async () => false,
+    };
+
+    const failingOmrService = new OmrService(mockProvider, songRepo, failingRepo);
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 failing persistence test');
+    await assert.rejects(
+      async () => {
+        await failingOmrService.processUpload(
+          {
+            buffer: dummyBuffer,
+            filename: 'failing_scan.pdf',
+            mimeType: 'application/pdf',
+            fileSizeBytes: dummyBuffer.length,
+          },
+          testUserId
+        );
+      },
+      (err: any) => err.message.includes('Conexión perdida a PostgreSQL')
+    );
+
+    // Verificar que CERO propuestas quedaron registradas en la memoria caché
+    assert.throws(() => failingOmrService.getProposal('cualquier-id'), {
+      name: 'NotFoundError',
+    });
+  });
+
   // ==========================================================================
-  // 2. DEFECTO 1 REMEDIADO: PRESERVACIÓN DE MÉTRICAS DINÁMICAS (3/4, 6/8)
+  // 2. DEFECTO 1 & R2: PRESERVACIÓN DE MÉTRICAS DINÁMICAS (3/4, 6/8) & BLOQUEO SI DESCONOCIDO
   // ==========================================================================
   it('2.1: should preserve 3/4 metric (1440 ticks) without defaulting to 4/4 (1920 ticks)', async () => {
     mockProvider.customProposal = {
@@ -209,7 +294,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Aprobar y comprometer
     omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
     const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
     createdSongIds.push(committed.song.id);
@@ -218,7 +302,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(payload.measures.length, 1);
     const m1 = payload.measures[0];
 
-    // Verificar duración exacta de 3/4 = 3 * 480 = 1440 ticks (CERO hardcode de 1920)
     assert.equal(m1.durationTicks, 1440, 'Compás en 3/4 debe durar exactamente 1440 ticks');
     assert.equal(m1.timeSignature.numerator, 3);
     assert.equal(m1.timeSignature.denominator, 4);
@@ -270,8 +353,114 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(m1.timeSignature.denominator, 8);
   });
 
+  it('2.3: should block canonical commit when time signature is unknown without explicit override (R2)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Métrica Desconocida',
+      detectedKey: 'G',
+      detectedBpm: 100,
+      detectedTimeSignature: null, // Métrica desconocida
+      overallConfidence: 0.8,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: undefined,
+          measureConfidence: 0.8,
+          chordsDetected: [],
+          notesDetected: [{ step: 'G', octave: 4, duration: 'quarter', confidence: 0.8 }],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 unknown time sig test'),
+        filename: 'unknown_meter.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+
+    // Intentar comprometer sin override de métrica debe fallar con ValidationError
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('métrica no resuelta')
+    );
+
+    // Proporcionar anulación explícita y verificada debe permitir el compromiso
+    const committed = await omrService.commitToCanonicalSong(
+      proposal.proposalId,
+      testUserId,
+      { timeSignature: '3/4' }
+    );
+    createdSongIds.push(committed.song.id);
+    assert.equal(committed.song.timeSignature, '3/4');
+  });
+
+  it('2.4: should block canonical commit when BPM is unknown without explicit override (R2)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Tempo Desconocido',
+      detectedKey: 'G',
+      detectedBpm: null, // BPM desconocido
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.8,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.8,
+          chordsDetected: [],
+          notesDetected: [{ step: 'G', octave: 4, duration: 'quarter', confidence: 0.8 }],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 unknown bpm test'),
+        filename: 'unknown_bpm.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+
+    // Sin BPM explícito, debe bloquear
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('tempo (BPM) no resuelto')
+    );
+
+    // Con anulación explícita, procede limpiamente
+    const committed = await omrService.commitToCanonicalSong(
+      proposal.proposalId,
+      testUserId,
+      { bpm: 95 }
+    );
+    createdSongIds.push(committed.song.id);
+    assert.equal(committed.song.defaultBpm, 95);
+  });
+
   // ==========================================================================
-  // 3. DEFECTO 2 REMEDIADO: PRESERVACIÓN TONAL CANÓNICA (NON-C KEYS)
+  // 3. DEFECTO 2 & R2: PRESERVACIÓN TONAL CANÓNICA & BLOQUEO SI DESCONOCIDO
   // ==========================================================================
   it('3.1: should preserve detected key signature (G Major = 1 sharp, Eb Major = 3 flats) without defaulting to 0', async () => {
     mockProvider.customProposal = {
@@ -313,13 +502,65 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     const payload = committed.version.canonicalPayload as any;
     const m1 = payload.measures[0];
 
-    // Verificar que la armadura de Eb Mayor tiene -3 alteraciones (Sib, Mib, Lab) y NO 0 (Do Mayor)
     assert.equal(m1.keySignature.tonic, 'Eb');
     assert.equal(m1.keySignature.accidentalCount, -3, 'Eb Mayor debe tener exactamente 3 bemoles (-3)');
   });
 
+  it('3.2: should block canonical commit when key signature is unknown without explicit override (R2)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Tonalidad Desconocida',
+      detectedKey: null, // Tonalidad desconocida
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.8,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.8,
+          chordsDetected: [],
+          notesDetected: [{ step: 'D', octave: 4, duration: 'whole', confidence: 0.8 }],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 unknown key test'),
+        filename: 'unknown_key.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+
+    // Intentar comprometer sin tonalidad debe fallar (CERO fallback silencioso a C)
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('tonalidad no resuelta')
+    );
+
+    // Con anulación explícita validada, procede exitosamente
+    const committed = await omrService.commitToCanonicalSong(
+      proposal.proposalId,
+      testUserId,
+      { key: 'F' }
+    );
+    createdSongIds.push(committed.song.id);
+    assert.equal(committed.song.defaultKey, 'F');
+  });
+
   // ==========================================================================
-  // 4. DEFECTOS 3 & 4 REMEDIADOS: PRESERVACIÓN DE ALTERACIONES Y CERO FABRICACIÓN
+  // 4. DEFECTOS 3 & 4: PRESERVACIÓN DE ALTERACIONES Y CERO FABRICACIÓN
   // ==========================================================================
   it('4.1: should preserve explicit alterations (F#4, Bb3) and reject fabricated notes', async () => {
     mockProvider.customProposal = {
@@ -335,9 +576,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.92,
           chordsDetected: [{ chord: 'G', beat: 1, confidence: 0.95 }],
           notesDetected: [
-            // F#4 con alteración explícita alter: 1
             { step: 'F', octave: 4, alter: 1, duration: 'half', confidence: 0.93 },
-            // Bb3 mediante step
             { step: 'Bb', octave: 3, duration: 'half', confidence: 0.91 },
           ],
           lyricsDetected: [],
@@ -364,11 +603,9 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     const payload = committed.version.canonicalPayload as any;
     const events = payload.measures[0].voices[0].events.filter((e: any) => e.type === 'NOTE');
 
-    // Nota 1: F#4 -> Nota F con sostenido en octava 4
     assert.equal(events[0].pitch.noteName, 'F#');
     assert.equal(events[0].pitch.octave, 4);
 
-    // Nota 2: Bb3 -> Nota B con bemol en octava 3
     assert.equal(events[1].pitch.noteName, 'Bb');
     assert.equal(events[1].pitch.octave, 3);
   });
@@ -387,7 +624,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.72,
           chordsDetected: [],
           notesDetected: [
-            // Glifo corrupto que antes se convertía silenciosamente a NoteName.C
             { step: 'CORRUPT_GLYPH_#?', octave: 4, duration: 'quarter', confidence: 0.3 },
             { step: 'E', octave: 4, duration: 'half', confidence: 0.9 },
           ],
@@ -415,13 +651,12 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     const payload = committed.version.canonicalPayload as any;
     const events = payload.measures[0].voices[0].events.filter((e: any) => e.type === 'NOTE');
 
-    // Solo se debe incluir la nota válida E4, NUNCA un C fabricado por el glifo dañado
     assert.equal(events.length, 1, 'No debe fabricar notas C para glifos no reconocibles');
     assert.equal(events[0].pitch.noteName, 'E');
   });
 
   // ==========================================================================
-  // 5. DEFECTO 5 REMEDIADO: ACORDES ILEGIBLES SEÑALIZADOS (NO EMPTY CATCH)
+  // 5. DEFECTO 5: ACORDES ILEGIBLES SEÑALIZADOS (NO EMPTY CATCH)
   // ==========================================================================
   it('5.1: should preserve and flag unparsed chords without swallowing errors', async () => {
     mockProvider.customProposal = {
@@ -437,7 +672,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.82,
           chordsDetected: [
             { chord: 'C', beat: 1, confidence: 0.95 },
-            { chord: 'ILEGIBLE_???/13b9#', beat: 3, confidence: 0.4 }, // Acorde no parseable
+            { chord: 'ILEGIBLE_???/13b9#', beat: 3, confidence: 0.4 },
           ],
           notesDetected: [],
           lyricsDetected: [],
@@ -461,7 +696,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
     createdSongIds.push(committed.song.id);
 
-    // Verificar que el compás tiene la bandera de advertencia
     assert.ok(
       proposal.measures[0]?.flags?.some((f) => f.includes('UNPARSED_CHORD')),
       'Debe marcar la bandera UNPARSED_CHORD en el compás'
@@ -469,7 +703,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
   });
 
   // ==========================================================================
-  // 6. DEFECTO 6 REMEDIADO: FIGURAS COMPUESTAS (PUNTILLOS Y TRESILLOS)
+  // 6. DEFECTO 6 & R2: FIGURAS COMPUESTAS & RECHAZO DE DURACIONES DESCONOCIDAS
   // ==========================================================================
   it('6.1: should correctly map dotted notes and triplets into exact ticks', async () => {
     mockProvider.customProposal = {
@@ -485,8 +719,8 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.95,
           chordsDetected: [],
           notesDetected: [
-            { step: 'C', octave: 4, duration: 'dotted-half', confidence: 0.95 }, // 1440 ticks
-            { step: 'D', octave: 4, duration: 'quarter', confidence: 0.95 }, // 480 ticks
+            { step: 'C', octave: 4, duration: 'dotted-half', confidence: 0.95 },
+            { step: 'D', octave: 4, duration: 'quarter', confidence: 0.95 },
           ],
           lyricsDetected: [],
           flags: [],
@@ -497,11 +731,11 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.95,
           chordsDetected: [],
           notesDetected: [
-            { step: 'E', octave: 4, duration: 'dotted-quarter', confidence: 0.95 }, // 720 ticks
-            { step: 'F', octave: 4, duration: 'eighth', confidence: 0.95 }, // 240 ticks
-            { step: 'G', octave: 4, duration: 'triplet-quarter', confidence: 0.95 }, // 320 ticks
-            { step: 'A', octave: 4, duration: 'triplet-quarter', confidence: 0.95 }, // 320 ticks
-            { step: 'B', octave: 4, duration: 'triplet-quarter', confidence: 0.95 }, // 320 ticks
+            { step: 'E', octave: 4, duration: 'dotted-quarter', confidence: 0.95 },
+            { step: 'F', octave: 4, duration: 'eighth', confidence: 0.95 },
+            { step: 'G', octave: 4, duration: 'triplet-quarter', confidence: 0.95 },
+            { step: 'A', octave: 4, duration: 'triplet-quarter', confidence: 0.95 },
+            { step: 'B', octave: 4, duration: 'triplet-quarter', confidence: 0.95 },
           ],
           lyricsDetected: [],
           flags: [],
@@ -535,8 +769,53 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(m2Notes[2].durationTicks, 320, 'triplet-quarter debe ser 320 ticks');
   });
 
+  it('6.2: should reject unknown note duration with ValidationError instead of guessing duration (R2)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Duración Ilegible',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.85,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.85,
+          chordsDetected: [],
+          notesDetected: [
+            { step: 'C', octave: 4, duration: 'garabato_desconocido', confidence: 0.5 },
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 bad duration test'),
+        filename: 'bad_duration.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('Duración de nota no reconocida')
+    );
+  });
+
   // ==========================================================================
-  // 7. DEFECTO 7 REMEDIADO: SILENCIO DE COMPÁS VACÍO ACORDE A MÉTRICA
+  // 7. DEFECTO 7: SILENCIO DE COMPÁS VACÍO ACORDE A MÉTRICA
   // ==========================================================================
   it('7.1: should insert rest with exact metric duration (960 ticks for 2/4) on empty measure', async () => {
     mockProvider.customProposal = {
@@ -551,7 +830,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           timeSignature: '2/4',
           measureConfidence: 0.9,
           chordsDetected: [],
-          notesDetected: [], // Sin notas reconocidas
+          notesDetected: [],
           lyricsDetected: [],
           flags: [],
         },
@@ -580,7 +859,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
   });
 
   // ==========================================================================
-  // 8. DEFECTO 8 REMEDIADO: CERO APILAMIENTO DE LÍRICA EN TICK 0
+  // 8. DEFECTO 8: CERO APILAMIENTO DE LÍRICA EN TICK 0
   // ==========================================================================
   it('8.1: should distribute lyric syllables aligned with notes/beats instead of stacking all at tick 0', async () => {
     mockProvider.customProposal = {
@@ -596,10 +875,10 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
           measureConfidence: 0.92,
           chordsDetected: [],
           notesDetected: [
-            { step: 'C', octave: 4, duration: 'quarter', confidence: 0.95 }, // tick 0
-            { step: 'D', octave: 4, duration: 'quarter', confidence: 0.95 }, // tick 480
-            { step: 'E', octave: 4, duration: 'quarter', confidence: 0.95 }, // tick 960
-            { step: 'F', octave: 4, duration: 'quarter', confidence: 0.95 }, // tick 1440
+            { step: 'C', octave: 4, duration: 'quarter', confidence: 0.95 },
+            { step: 'D', octave: 4, duration: 'quarter', confidence: 0.95 },
+            { step: 'E', octave: 4, duration: 'quarter', confidence: 0.95 },
+            { step: 'F', octave: 4, duration: 'quarter', confidence: 0.95 },
           ],
           lyricsDetected: [
             { text: 'A-', confidence: 0.9 },
@@ -631,7 +910,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     const lyrics = payload.measures[0].lyrics;
 
     assert.equal(lyrics.length, 4);
-    // Verificar que las 4 sílabas tienen desplazamientos crecientes y alineados con las notas
     assert.equal(lyrics[0].tickOffset, 0, 'Sílaba 1 alineada con nota 1');
     assert.equal(lyrics[1].tickOffset, 480, 'Sílaba 2 alineada con nota 2');
     assert.equal(lyrics[2].tickOffset, 960, 'Sílaba 3 alineada con nota 3');
@@ -639,7 +917,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
   });
 
   // ==========================================================================
-  // 9. DEFECTO 9 REMEDIADO: FILTRADO POR UMBRAL DE CONFIANZA (< 0.70)
+  // 9. DEFECTO 9: FILTRADO POR UMBRAL DE CONFIANZA (< 0.70)
   // ==========================================================================
   it('9.1: should automatically flag measures with confidence < 0.70 as LOW_CONFIDENCE', async () => {
     mockProvider.customProposal = {
@@ -652,7 +930,7 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
         {
           measureNumber: 1,
           timeSignature: '4/4',
-          measureConfidence: 0.58, // < 0.70
+          measureConfidence: 0.58,
           chordsDetected: [],
           notesDetected: [{ step: 'C', octave: 4, duration: 'whole', confidence: 0.55 }],
           lyricsDetected: [],
@@ -679,9 +957,9 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
   });
 
   // ==========================================================================
-  // 10. DEFECTO 10 REMEDIADO: VALIDACIÓN DE ENTRADA CON ZOD
+  // 10. DEFECTO 10 & R6: POLÍTICA COHERENTE DE TAMAÑO DE ARCHIVO (15 MB)
   // ==========================================================================
-  it('10.1: should reject inputs with 0 bytes or exceeding size limit with ValidationError', async () => {
+  it('10.1: should reject inputs with 0 bytes with ValidationError', async () => {
     await assert.rejects(
       async () => {
         await omrService.processUpload(
@@ -698,8 +976,28 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     );
   });
 
+  it('10.2: should enforce coherent 15MB file size boundary consistently across schema and provider (R6)', async () => {
+    const exceeds15MbBytes = 16 * 1024 * 1024; // 16 MB > MAX_OMR_FILE_SIZE_BYTES
+    await assert.rejects(
+      async () => {
+        await omrService.processUpload(
+          {
+            buffer: Buffer.alloc(100),
+            filename: 'oversized_score.pdf',
+            mimeType: 'application/pdf',
+            fileSizeBytes: exceeds15MbBytes,
+          },
+          testUserId
+        );
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('15MB')
+    );
+  });
+
   // ==========================================================================
-  // 11. AUDITORÍA INMUTABLE DE HISTORIAL (omr_audit_history)
+  // 11. AUDITORÍA INMUTABLE (R3) & TRANSACCIONES ATÓMICAS (R4)
   // ==========================================================================
   it('11.1: should log creation, review, and commit events into omr_audit_history without sensitive tokens', async () => {
     mockProvider.customProposal = {
@@ -732,7 +1030,6 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Revisar explícitamente de forma asíncrona para auditoría completa
     await omrService.reviewProposalAsync(
       proposal.proposalId,
       testUserId,
@@ -740,11 +1037,9 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
       'Aprobado tras verificar métrica y notas'
     );
 
-    // Comprometer al catálogo canónico
     const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
     createdSongIds.push(committed.song.id);
 
-    // Consultar historial de auditoría
     const auditLogs = await omrRepo.getAuditHistory(proposal.proposalId);
     assert.ok(auditLogs.length >= 3, 'Debe registrar al menos 3 eventos de auditoría');
 
@@ -753,13 +1048,45 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.ok(actionTypes.includes('APPROVE_PROPOSAL'));
     assert.ok(actionTypes.includes('COMMIT_TO_SONG'));
 
-    // Verificar ausencia de tokens o secretos sensibles
     for (const log of auditLogs) {
       const serialized = JSON.stringify(log);
       assert.ok(!serialized.includes('password'));
       assert.ok(!serialized.includes('secret'));
       assert.ok(!serialized.includes('token'));
     }
+  });
+
+  it('11.2: should prevent proposal deletion when audit history exists via ON DELETE RESTRICT (R3)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Propuesta con Auditoría Protegida',
+      detectedKey: 'G',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.95,
+      measures: [],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 audit protection test'),
+        filename: 'protected_audit.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Intentar borrar la propuesta directamente debe fallar debido a ON DELETE RESTRICT en omr_audit_history
+    await assert.rejects(
+      async () => {
+        await omrRepo.deleteProposal(proposal.proposalId);
+      },
+      (err: any) =>
+        err.message.includes('foreign key constraint') ||
+        err.message.includes('violates foreign key') ||
+        err.code === '23503'
+    );
   });
 
   // ==========================================================================
@@ -781,14 +1108,12 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(job.status, 'PENDING');
     assert.equal(job.progress, 0);
 
-    // Actualizar progreso a 50% y estado a PROCESSING
     await jobRepo.updateJobProgress(job.id, 50, 'PROCESSING');
     const updated = await jobRepo.findJobById(job.id);
     assert.equal(updated?.progress, 50);
     assert.equal(updated?.status, 'PROCESSING');
     assert.ok(updated?.startedAt);
 
-    // Completar tarea
     const outputProposalId = crypto.randomUUID();
     await jobRepo.completeJob(job.id, outputProposalId);
     const completed = await jobRepo.findJobById(job.id);
@@ -796,5 +1121,77 @@ describe('Fase 1A — Integridad Musical OMR y Persistencia Relacional', () => {
     assert.equal(completed?.progress, 100);
     assert.equal(completed?.outputRef, outputProposalId);
     assert.ok(completed?.completedAt);
+  });
+
+  // ==========================================================================
+  // 13. SEGURIDAD Y CONTROL DE ACCESO / IDOR (R7)
+  // ==========================================================================
+  it('13.1: should enforce ownership and reject unauthorized access to another user proposal (R7)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Propuesta Privada de Juan',
+      detectedKey: 'G',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 private proposal test'),
+        filename: 'private_score.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Usuario 'otherUserId' (MUSICIAN) intenta acceder a la propuesta de Juan
+    await assert.rejects(
+      async () => {
+        await omrRepo.findProposalById(proposal.proposalId, {
+          id: otherUserId,
+          role: 'MUSICIAN',
+        });
+      },
+      { name: 'ForbiddenError' }
+    );
+  });
+
+  it('13.2: should reject proposal review by unprivileged roles (R7)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Propuesta para Revisión por Viewer',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [],
+    };
+
+    const proposal = await omrService.processUpload(
+      {
+        buffer: Buffer.from('%PDF-1.4 viewer review test'),
+        filename: 'viewer_review.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: 30,
+      },
+      testUserId
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Usuario con rol 'VIEWER' intenta revisar/aprobar
+    await assert.rejects(
+      async () => {
+        await omrService.reviewProposalAsync(
+          proposal.proposalId,
+          viewerUserId,
+          'APPROVED_FOR_IMPORT',
+          'Intento no autorizado',
+          { id: viewerUserId, role: 'VIEWER' }
+        );
+      },
+      { name: 'ForbiddenError' }
+    );
   });
 });

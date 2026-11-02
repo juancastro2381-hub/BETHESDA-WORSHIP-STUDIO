@@ -7,6 +7,8 @@
  * obligatoria antes de persistirse como canción canónica.
  */
 
+export const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB límite técnico coherente
+
 export interface OmrNoteDetected {
   step: string;
   octave: number;

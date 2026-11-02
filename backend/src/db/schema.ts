@@ -823,7 +823,7 @@ export const omrProposalMeasures = pgTable(
       .notNull()
       .references(() => omrProposals.id, { onDelete: 'cascade' }),
     measureNumber: integer('measure_number').notNull(),
-    timeSignature: varchar('time_signature', { length: 16 }).notNull().default('4/4'),
+    timeSignature: varchar('time_signature', { length: 16 }),
     keySignature: varchar('key_signature', { length: 16 }),
     chordsDetected: jsonb('chords_detected').notNull().default([]),
     notesDetected: jsonb('notes_detected').notNull().default([]),
@@ -848,7 +848,7 @@ export const omrAuditHistory = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     proposalId: uuid('proposal_id')
       .notNull()
-      .references(() => omrProposals.id, { onDelete: 'cascade' }),
+      .references(() => omrProposals.id, { onDelete: 'restrict' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     actionType: omrActionTypeEnum('action_type').notNull(),
     targetMeasure: integer('target_measure'),

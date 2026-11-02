@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <work>
+    <work-title>Sublime Gracia - Himno Canónico</work-title>
+  </work>
+  <identification>
+    <creator type="composer">John Newton</creator>
+  </identification>
+  <part-list>
+    <score-part id="P1">
+      <part-name>Voz Principal</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <key>
+          <fifths>1</fifths>
+          <mode>major</mode>
+        </key>
+        <time>
+          <beats>4</beats>
+          <beat-type>4</beat-type>
+        </time>
+        <clef>
+          <sign>G</sign>
+          <line>2</line>
+        </clef>
+      </attributes>
+      <direction placement="above">
+        <sound tempo="120"/>
+      </direction>
+      <!-- Armonía: Acorde de Sol Mayor (G) -->
+      <harmony>
+        <root>
+          <root-step>G</root-step>
+        </root>
+        <kind text="">major</kind>
+      </harmony>
+      <!-- Nota 1: Sol 4 (Negra) -->
+      <note>
+        <pitch>
+          <step>G</step>
+          <octave>4</octave>
+        </pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric number="1">
+          <syllabic>single</syllabic>
+          <text>Sub</text>
+        </lyric>
+      </note>
+      <!-- Nota 2: Si 4 (Negra) -->
+      <note>
+        <pitch>
+          <step>B</step>
+          <octave>4</octave>
+        </pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric number="1">
+          <syllabic>single</syllabic>
+          <text>li</text>
+        </lyric>
+      </note>
+      <!-- Armonía: Acorde de Do Mayor (C) -->
+      <harmony>
+        <root>
+          <root-step>C</root-step>
+        </root>
+        <kind text="">major</kind>
+      </harmony>
+      <!-- Nota 3: Re 5 (Blanca) -->
+      <note>
+        <pitch>
+          <step>D</step>
+          <octave>5</octave>
+        </pitch>
+        <duration>8</duration>
+        <voice>1</voice>
+        <type>half</type>
+        <lyric number="1">
+          <syllabic>single</syllabic>
+          <text>me</text>
+        </lyric>
+      </note>
+    </measure>
+    <measure number="2">
+      <!-- Armonía: Acorde de Re Mayor (D) -->
+      <harmony>
+        <root>
+          <root-step>D</root-step>
+        </root>
+        <kind text="">major</kind>
+      </harmony>
+      <!-- Nota 4: Re 5 (Redonda) -->
+      <note>
+        <pitch>
+          <step>D</step>
+          <octave>5</octave>
+        </pitch>
+        <duration>16</duration>
+        <voice>1</voice>
+        <type>whole</type>
+        <lyric number="1">
+          <syllabic>single</syllabic>
+          <text>gracia</text>
+        </lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>

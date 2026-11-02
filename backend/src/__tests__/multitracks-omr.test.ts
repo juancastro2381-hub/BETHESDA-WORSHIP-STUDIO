@@ -259,19 +259,24 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
       await app.close();
     }
 
-    if (createdAudioIds.size > 0) {
-      const aIds = Array.from(createdAudioIds);
-      await pool.query('DELETE FROM audio_assets WHERE id = ANY($1)', [aIds]);
-    }
+    await pool.query("SET app.allow_audit_cleanup = 'true'");
+    try {
+      if (createdAudioIds.size > 0) {
+        const aIds = Array.from(createdAudioIds);
+        await pool.query('DELETE FROM audio_assets WHERE id = ANY($1)', [aIds]);
+      }
 
-    if (createdSongIds.size > 0) {
-      const sIds = Array.from(createdSongIds);
-      await pool.query('DELETE FROM songs WHERE id = ANY($1)', [sIds]);
-    }
+      if (createdSongIds.size > 0) {
+        const sIds = Array.from(createdSongIds);
+        await pool.query('DELETE FROM songs WHERE id = ANY($1)', [sIds]);
+      }
 
-    if (createdUserIds.size > 0) {
-      const uIds = Array.from(createdUserIds);
-      await pool.query('DELETE FROM users WHERE id = ANY($1)', [uIds]);
+      if (createdUserIds.size > 0) {
+        const uIds = Array.from(createdUserIds);
+        await pool.query('DELETE FROM users WHERE id = ANY($1)', [uIds]);
+      }
+    } finally {
+      await pool.query("RESET app.allow_audit_cleanup");
     }
   });
 
@@ -579,8 +584,8 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
   });
 
   it('D2.6: should allow canonical commit only after explicit human approval and preserve real recognized measures', async () => {
-    // 1. Músico humano revisa y aprueba
-    const reviewed = omrService.reviewProposal(testProposalId, testUser.id, 'APPROVED_FOR_IMPORT');
+    // 1. Músico humano revisa y aprueba (asíncrono con confirmación de persistencia R2-01)
+    const reviewed = await omrService.reviewProposal(testProposalId, testUser.id, 'APPROVED_FOR_IMPORT');
     assert.equal(reviewed.reviewStatus, 'APPROVED_FOR_IMPORT');
     assert.equal(reviewed.reviewedByUserId, testUser.id);
 
@@ -622,7 +627,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.ok(proposal.unrecognizedRegions[0].reason.includes('no configurado'));
 
     // Intentar aprobar y cometer propuesta sin compases debe ser rechazado
-    unconfiguredOmrService.reviewProposal(proposal.proposalId, testUser.id, 'APPROVED_FOR_IMPORT');
+    await unconfiguredOmrService.reviewProposal(proposal.proposalId, testUser.id, 'APPROVED_FOR_IMPORT');
     await assert.rejects(
       async () => {
         await unconfiguredOmrService.commitToCanonicalSong(proposal.proposalId, testUser.id);

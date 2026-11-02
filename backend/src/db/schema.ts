@@ -798,6 +798,7 @@ export const omrProposals = pgTable(
     isAiDraft: boolean('is_ai_draft').notNull().default(true),
     reviewStatus: omrProposalStatusEnum('review_status').notNull().default('DRAFT'),
     rawPayload: jsonb('raw_payload').notNull().default({}),
+    canonicalSongId: uuid('canonical_song_id').references(() => songs.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
@@ -808,6 +809,7 @@ export const omrProposals = pgTable(
     index('idx_omr_proposals_source_hash').on(table.sourceHash),
     index('idx_omr_proposals_review_status').on(table.reviewStatus),
     index('idx_omr_proposals_created_at').on(table.createdAt),
+    uniqueIndex('idx_omr_proposals_canonical_song_id').on(table.canonicalSongId),
   ]
 );
 

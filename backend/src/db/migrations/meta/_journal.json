@@ -64,6 +64,13 @@
       "when": 1793657500000,
       "tag": "0008_remediation_integrity_and_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793658900000,
+      "tag": "0009_audit_immutability_and_commit_idempotency",
+      "breakpoints": true
     }
   ]
 }

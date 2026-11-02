@@ -24,7 +24,13 @@ import type {
 import type { CreateSongDTO } from '../domain/types.ts';
 import type { SongWithVersion } from './song-repository.ts';
 import { CanonicalDeserializer, CanonicalSerializer } from '../domain/canonical-serializer.ts';
-import { ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import {
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+  UnauthorizedError,
+  ConflictError,
+} from '../domain/errors.ts';
 
 export interface IOmrProposalRepository {
   saveProposal(proposal: OmrProposal): Promise<OmrProposal>;
@@ -41,9 +47,14 @@ export interface IOmrProposalRepository {
     proposalId: string,
     status: OmrReviewStatus,
     reviewedByUserId?: string,
-    reason?: string
+    reason?: string,
+    requestingUser?: { id: string; role: string }
   ): Promise<void>;
-  updateMeasure(proposalId: string, measure: OmrMeasureProposal): Promise<void>;
+  updateMeasure(
+    proposalId: string,
+    measure: OmrMeasureProposal,
+    requestingUser?: { id: string; role: string }
+  ): Promise<void>;
   recordAudit(entry: OmrAuditEntry): Promise<void>;
   getAuditHistory(
     proposalId: string,
@@ -53,9 +64,13 @@ export interface IOmrProposalRepository {
     proposalId: string,
     userId: string,
     songDto: CreateSongDTO,
-    title: string
+    title: string,
+    requestingUser?: { id: string; role: string }
   ): Promise<SongWithVersion>;
-  deleteProposal(proposalId: string): Promise<boolean>;
+  deleteProposal(
+    proposalId: string,
+    requestingUser?: { id: string; role: string }
+  ): Promise<boolean>;
 }
 
 export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
@@ -154,6 +169,11 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
     proposalId: string,
     requestingUser?: { id: string; role: string }
   ): Promise<OmrProposal | null> {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!UUID_REGEX.test(proposalId)) {
+      return null;
+    }
+
     const [row] = await this.db
       .select()
       .from(omrProposals)
@@ -164,9 +184,18 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
       return null;
     }
 
-    // Aislamiento de usuario (IDOR mitigation): si no es ADMIN/SUPER_ADMIN, debe ser el propietario
-    if (requestingUser && !['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
-      if (row.userId && row.userId !== requestingUser.id) {
+    // Aislamiento de usuario y verificación estricta de propiedad (R2-04):
+    if (!requestingUser) {
+      throw new UnauthorizedError('Identidad de usuario autenticada requerida para acceder a propuestas OMR.');
+    }
+
+    if (!['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      if (!row.userId) {
+        throw new ForbiddenError(
+          'Acceso denegado: la propuesta carece de propietario asignado y requiere privilegios de administrador.'
+        );
+      }
+      if (row.userId !== requestingUser.id) {
         throw new ForbiddenError('No tiene autorización para acceder a una propuesta de otro usuario.');
       }
     }
@@ -232,10 +261,38 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
     proposalId: string,
     status: OmrReviewStatus,
     reviewedByUserId?: string,
-    reason?: string
+    reason?: string,
+    requestingUser?: { id: string; role: string }
   ): Promise<void> {
+    if (requestingUser && !['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      throw new ForbiddenError('No tiene los permisos requeridos (songs:update_draft) para revisar propuestas OMR.');
+    }
+
     const now = new Date();
     await this.db.transaction(async (tx) => {
+      // Row lock para concurrencia segura
+      const [proposal] = await tx
+        .select()
+        .from(omrProposals)
+        .where(eq(omrProposals.id, proposalId))
+        .for('update')
+        .limit(1);
+
+      if (!proposal) {
+        throw new NotFoundError('Propuesta OMR', proposalId);
+      }
+
+      if (requestingUser && !['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+        if (!proposal.userId) {
+          throw new ForbiddenError(
+            'Acceso denegado: la propuesta carece de propietario asignado y requiere privilegios de administrador.'
+          );
+        }
+        if (proposal.userId !== requestingUser.id) {
+          throw new ForbiddenError('No tiene autorización para revisar una propuesta de otro usuario.');
+        }
+      }
+
       const [updated] = await tx
         .update(omrProposals)
         .set({
@@ -245,10 +302,6 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
         })
         .where(eq(omrProposals.id, proposalId))
         .returning({ id: omrProposals.id });
-
-      if (!updated) {
-        throw new NotFoundError('Propuesta OMR', proposalId);
-      }
 
       await tx.insert(omrAuditHistory).values({
         proposalId,
@@ -262,8 +315,16 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
 
   public async updateMeasure(
     proposalId: string,
-    measure: OmrMeasureProposal
+    measure: OmrMeasureProposal,
+    requestingUser?: { id: string; role: string }
   ): Promise<void> {
+    if (requestingUser) {
+      await this.findProposalById(proposalId, requestingUser);
+      if (!['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+        throw new ForbiddenError('No tiene autorización para modificar compases de la propuesta OMR.');
+      }
+    }
+
     await this.db
       .insert(omrProposalMeasures)
       .values({
@@ -308,9 +369,10 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
     proposalId: string,
     requestingUser?: { id: string; role: string }
   ): Promise<OmrAuditEntry[]> {
-    if (requestingUser) {
-      await this.findProposalById(proposalId, requestingUser);
+    if (!requestingUser) {
+      throw new UnauthorizedError('Identidad de usuario autenticada requerida para consultar auditoría.');
     }
+    await this.findProposalById(proposalId, requestingUser);
 
     const rows = await this.db
       .select()
@@ -341,32 +403,107 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
     proposalId: string,
     userId: string,
     songDto: CreateSongDTO,
-    title: string
+    title: string,
+    requestingUser?: { id: string; role: string }
   ): Promise<SongWithVersion> {
+    const authUser = requestingUser ?? { id: userId, role: 'WORSHIP_LEADER' };
+    if (!['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(authUser.role)) {
+      throw new ForbiddenError('No tiene autorización para comprometer propuestas OMR al catálogo canónico.');
+    }
+
+    // Validación preventiva de metadatos musicales en el DTO (R2-02)
+    if (songDto.defaultKey !== undefined && (!songDto.defaultKey || !songDto.defaultKey.trim())) {
+      throw new ValidationError('La tonalidad musical (defaultKey) es obligatoria y no puede fabricarse.');
+    }
+    if (songDto.defaultBpm !== undefined && (!songDto.defaultBpm || songDto.defaultBpm <= 0)) {
+      throw new ValidationError(
+        'El tempo (defaultBpm) es obligatorio y debe ser un valor numérico positivo sin valores por defecto fabricados.'
+      );
+    }
+    if (songDto.timeSignature !== undefined && (!songDto.timeSignature || !songDto.timeSignature.trim())) {
+      throw new ValidationError('La métrica de compás (timeSignature) es obligatoria y no puede fabricarse.');
+    }
+
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!UUID_REGEX.test(proposalId)) {
+      throw new NotFoundError('Propuesta OMR', proposalId);
+    }
+
     return await this.db.transaction(async (tx) => {
-      // 1. Verificar estado de la propuesta dentro de la transacción
+      // 1. Bloqueo de fila exclusivo (SELECT ... FOR UPDATE) para prevenir carreras de concurrencia (R2-06)
       const [proposal] = await tx
         .select()
         .from(omrProposals)
         .where(eq(omrProposals.id, proposalId))
+        .for('update')
         .limit(1);
 
       if (!proposal) {
         throw new NotFoundError('Propuesta OMR', proposalId);
       }
 
+      // 2. Verificación estricta de propiedad y aislamiento de usuario (R2-04)
+      if (!['ADMIN', 'SUPER_ADMIN'].includes(authUser.role)) {
+        if (!proposal.userId) {
+          throw new ForbiddenError(
+            'Acceso denegado: la propuesta carece de propietario asignado y requiere privilegios de administrador.'
+          );
+        }
+        if (proposal.userId !== authUser.id) {
+          throw new ForbiddenError('No tiene autorización para comprometer una propuesta perteneciente a otro usuario.');
+        }
+      }
+
+      // 3. Garantía de idempotencia bajo concurrencia (R2-06): Si ya fue comprometida, retornar resultado determinista
+      if (proposal.reviewStatus === 'COMMITTED') {
+        if (proposal.canonicalSongId) {
+          const [existingSong] = await tx
+            .select()
+            .from(songs)
+            .where(eq(songs.id, proposal.canonicalSongId))
+            .limit(1);
+          if (existingSong && existingSong.currentVersionId) {
+            const [existingVersion] = await tx
+              .select()
+              .from(songVersions)
+              .where(eq(songVersions.id, existingSong.currentVersionId))
+              .limit(1);
+            if (existingVersion) {
+              return {
+                song: existingSong as any,
+                version: existingVersion as any,
+              };
+            }
+          }
+        }
+        throw new ConflictError('Esta propuesta OMR ya ha sido comprometida previamente al catálogo canónico.');
+      }
+
       if (proposal.reviewStatus !== 'APPROVED_FOR_IMPORT') {
         throw new ValidationError(
-          'La propuesta OMR debe estar en estado APPROVED_FOR_IMPORT para comprometerse al catálogo.'
+          `La propuesta OMR debe estar en estado APPROVED_FOR_IMPORT para comprometerse al catálogo (estado actual: ${proposal.reviewStatus}).`
         );
       }
 
-      // 2. Extraer y validar el payload canónico
+      // 4. Eliminación de CUALQUIER default musical fabricado a nivel de persistencia canónica (R2-02)
+      if (!songDto.defaultKey || !songDto.defaultKey.trim()) {
+        throw new ValidationError('La tonalidad musical (defaultKey) es obligatoria y no puede fabricarse.');
+      }
+      if (!songDto.defaultBpm || songDto.defaultBpm <= 0) {
+        throw new ValidationError(
+          'El tempo (defaultBpm) es obligatorio y debe ser un valor numérico positivo sin valores por defecto fabricados.'
+        );
+      }
+      if (!songDto.timeSignature || !songDto.timeSignature.trim()) {
+        throw new ValidationError('La métrica de compás (timeSignature) es obligatoria y no puede fabricarse.');
+      }
+
+      // 5. Extraer y validar el payload canónico
       const deserializedPayload = CanonicalDeserializer.deserialize(songDto.canonicalPayload);
       const canonicalJSON = CanonicalSerializer.serialize(deserializedPayload);
       const stats = CanonicalSerializer.extractStatistics(deserializedPayload);
 
-      // 3. Insertar canción maestra
+      // 6. Insertar canción maestra sin fallbacks
       const [newSong] = await tx
         .insert(songs)
         .values({
@@ -374,8 +511,8 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
           artist: songDto.artist ? songDto.artist.trim() : null,
           ccliNumber: songDto.ccliNumber ? songDto.ccliNumber.trim() : null,
           defaultKey: songDto.defaultKey.trim(),
-          defaultBpm: songDto.defaultBpm ?? 120,
-          timeSignature: songDto.timeSignature ?? '4/4',
+          defaultBpm: songDto.defaultBpm,
+          timeSignature: songDto.timeSignature.trim(),
           status: 'APPROVED',
           createdByUserId: userId,
         })
@@ -385,7 +522,7 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
         throw new Error('Fallo al insertar el registro de canción canónica.');
       }
 
-      // 4. Insertar versión inicial
+      // 7. Insertar versión inicial
       const [newVersion] = await tx
         .insert(songVersions)
         .values({
@@ -407,23 +544,24 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
         throw new Error('Fallo al insertar la versión inicial canónica.');
       }
 
-      // 5. Actualizar versión actual en canción
+      // 8. Actualizar versión actual en canción
       await tx
         .update(songs)
         .set({ currentVersionId: newVersion.id, updatedAt: new Date() })
         .where(eq(songs.id, newSong.id));
 
-      // 6. Actualizar estado de la propuesta a COMMITTED
+      // 9. Actualizar estado de la propuesta a COMMITTED con referencia canónica (R2-06)
       await tx
         .update(omrProposals)
         .set({
           reviewStatus: 'COMMITTED',
+          canonicalSongId: newSong.id,
           reviewedAt: new Date(),
           reviewedByUserId: userId,
         })
         .where(eq(omrProposals.id, proposalId));
 
-      // 7. Registrar auditoría inmutable
+      // 10. Registrar auditoría inmutable
       await tx.insert(omrAuditHistory).values({
         proposalId,
         userId,
@@ -433,7 +571,7 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
           versionId: newVersion.id,
           title: newSong.title,
         },
-        reason: 'Compromiso atómico y consistente al catálogo canónico.',
+        reason: 'Compromiso atómico e idempotente al catálogo canónico.',
       });
 
       return {
@@ -448,12 +586,34 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
    * Si existen registros en omr_audit_history, PostgreSQL rechazará la eliminación
    * debido a la restricción ON DELETE RESTRICT (R3).
    */
-  public async deleteProposal(proposalId: string): Promise<boolean> {
-    const deleted = await this.db
-      .delete(omrProposals)
-      .where(eq(omrProposals.id, proposalId))
-      .returning({ id: omrProposals.id });
+  public async deleteProposal(
+    proposalId: string,
+    requestingUser?: { id: string; role: string }
+  ): Promise<boolean> {
+    if (requestingUser && !['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
+      throw new ForbiddenError('Solo administradores pueden eliminar propuestas OMR.');
+    }
 
-    return deleted.length > 0;
+    try {
+      const deleted = await this.db
+        .delete(omrProposals)
+        .where(eq(omrProposals.id, proposalId))
+        .returning({ id: omrProposals.id });
+
+      return deleted.length > 0;
+    } catch (err: any) {
+      if (
+        err?.code === '23503' ||
+        err?.cause?.code === '23503' ||
+        String(err?.message || err).includes('23503') ||
+        String(err?.message || err).includes('violates foreign key constraint') ||
+        String(err?.message || err).includes('violates RESTRICT')
+      ) {
+        throw new ValidationError(
+          'No se puede eliminar la propuesta OMR porque contiene registros históricos de auditoría inmutables.'
+        );
+      }
+      throw err;
+    }
   }
 }

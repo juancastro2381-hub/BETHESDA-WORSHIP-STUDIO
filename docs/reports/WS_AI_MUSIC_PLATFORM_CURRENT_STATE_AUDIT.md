@@ -1,9 +1,9 @@
 # BETHESDA WORSHIP STUDIO — AUDITORÍA DEL ESTADO ACTUAL DEL SISTEMA
-## Fase 0 — Arquitectura Base, Capacidades Verificadas y Análisis de Brechas
+## Fase 0A — Arquitectura Base, Capacidades Verificadas, Análisis de Brechas y Hallazgos Remediados
 
 - **Fecha de Auditoría:** 2 de Noviembre de 2026
-- **Estado de la Fase:** FASE 0 — STRICTLY READ-ONLY ARCHITECTURAL ASSESSMENT
-- **Autor:** Principal Software Architect & Senior Music Technology Engineer
+- **Estado de la Fase:** FASE 0A — AUDIT REMEDIATION & FINAL ARCHITECTURE VALIDATION (READ-ONLY)
+- **Autor:** Principal Software Architect, Senior Music Technology Engineer & DevSecOps Engineer
 - **Repositorio Auditado:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`
 - **Compilación de Referencia:** Node.js v20.18.0 • Fastify v5.2.1 • PostgreSQL 16 (Drizzle ORM v0.39.3) • React v19.3.0 • AlphaTab v1.8.4 • OSMD v2.1.2
 
@@ -11,16 +11,19 @@
 
 ## 1. RESUMEN EJECUTIVO DEL ESTADO ACTUAL
 
-Bethesda Worship Studio es una plataforma web full-stack diseñada para la gestión litúrgica, visualización musical en atril digital y reproducción de audio en vivo. Posee una base sólida y madura en:
+Bethesda Worship Studio es una plataforma web full-stack diseñada para la gestión litúrgica, visualización musical en atril digital y streaming de audio en vivo. Posee una base sólida y madura en:
 - **Modelo Musical Canónico:** Representación centralizada a 480 TPQN (`CanonicalMusicPayload`).
 - **Seguridad y Control de Acceso:** RBAC con 5 roles, autenticación JWT con rotación de tokens de refresco, hashing Argon2id y auditoría transaccional.
 - **Visualización en Atril Digital:** Adaptadores de renderizado integrados para OpenSheetMusicDisplay (`OSMD`), `AlphaTab`, `LeadSheetDOM` y visor de documentos (`VisualDocumentStand`).
 - **Gestión Litúrgica y Offline:** Setlists, momentos litúrgicos, sincronización en tiempo real vía WebSockets y almacenamiento local en IndexedDB.
 
-### Hallazgo Central de la Auditoría de IA
-**Actualmente NO existe ningún motor de Inteligencia Artificial ni aprendizaje automático integrado funcionalmente en el código fuente.**
-- Los módulos de **OMR** (`omr-service.ts`, `omr-provider.ts`) representan una arquitectura de contratos y propuestas humanas (`isAiDraft: true`), pero en producción retornan 0 compases debido a que no existe ningún ejecutable ni servicio de OMR vinculado.
-- Los módulos de **Audio** (`audio-service.ts`, `multitrack-service.ts`) operan exclusivamente como gestores de almacenamiento, metadatos y streaming con soporte HTTP Range 206. **No existe transcripción de audio a MIDI, no existe extracción de melodía, no existe reconocimiento de acordes desde audio, no existe separación de pistas (stems) y no existe transcripción de lírica mediante habla.**
+### Hallazgos Críticos de la Auditoría Independiente (F-01 a F-09)
+1. **Ausencia Total de Motor OMR Real (F-01):** `StandardOmrProvider` es un *stub* estructural. En producción arroja error no disponible o retorna 0 compases. No existe binario de Audiveris ni Calamari vinculado.
+2. **Efimeridad de Propuestas OMR (F-02):** `OmrService` almacena propuestas en memoria RAM (`this.proposals = new Map()`). No existe tabla de OMR en PostgreSQL; cualquier reinicio del servidor destruye permanentemente las propuestas.
+3. **Ausencia de Cola de Procesamiento Asíncrono (F-03):** Fastify ejecuta todo de forma síncrona dentro del ciclo de vida de la petición HTTP. No existe Redis ni BullMQ. Tareas de IA bloquearán el bucle de eventos o causarán timeouts 504.
+4. **Anomalías de Higiene en Git (F-08):** El índice de Git rastrea **7,367 archivos dentro de `backend/node_modules/`** y **más de 140 archivos binarios en `backend/storage/`** (archivos `.wav`, `.mp3` y `.pdf`), inflando el repositorio e introduciendo riesgos de fuga de datos.
+5. **Modelo Canónico v1.0.0 sin Metadatos de Confianza ni Proveniencia (F-07):** El modelo canónico actual no soporta puntuaciones de confianza por nota/compás ni mapas de tiempo para sincronización MIDI/Audio.
+6. **Módulos de Audio de Solo Almacenamiento (F-05):** `AudioService` almacena y transmite audio mediante HTTP 206. No existe separación de pistas (stems), transcripción de audio a MIDI ni extracción de tonalidad/acordes.
 
 ---
 
@@ -33,8 +36,8 @@ graph TD
         MW["MusicalWorkspace (Atril Digital)"]
         VDS["VisualDocumentStand (PDF / Imagen)"]
         RR["RendererRegistry"]
-        OSMD["OSMD Adapter (Piano / Viento)"]
-        AT["AlphaTab Adapter (Tablatura / Guitarra)"]
+        OSMD["OSMD Adapter (Piano / Pentagrama)"]
+        AT["AlphaTab Adapter (Tablatura / Guitarra / Bajo)"]
         LSD["LeadSheetDOM Adapter (Cifrado / Letra)"]
         ING["IngestionService (MusicXML & ChordPro)"]
         CSC["ChordSheetConverter (Heurística Texto)"]
@@ -43,12 +46,12 @@ graph TD
 
     subgraph Backend ["Backend (Fastify 5 + TypeScript + Node 20)"]
         HTTP["HTTP API Routes & Zod Schemas"]
-        AUTH["AuthGuard & RBAC"]
+        AUTH["AuthGuard & RBAC (Argon2id + JWT)"]
         SS["SongService & VersionService"]
         DS["DocumentService (PDF & Raster)"]
         AS["AudioService (Storage & Stream 206)"]
         MTS["MultitrackService (Session Manager)"]
-        OMRS["OmrService (Contract Proposal Stub)"]
+        OMRS["OmrService (Ephemeral In-Memory Map Stub)"]
         RSM["RealtimeSessionManager (WebSockets)"]
     end
 
@@ -124,13 +127,11 @@ graph TD
 
 ---
 
-## 4. AUDITORÍA DEL SUBSISTEMA OMR (OPTICAL MUSIC RECOGNITION)
-
-El subsistema OMR fue diseñado en la Fase 3C bajo un modelo de contratos en `backend/src/domain/omr/` y `backend/src/application/omr-service.ts`:
+## 4. AUDITORÍA DEL SUBSISTEMA OMR Y HALLAZGOS F-01 / F-02
 
 ### 4.1 Principios Implementados en Código:
 1. **Propuesta Preliminar Obligatoria:** Toda salida del OMR se etiqueta con `isAiDraft: true` y `reviewStatus: 'PENDING_REVIEW'`.
-2. **Revisión Humana Mandatoria:** La ruta `/api/v1/multitrack/omr/:proposalId/review` requiere aprobación explícita de un usuario con rol autorizado antes de poder persistir en el catálogo.
+2. **Revisión Humana Mandatoria:** La ruta `/api/v1/multitrack/omr/:proposalId/review` requiere aprobación explícita antes de persistir en el catálogo litúrgico.
 3. **Cero Invención de Notas:** En `StandardOmrProvider.recognize()` (líneas 207-232):
    ```typescript
    // En producción o sin motor real:
@@ -150,12 +151,18 @@ El subsistema OMR fue diseñado en la Fase 3C bajo un modelo de contratos en `ba
    };
    ```
 
-### 4.2 Brecha Identificada:
-No existe un motor OMR real (como Audiveris, Calamari u Oemer) instalado ni enlazado mediante proceso secundario, CLI o API remota. El código pasa las pruebas unitarias únicamente cuando se activa explícitamente la bandera `enableTestFixture: true` en el entorno de testing.
+### 4.2 Hallazgos Críticos Confirmados:
+- **F-01 (Falta de Motor OMR):** No existe Audiveris, Calamari ni Oemer instalado ni enlazado. En producción siempre retorna 0 compases.
+- **F-02 (Efimeridad de Propuestas OMR):** En `backend/src/application/omr-service.ts`:
+  ```typescript
+  export class OmrService {
+    private proposals: Map<string, OmrProposal> = new Map();
+  ```
+  Las propuestas viven en la memoria heap del proceso Node.js. Al reiniciar el servidor o escalar horizontalmente, todas las propuestas pendientes se pierden.
 
 ---
 
-## 5. AUDITORÍA DEL SUBSISTEMA DE AUDIO Y MULTIPISTAS
+## 5. AUDITORÍA DEL SUBSISTEMA DE AUDIO Y MULTIPISTAS (F-05)
 
 ### 5.1 Capacidades Verificadas en Código:
 - **Almacenamiento Confiable:** `LocalFileSystemAudioStorageProvider` gestiona archivos de hasta 50 MB con comprobación criptográfica SHA-256.
@@ -171,36 +178,37 @@ No existe un motor OMR real (como Audiveris, Calamari u Oemer) instalado ni enla
 
 ---
 
-## 6. MATRIZ DE BRECHAS TÉCNICAS (GAP ANALYSIS) FRENTE AL OBJETIVO SONGCRIPTION+
+## 6. AUDITORÍA DE HIGIENE DE REPOSITORIO Y GIT (F-08)
 
-| Capacidad Requerida | Estado en Bethesda Worship Studio | Brecha Técnica Específica |
-|---|---|---|
-| **Subida de Archivos de Audio** | **IMPLEMENTADO** | Soporta hasta 50 MB (MP3, WAV, FLAC, OGG, M4A). |
-| **Reproductor de Audio en Atril** | **IMPLEMENTADO** | `AudioPlayerBar.tsx` con soporte de streaming 206 y offline. |
-| **Separación de Pistas (Stems)** | **FALTANTE** | No hay integración de modelos tipo Demucs v4. |
-| **Audio-to-MIDI (Polifónico)** | **FALTANTE** | No hay integración de modelos tipo Basic Pitch / MT3. |
-| **Detección de Melodía Vocal** | **FALTANTE** | No hay estimación de pitch f0 (CREPE, pyin, etc.). |
-| **Detección de Acordes desde Audio** | **FALTANTE** | No hay extractor de acordes (BTC, Chordino). |
-| **Detección de Ritmo y Tempo (BPM)** | **FALTANTE** | No hay detector de beats ni mapa de tempo desde audio (Madmom). |
-| **Transcripción de Letras desde Voz** | **FALTANTE** | No hay integración de Whisper / WhisperX. |
-| **Alineación Sílaba-Nota** | **FALTANTE** | No hay alineación forzada fonema-tiempo (wav2vec2 aligner). |
-| **Reconocimiento OMR de Partituras** | **STUB / CONTRATO** | Estructura de propuestas presente; motor OMR ausente. |
-| **Entrada de Enlaces de Video (YouTube)** | **FALTANTE** | No hay soporte para URLs externas ni descarga de flujos. |
-| **Grabación de Audio Directa** | **FALTANTE** | No hay captura desde micrófono vía `MediaRecorder` API. |
-| **Captura de Partitura con Cámara** | **FALTANTE** | No hay acceso a `navigator.mediaDevices.getUserMedia` para escaneo fotográfico. |
-| **Importación de Archivos MIDI** | **FALTANTE** | No hay parser ni serializador MIDI. |
-| **Importación de MusicXML Comprimido (.mxl)** | **FALTANTE** | Solo se acepta `.musicxml` y `.xml` descomprimido. |
-| **Editor Interactivo de Notación Musical** | **FALTANTE** | El atril es de solo lectura; no hay manipulación de notas con ratón/teclado. |
-| **Editor de Cifrado y Letra** | **PARCIAL** | Existe modal asistido de conversión (`DocumentConversionModal`), pero no edición interactiva en el atril. |
-| **Colas de Procesamiento Asíncrono** | **FALTANTE** | Todo el backend opera síncronamente; no hay Redis ni BullMQ para trabajos pesados de IA. |
+La inspección con `git ls-files` reveló serias anomalías en el índice de Git:
+1. **7,367 archivos rastreados en `backend/node_modules/`:** Fueron confirmados previamente y nunca desindexados con `git rm --cached`. Inflan el tiempo de clonación y provocan ensuciamiento espurio del árbol en Windows (`CRLF`).
+2. **140+ archivos binarios rastreados en `backend/storage/`:** Archivos `.wav`, `.mp3` y `.pdf` subidos durante pruebas locales quedaron registrados en Git debido a la omisión de `backend/storage/` en `backend/.gitignore`.
+3. **Plan de Remediación F-08:** Elaborado en `docs/reports/WS_AI_MUSIC_PLATFORM_GIT_HYGIENE_REMEDIATION_PLAN.md` para ejecutar `git rm --cached` de forma segura tras la aprobación del Product Owner.
 
 ---
 
-## 7. CONCLUSIÓN DE LA AUDITORÍA
+## 7. MATRIZ CONSOLIDADA DE BRECHAS FRENTE AL OBJETIVO SONGCRIPTION+
 
-La arquitectura actual de Bethesda Worship Studio es sólida en su modelo canónico, su capa de persistencia y su atril de lectura interactiva, pero se encuentra completamente desacoplada de capacidades de IA activa. Para transformar el producto en una plataforma inteligente de transcripción musical comparable y superior a SongScription, se requiere:
-1. Diseñar una arquitectura de microservicios asíncronos para tareas intensivas de cómputo (GPU/CPU).
-2. Integrar motores probados de código abierto con licencias comerciales permisivas para transcripción, OMR y separación.
-3. Extender el modelo canónico con campos de confianza, trazabilidad de IA y puente MIDI.
-4. Desarrollar una interfaz de corrección e inspección humana antes de la consolidación de arreglos en el catálogo litúrgico.
+| Capacidad Requerida | Estado Actual en Código | Brecha / Hallazgo Asociado |
+|---|---|---|
+| **Subida de Archivos de Audio** | **IMPLEMENTADO** | Soporta hasta 50 MB (MP3, WAV, FLAC, OGG, M4A). |
+| **Reproductor de Audio en Atril** | **IMPLEMENTADO** | `AudioPlayerBar.tsx` con soporte de streaming 206 y offline. |
+| **Separación de Pistas (Stems)** | **FALTANTE** | Requiere HTDemucs aislado (F-04, F-05). |
+| **Audio-to-MIDI Polifónico** | **FALTANTE** | Requiere Basic Pitch precedido de stem separation (F-05). |
+| **Detección de Melodía y Bajo** | **FALTANTE** | Requiere canalización por stem (voz a melodía, bajo a monofónico). |
+| **Detección de Acordes y Tempo** | **FALTANTE** | Requiere Madmom / NNLS Chroma alineado a la grilla de compases. |
+| **Transcripción de Letras (ASR)** | **FALTANTE** | Requiere WhisperX sobre el stem aislado de voz. |
+| **Motor OMR de Partituras** | **STUB / CONTRATO** | F-01: Audiveris como microservicio aislado; Tesseract para acordes OCR. |
+| **Persistencia de Propuestas OMR** | **EFÍMERO (RAM)** | F-02: Requiere esquema PostgreSQL durable (`omr_proposals`). |
+| **Colas de Procesamiento Asíncrono** | **FALTANTE** | F-03: Fastify opera síncrono; requiere cola PostgreSQL en Fase 1A. |
+| **Almacenamiento de Objetos en Nube** | **DISCO LOCAL** | F-09: Reemplazar MinIO (AGPL) por abstracción S3 / Cloudflare R2. |
+| **Editor Interactivo de Notación** | **FALTANTE** | El atril actual es de solo lectura. |
+| **Modelo Canónico Extendido** | **v1.0.0** | F-07: Requiere migración a v2.0.0 con campos de confianza y MIDI. |
 
+---
+
+## 8. CONCLUSIÓN Y DICTAMEN DE LA AUDITORÍA FASE 0A
+
+Bethesda Worship Studio cuenta con una arquitectura base de nivel profesional en su frontend de atril digital, su modelo canónico inicial y su backend Fastify. Sin embargo, carece de infraestructura de ejecución para IA y arrastra deudas operativas en persistencia de OMR y control de versiones de Git.
+
+Los hallazgos F-01 a F-09 han sido plenamente demostrados con evidencia de código y cuentan con un plan de remediación riguroso y técnicamente defendible para su implementación controlada en la Fase 1A.

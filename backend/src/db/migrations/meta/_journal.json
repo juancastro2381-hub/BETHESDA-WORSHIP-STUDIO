@@ -50,6 +50,13 @@
       "when": 1789930000000,
       "tag": "0006_multitrack_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793655850665,
+      "tag": "0007_eager_iron_patriot",
+      "breakpoints": true
     }
   ]
 }

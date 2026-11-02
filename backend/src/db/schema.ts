@@ -75,6 +75,43 @@ export const transitionTypeEnum = pgEnum('transition_type', [
 ]);
 
 // ============================================================================
+// ENUMS DE PROCESAMIENTO Y OMR (FASE 1A)
+// ============================================================================
+
+export const jobTypeEnum = pgEnum('job_type', [
+  'OMR_PROCESSING',
+  'IMPORT_COMMIT',
+  'AUDIO_TRANSCRIPTION',
+  'STEM_SEPARATION',
+]);
+
+export const jobStatusEnum = pgEnum('job_status', [
+  'PENDING',
+  'PROCESSING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+]);
+
+export const omrProposalStatusEnum = pgEnum('omr_proposal_status', [
+  'DRAFT',
+  'PENDING_REVIEW',
+  'APPROVED_FOR_IMPORT',
+  'REJECTED',
+  'COMMITTED',
+]);
+
+export const omrActionTypeEnum = pgEnum('omr_action_type', [
+  'CREATE_PROPOSAL',
+  'UPDATE_MEASURE',
+  'APPROVE_MEASURE',
+  'FLAG_MEASURE',
+  'APPROVE_PROPOSAL',
+  'REJECT_PROPOSAL',
+  'COMMIT_TO_SONG',
+]);
+
+// ============================================================================
 // ENTIDADES DE SEGURIDAD Y USUARIOS (FASE 2B)
 // ============================================================================
 
@@ -701,5 +738,189 @@ export type MultitrackSessionRow = typeof multitrackSessions.$inferSelect;
 export type NewMultitrackSessionRow = typeof multitrackSessions.$inferInsert;
 export type MultitrackTrackRow = typeof multitrackTracks.$inferSelect;
 export type NewMultitrackTrackRow = typeof multitrackTracks.$inferInsert;
+
+// ============================================================================
+// INFRAESTRUCTURA DE PROCESAMIENTO Y OMR PERSISTENTE (FASE 1A)
+// ============================================================================
+
+/**
+ * Tabla: background_jobs
+ * Registro de tareas en segundo plano para ingesta musical y transcripción.
+ */
+export const backgroundJobs = pgTable(
+  'background_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    jobType: jobTypeEnum('job_type').notNull(),
+    status: jobStatusEnum('status').notNull().default('PENDING'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    tenantId: varchar('tenant_id', { length: 64 }).notNull().default('bethesda-default'),
+    inputRef: varchar('input_ref', { length: 512 }).notNull(),
+    outputRef: varchar('output_ref', { length: 512 }),
+    progress: integer('progress').notNull().default(0),
+    errorCode: varchar('error_code', { length: 64 }),
+    errorDetails: jsonb('error_details').notNull().default({}),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
+    correlationId: varchar('correlation_id', { length: 128 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('idx_background_jobs_job_type').on(table.jobType),
+    index('idx_background_jobs_status').on(table.status),
+    index('idx_background_jobs_user_id').on(table.userId),
+    index('idx_background_jobs_correlation_id').on(table.correlationId),
+    index('idx_background_jobs_created_at').on(table.createdAt),
+  ]
+);
+
+/**
+ * Tabla: omr_proposals
+ * Propuestas preliminares generadas por OMR con revisión humana obligatoria (is_ai_draft: true).
+ */
+export const omrProposals = pgTable(
+  'omr_proposals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    jobId: uuid('job_id').references(() => backgroundJobs.id, { onDelete: 'set null' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    sourceFilename: varchar('source_filename', { length: 255 }).notNull(),
+    sourceHash: varchar('source_hash', { length: 64 }).notNull(),
+    detectedTitle: varchar('detected_title', { length: 255 }),
+    detectedArtist: varchar('detected_artist', { length: 255 }),
+    detectedKey: varchar('detected_key', { length: 16 }),
+    detectedBpm: integer('detected_bpm'),
+    detectedTimeSignature: varchar('detected_time_signature', { length: 16 }),
+    overallConfidence: real('overall_confidence').notNull().default(0),
+    isAiDraft: boolean('is_ai_draft').notNull().default(true),
+    reviewStatus: omrProposalStatusEnum('review_status').notNull().default('DRAFT'),
+    rawPayload: jsonb('raw_payload').notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (table) => [
+    index('idx_omr_proposals_job_id').on(table.jobId),
+    index('idx_omr_proposals_user_id').on(table.userId),
+    index('idx_omr_proposals_source_hash').on(table.sourceHash),
+    index('idx_omr_proposals_review_status').on(table.reviewStatus),
+    index('idx_omr_proposals_created_at').on(table.createdAt),
+  ]
+);
+
+/**
+ * Tabla: omr_proposal_measures
+ * Compases discretos reconocidos en la propuesta OMR.
+ */
+export const omrProposalMeasures = pgTable(
+  'omr_proposal_measures',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    proposalId: uuid('proposal_id')
+      .notNull()
+      .references(() => omrProposals.id, { onDelete: 'cascade' }),
+    measureNumber: integer('measure_number').notNull(),
+    timeSignature: varchar('time_signature', { length: 16 }).notNull().default('4/4'),
+    keySignature: varchar('key_signature', { length: 16 }),
+    chordsDetected: jsonb('chords_detected').notNull().default([]),
+    notesDetected: jsonb('notes_detected').notNull().default([]),
+    lyricsDetected: jsonb('lyrics_detected').notNull().default([]),
+    measureConfidence: real('measure_confidence').notNull().default(0),
+    flags: jsonb('flags').notNull().default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_omr_proposal_measures_proposal_id').on(table.proposalId),
+    uniqueIndex('idx_omr_proposal_measures_prop_num').on(table.proposalId, table.measureNumber),
+  ]
+);
+
+/**
+ * Tabla: omr_audit_history
+ * Registro inmutable de acciones, decisiones y modificaciones humanas sobre propuestas OMR.
+ */
+export const omrAuditHistory = pgTable(
+  'omr_audit_history',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    proposalId: uuid('proposal_id')
+      .notNull()
+      .references(() => omrProposals.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    actionType: omrActionTypeEnum('action_type').notNull(),
+    targetMeasure: integer('target_measure'),
+    targetTick: integer('target_tick'),
+    previousValue: jsonb('previous_value'),
+    newValue: jsonb('new_value'),
+    reason: text('reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_omr_audit_history_proposal_id').on(table.proposalId),
+    index('idx_omr_audit_history_user_id').on(table.userId),
+    index('idx_omr_audit_history_created_at').on(table.createdAt),
+  ]
+);
+
+// Relaciones Drizzle ORM
+export const backgroundJobsRelations = relations(backgroundJobs, ({ one, many }) => ({
+  user: one(users, {
+    fields: [backgroundJobs.userId],
+    references: [users.id],
+  }),
+  proposals: many(omrProposals),
+}));
+
+export const omrProposalsRelations = relations(omrProposals, ({ one, many }) => ({
+  job: one(backgroundJobs, {
+    fields: [omrProposals.jobId],
+    references: [backgroundJobs.id],
+  }),
+  user: one(users, {
+    fields: [omrProposals.userId],
+    references: [users.id],
+  }),
+  reviewedByUser: one(users, {
+    fields: [omrProposals.reviewedByUserId],
+    references: [users.id],
+  }),
+  measures: many(omrProposalMeasures),
+  auditHistory: many(omrAuditHistory),
+}));
+
+export const omrProposalMeasuresRelations = relations(omrProposalMeasures, ({ one }) => ({
+  proposal: one(omrProposals, {
+    fields: [omrProposalMeasures.proposalId],
+    references: [omrProposals.id],
+  }),
+}));
+
+export const omrAuditHistoryRelations = relations(omrAuditHistory, ({ one }) => ({
+  proposal: one(omrProposals, {
+    fields: [omrAuditHistory.proposalId],
+    references: [omrProposals.id],
+  }),
+  user: one(users, {
+    fields: [omrAuditHistory.userId],
+    references: [users.id],
+  }),
+}));
+
+// ============================================================================
+// TIPOS INFERIDOS DRIZZLE ORM (FASE 1A — INFRAESTRUCTURA Y OMR)
+// ============================================================================
+
+export type BackgroundJobRow = typeof backgroundJobs.$inferSelect;
+export type NewBackgroundJobRow = typeof backgroundJobs.$inferInsert;
+export type OmrProposalRow = typeof omrProposals.$inferSelect;
+export type NewOmrProposalRow = typeof omrProposals.$inferInsert;
+export type OmrProposalMeasureRow = typeof omrProposalMeasures.$inferSelect;
+export type NewOmrProposalMeasureRow = typeof omrProposalMeasures.$inferInsert;
+export type OmrAuditHistoryRow = typeof omrAuditHistory.$inferSelect;
+export type NewOmrAuditHistoryRow = typeof omrAuditHistory.$inferInsert;
+
 
 

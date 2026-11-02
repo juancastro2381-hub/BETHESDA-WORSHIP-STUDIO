@@ -1,9 +1,9 @@
 /**
  * @file types.ts
- * @description Tipos de dominio para Reconocimiento Óptico de Música (OMR / IA) (Fase 3C — D2).
+ * @description Tipos de dominio para Reconocimiento Óptico de Música (OMR / IA) (Fase 1A & Fase 3C).
  *
  * Principio mandatorio:
- * El resultado de OMR es SIEMPRE una propuesta (isAiDraft: true) con revisión humana
+ * El resultado de OMR es SIEMPRE una propuesta preliminar (isAiDraft: true) con revisión humana
  * obligatoria antes de persistirse como canción canónica.
  */
 
@@ -12,17 +12,24 @@ export interface OmrNoteDetected {
   octave: number;
   duration: string;
   confidence: number;
+  alter?: number;
+  type?: string;
+  isRest?: boolean;
 }
 
 export interface OmrChordDetected {
   chord: string;
   beat: number;
   confidence: number;
+  tickOffset?: number;
 }
 
 export interface OmrLyricDetected {
   text: string;
   confidence: number;
+  beat?: number;
+  tickOffset?: number;
+  durationTicks?: number;
 }
 
 export interface OmrMeasureProposal {
@@ -33,6 +40,7 @@ export interface OmrMeasureProposal {
   notesDetected: OmrNoteDetected[];
   lyricsDetected: OmrLyricDetected[];
   measureConfidence: number; // 0.0 a 1.0
+  flags?: string[];
 }
 
 export interface OmrUnrecognizedRegion {
@@ -41,10 +49,17 @@ export interface OmrUnrecognizedRegion {
   reason: string;
 }
 
-export type OmrReviewStatus = 'PENDING_REVIEW' | 'APPROVED_FOR_IMPORT' | 'REJECTED';
+export type OmrReviewStatus =
+  | 'DRAFT'
+  | 'PENDING_REVIEW'
+  | 'APPROVED_FOR_IMPORT'
+  | 'REJECTED'
+  | 'COMMITTED';
 
 export interface OmrProposal {
   proposalId: string;
+  jobId?: string;
+  userId?: string;
   sourceFilename: string;
   sourceHash: string;
   detectedTitle: string | null;
@@ -67,4 +82,26 @@ export interface OmrRecognitionInput {
   filename: string;
   mimeType: string;
   fileSizeBytes: number;
+}
+
+export type OmrActionType =
+  | 'CREATE_PROPOSAL'
+  | 'UPDATE_MEASURE'
+  | 'APPROVE_MEASURE'
+  | 'FLAG_MEASURE'
+  | 'APPROVE_PROPOSAL'
+  | 'REJECT_PROPOSAL'
+  | 'COMMIT_TO_SONG';
+
+export interface OmrAuditEntry {
+  id?: string;
+  proposalId: string;
+  userId?: string;
+  actionType: OmrActionType;
+  targetMeasure?: number;
+  targetTick?: number;
+  previousValue?: any;
+  newValue?: any;
+  reason?: string;
+  createdAt?: string;
 }

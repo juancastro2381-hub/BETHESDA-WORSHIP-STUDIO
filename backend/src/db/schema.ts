@@ -798,7 +798,7 @@ export const omrProposals = pgTable(
     isAiDraft: boolean('is_ai_draft').notNull().default(true),
     reviewStatus: omrProposalStatusEnum('review_status').notNull().default('DRAFT'),
     rawPayload: jsonb('raw_payload').notNull().default({}),
-    canonicalSongId: uuid('canonical_song_id').references(() => songs.id, { onDelete: 'set null' }),
+    canonicalSongId: uuid('canonical_song_id').references(() => songs.id, { onDelete: 'restrict' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
@@ -851,7 +851,7 @@ export const omrAuditHistory = pgTable(
     proposalId: uuid('proposal_id')
       .notNull()
       .references(() => omrProposals.id, { onDelete: 'restrict' }),
-    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'restrict' }),
     actionType: omrActionTypeEnum('action_type').notNull(),
     targetMeasure: integer('target_measure'),
     targetTick: integer('target_tick'),

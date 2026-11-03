@@ -38,6 +38,7 @@ import { LocalFileSystemAudioStorageProvider } from '../domain/audio/storage-pro
 import { MultitrackService } from '../application/multitrack-service.ts';
 import { OmrService } from '../application/omr-service.ts';
 import { StandardOmrProvider } from '../domain/omr/omr-provider.ts';
+import type { AuthenticatedUser } from '../domain/omr/types.ts';
 import { env } from '../config/env.ts';
 import type { UserEntity } from '../domain/auth-types.ts';
 import type { SongEntity } from '../domain/types.ts';
@@ -57,6 +58,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
   let omrService: OmrService;
 
   let testUser: UserEntity;
+  let testPrincipal: AuthenticatedUser;
   let viewerUser: UserEntity;
   let leaderToken: string;
   let viewerToken: string;
@@ -106,6 +108,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
       role: 'WORSHIP_LEADER',
     });
     createdUserIds.add(testUser.id);
+    testPrincipal = { id: testUser.id, role: testUser.role };
     leaderToken = tokenService.signAccessToken({
       id: testUser.id,
       email: testUser.email,
@@ -259,7 +262,6 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
       await app.close();
     }
 
-    await pool.query("SET app.allow_audit_cleanup = 'true'");
     try {
       if (createdAudioIds.size > 0) {
         const aIds = Array.from(createdAudioIds);
@@ -268,15 +270,19 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
 
       if (createdSongIds.size > 0) {
         const sIds = Array.from(createdSongIds);
+        await pool.query('DELETE FROM omr_proposals WHERE canonical_song_id = ANY($1)', [sIds]);
         await pool.query('DELETE FROM songs WHERE id = ANY($1)', [sIds]);
       }
 
       if (createdUserIds.size > 0) {
         const uIds = Array.from(createdUserIds);
-        await pool.query('DELETE FROM users WHERE id = ANY($1)', [uIds]);
+        await pool.query(
+          'DELETE FROM users WHERE id = ANY($1) AND id NOT IN (SELECT user_id FROM omr_audit_history WHERE user_id IS NOT NULL)',
+          [uIds]
+        );
       }
-    } finally {
-      await pool.query("RESET app.allow_audit_cleanup");
+    } catch {
+      // Ignorar fallos de limpieza
     }
   });
 
@@ -503,7 +509,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
         mimeType: 'application/pdf',
         fileSizeBytes: mockScoreBuffer.length,
       },
-      testUser.id
+      testPrincipal
     );
 
     assert.ok(proposal.proposalId);
@@ -526,7 +532,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
             mimeType: 'application/x-msdownload',
             fileSizeBytes: 20,
           },
-          testUser.id
+          testPrincipal
         );
       },
       { name: 'ValidationError' }
@@ -541,7 +547,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
             mimeType: 'application/pdf',
             fileSizeBytes: 0,
           },
-          testUser.id
+          testPrincipal
         );
       },
       { name: 'ValidationError' }
@@ -558,7 +564,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
             mimeType: 'application/pdf',
             fileSizeBytes: 16 * 1024 * 1024, // 16 MB
           },
-          testUser.id
+          testPrincipal
         );
       },
       { name: 'ValidationError' }
@@ -566,7 +572,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
   });
 
   it('D2.4: should guarantee ZERO note fabrication: dubious regions must be logged as unrecognizedRegions', () => {
-    const proposal = omrService.getProposal(testProposalId);
+    const proposal = omrService.getProposal(testProposalId, testPrincipal);
 
     assert.ok(proposal.unrecognizedRegions.length > 0);
     const region = proposal.unrecognizedRegions[0];
@@ -577,7 +583,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     // La propuesta aún tiene estado PENDING_REVIEW
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(testProposalId, testUser.id);
+        await omrService.commitToCanonicalSong(testProposalId, testPrincipal);
       },
       { name: 'ValidationError' }
     );
@@ -585,12 +591,12 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
 
   it('D2.6: should allow canonical commit only after explicit human approval and preserve real recognized measures', async () => {
     // 1. Músico humano revisa y aprueba (asíncrono con confirmación de persistencia R2-01)
-    const reviewed = await omrService.reviewProposal(testProposalId, testUser.id, 'APPROVED_FOR_IMPORT');
+    const reviewed = await omrService.reviewProposal(testProposalId, 'APPROVED_FOR_IMPORT', testPrincipal);
     assert.equal(reviewed.reviewStatus, 'APPROVED_FOR_IMPORT');
     assert.equal(reviewed.reviewedByUserId, testUser.id);
 
     // 2. Persistir en la base de datos canónica
-    const createdSong = await omrService.commitToCanonicalSong(testProposalId, testUser.id, {
+    const createdSong = await omrService.commitToCanonicalSong(testProposalId, testPrincipal, {
       title: 'Gracia Sublime Es — Aprobada por Músico',
     });
 
@@ -619,7 +625,7 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
         mimeType: 'application/pdf',
         fileSizeBytes: mockPdf.length,
       },
-      testUser.id
+      testPrincipal
     );
 
     assert.equal(proposal.overallConfidence, 0.0);
@@ -627,10 +633,10 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     assert.ok(proposal.unrecognizedRegions[0].reason.includes('no configurado'));
 
     // Intentar aprobar y cometer propuesta sin compases debe ser rechazado
-    await unconfiguredOmrService.reviewProposal(proposal.proposalId, testUser.id, 'APPROVED_FOR_IMPORT');
+    await unconfiguredOmrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', testPrincipal);
     await assert.rejects(
       async () => {
-        await unconfiguredOmrService.commitToCanonicalSong(proposal.proposalId, testUser.id);
+        await unconfiguredOmrService.commitToCanonicalSong(proposal.proposalId, testPrincipal);
       },
       { name: 'ValidationError' }
     );

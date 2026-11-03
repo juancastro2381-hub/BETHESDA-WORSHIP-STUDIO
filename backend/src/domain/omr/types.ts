@@ -9,6 +9,11 @@
 
 export const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB límite técnico coherente
 
+export interface AuthenticatedUser {
+  id: string;
+  role: string;
+}
+
 export interface OmrNoteDetected {
   step: string;
   octave: number;
@@ -77,6 +82,7 @@ export interface OmrProposal {
   createdAt: string;
   reviewedAt?: string;
   reviewedByUserId?: string;
+  canonicalSongId?: string | null;
 }
 
 export interface OmrRecognitionInput {

@@ -1,7 +1,7 @@
 /**
  * @file omr-persistence-and-integrity.test.ts
  * @description Suite de pruebas automatizadas para la persistencia ACID en PostgreSQL, transacciones atómicas,
- * inmutabilidad de auditoría por triggers, idempotencia y remediación rigurosa de integridad musical (Fase 1A, 1A-R & 1A-R2).
+ * inmutabilidad estricta de auditoría por triggers sin bypass, higiene de caché, e integridad musical (Fase 1A-R3).
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -31,6 +31,9 @@ import type { IOmrProvider } from '../domain/omr/omr-provider.ts';
 import {
   type OmrProposal,
   type OmrRecognitionInput,
+  type AuthenticatedUser,
+  type OmrMeasureProposal,
+  type OmrAuditEntry,
   MAX_OMR_FILE_SIZE_BYTES,
 } from '../domain/omr/types.ts';
 import {
@@ -38,6 +41,7 @@ import {
   ForbiddenError,
   UnauthorizedError,
   ConflictError,
+  NotFoundError,
 } from '../domain/errors.ts';
 
 // Proveedor OMR programable para pruebas de integridad musical
@@ -78,7 +82,7 @@ class MockOmrProvider implements IOmrProvider {
   }
 }
 
-describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transacciones y Seguridad', () => {
+describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Transacciones Atómicas y Seguridad Principal', () => {
   let omrRepo: DrizzleOmrProposalRepository;
   let jobRepo: DrizzleBackgroundJobRepository;
   let songRepo: DrizzleSongRepository;
@@ -89,6 +93,11 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
   let testUserId: string;
   let otherUserId: string;
   let viewerUserId: string;
+
+  let leaderPrincipal: AuthenticatedUser;
+  let musicianPrincipal: AuthenticatedUser;
+  let viewerPrincipal: AuthenticatedUser;
+  let adminPrincipal: AuthenticatedUser;
 
   const createdSongIds: string[] = [];
   const createdProposalIds: string[] = [];
@@ -105,7 +114,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     omrService = new OmrService(mockProvider, songRepo, omrRepo);
 
     // 1. Crear usuario Worship Leader
-    const testEmail = `worship_leader_omr_${Date.now()}@bethesda.local`;
+    const testEmail = `worship_leader_omr_${Date.now()}_${Math.random().toString(36).substring(7)}@bethesda.local`;
     const user = await userRepo.create({
       email: testEmail,
       passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
@@ -117,7 +126,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     testUserId = user.id;
 
     // 2. Crear segundo usuario Musician
-    const otherEmail = `musician_other_${Date.now()}@bethesda.local`;
+    const otherEmail = `musician_other_${Date.now()}_${Math.random().toString(36).substring(7)}@bethesda.local`;
     const otherUser = await userRepo.create({
       email: otherEmail,
       passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
@@ -129,7 +138,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     otherUserId = otherUser.id;
 
     // 3. Crear tercer usuario Viewer
-    const viewerEmail = `viewer_${Date.now()}@bethesda.local`;
+    const viewerEmail = `viewer_${Date.now()}_${Math.random().toString(36).substring(7)}@bethesda.local`;
     const viewerUser = await userRepo.create({
       email: viewerEmail,
       passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhash$dummyhash',
@@ -139,27 +148,21 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       accountStatus: 'ACTIVE',
     });
     viewerUserId = viewerUser.id;
+
+    leaderPrincipal = { id: testUserId, role: 'WORSHIP_LEADER' };
+    musicianPrincipal = { id: otherUserId, role: 'MUSICIAN' };
+    viewerPrincipal = { id: viewerUserId, role: 'VIEWER' };
+    adminPrincipal = { id: testUserId, role: 'ADMIN' };
   });
 
   after(async () => {
-    // Activar permiso de sesión para limpieza de auditoría en entorno de prueba
-    await db.execute(sql`SET app.allow_audit_cleanup = 'true'`);
-    for (const sId of createdSongIds) {
-      await db.delete(songVersions).where(eq(songVersions.songId, sId));
-      await db.delete(songs).where(eq(songs.id, sId));
+    try {
+      for (const jId of createdJobIds) {
+        await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jId));
+      }
+    } catch {
+      // ignore
     }
-    for (const pId of createdProposalIds) {
-      await db.delete(omrAuditHistory).where(eq(omrAuditHistory.proposalId, pId));
-      await db.delete(omrProposalMeasures).where(eq(omrProposalMeasures.proposalId, pId));
-      await db.delete(omrProposals).where(eq(omrProposals.id, pId));
-    }
-    for (const jId of createdJobIds) {
-      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jId));
-    }
-    if (testUserId) await db.delete(users).where(eq(users.id, testUserId));
-    if (otherUserId) await db.delete(users).where(eq(users.id, otherUserId));
-    if (viewerUserId) await db.delete(users).where(eq(users.id, viewerUserId));
-    await db.execute(sql`RESET app.allow_audit_cleanup`);
   });
 
   // ==========================================================================
@@ -200,7 +203,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
 
     createdProposalIds.push(proposal.proposalId);
@@ -212,10 +215,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     omrService.clearProposals();
 
     // Recuperar directamente desde PostgreSQL
-    const loadedProposal = await omrService.getProposalAsync(proposal.proposalId, {
-      id: testUserId,
-      role: 'WORSHIP_LEADER',
-    });
+    const loadedProposal = await omrService.getProposalAsync(proposal.proposalId, leaderPrincipal);
     assert.equal(loadedProposal.proposalId, proposal.proposalId);
     assert.equal(loadedProposal.detectedTitle, 'Hosanna en las Alturas');
     assert.equal(loadedProposal.detectedKey, 'G');
@@ -232,7 +232,6 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         throw new Error('Conexión perdida a PostgreSQL (falla simulada)');
       },
       findProposalById: async () => null,
-      updateProposalStatus: async () => {},
       updateProposalStatusAndAudit: async () => {},
       updateMeasure: async () => {},
       recordAudit: async () => {},
@@ -255,14 +254,14 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: dummyBuffer.length,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       (err: any) => err.message.includes('Conexión perdida a PostgreSQL')
     );
 
     // Verificar que CERO propuestas quedaron registradas en la memoria caché
-    assert.throws(() => failingOmrService.getProposal('cualquier-id'), {
+    assert.throws(() => failingOmrService.getProposal('cualquier-id', leaderPrincipal), {
       name: 'NotFoundError',
     });
   });
@@ -272,6 +271,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       saveProposal: async (p) => p,
       findProposalById: async (id) => ({
         proposalId: id,
+        userId: testUserId,
         sourceFilename: 'review_fail.pdf',
         sourceHash: 'dummyhash',
         detectedTitle: 'Review Fail Test',
@@ -282,11 +282,20 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         overallConfidence: 0.9,
         isAiDraft: true,
         reviewStatus: 'PENDING_REVIEW',
-        measures: [],
+        measures: [
+          {
+            measureNumber: 1,
+            timeSignature: '4/4',
+            measureConfidence: 0.9,
+            chordsDetected: [],
+            notesDetected: [{ step: 'G', octave: 4, duration: 'whole', confidence: 0.9 }],
+            lyricsDetected: [],
+            flags: [],
+          },
+        ],
         unrecognizedRegions: [],
         createdAt: new Date().toISOString(),
       }),
-      updateProposalStatus: async () => {},
       updateProposalStatusAndAudit: async () => {
         throw new Error('Postgres connection severed during review transaction');
       },
@@ -308,18 +317,18 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
 
     await assert.rejects(
       async () => {
-        await failingService.reviewProposal(p.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+        await failingService.reviewProposal(p.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
       },
       (err: any) => err.message.includes('Postgres connection severed during review transaction')
     );
 
     // El estado en memoria caché debe permanecer como PENDING_REVIEW (cero falso éxito)
-    const cached = failingService.getProposal(p.proposalId, { id: testUserId, role: 'WORSHIP_LEADER' });
+    const cached = failingService.getProposal(p.proposalId, leaderPrincipal);
     assert.equal(cached.reviewStatus, 'PENDING_REVIEW');
   });
 
@@ -330,7 +339,17 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       detectedBpm: 90,
       detectedTimeSignature: '4/4',
       overallConfidence: 0.95,
-      measures: [],
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.95,
+          chordsDetected: [],
+          notesDetected: [{ step: 'D', octave: 4, duration: 'whole', confidence: 0.95 }],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
     };
 
     const dummyBuffer = Buffer.from('%PDF-1.4 atomic review test');
@@ -341,15 +360,15 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
     // Ejecutar revisión asíncrona confirmada en BD
     const reviewed = await omrService.reviewProposal(
       proposal.proposalId,
-      testUserId,
       'APPROVED_FOR_IMPORT',
+      leaderPrincipal,
       'Verificación atómica'
     );
     assert.equal(reviewed.reviewStatus, 'APPROVED_FOR_IMPORT');
@@ -403,12 +422,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -451,12 +470,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -480,7 +499,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
           timeSignature: undefined,
           measureConfidence: 0.8,
           chordsDetected: [],
-          notesDetected: [{ step: 'G', octave: 4, duration: 'quarter', confidence: 0.8 }],
+          notesDetected: [{ step: 'G', octave: 4, duration: 'dotted-half', confidence: 0.8 }],
           lyricsDetected: [],
           flags: [],
         },
@@ -495,16 +514,16 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     // Intentar comprometer sin override de métrica debe fallar con ValidationError
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -514,7 +533,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     // Proporcionar anulación explícita y verificada debe permitir el compromiso
     const committed = await omrService.commitToCanonicalSong(
       proposal.proposalId,
-      testUserId,
+      leaderPrincipal,
       { timeSignature: '3/4' }
     );
     createdSongIds.push(committed.song.id);
@@ -534,7 +553,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
           timeSignature: '4/4',
           measureConfidence: 0.8,
           chordsDetected: [],
-          notesDetected: [{ step: 'G', octave: 4, duration: 'quarter', confidence: 0.8 }],
+          notesDetected: [{ step: 'G', octave: 4, duration: 'whole', confidence: 0.8 }],
           lyricsDetected: [],
           flags: [],
         },
@@ -549,16 +568,16 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     // Sin BPM explícito, debe bloquear
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -568,7 +587,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     // Con anulación explícita de BPM, procede
     const committed = await omrService.commitToCanonicalSong(
       proposal.proposalId,
-      testUserId,
+      leaderPrincipal,
       { bpm: 110 }
     );
     createdSongIds.push(committed.song.id);
@@ -594,10 +613,9 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       async () => {
         await omrRepo.commitProposalTransaction(
           'non-existent-id',
-          testUserId,
+          leaderPrincipal,
           dummyDto as any,
-          'Missing BPM Song',
-          { id: testUserId, role: 'WORSHIP_LEADER' }
+          'Missing BPM Song'
         );
       },
       (err: any) =>
@@ -625,10 +643,9 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       async () => {
         await omrRepo.commitProposalTransaction(
           'non-existent-id',
-          testUserId,
+          leaderPrincipal,
           dummyDto as any,
-          'Missing Meter Song',
-          { id: testUserId, role: 'WORSHIP_LEADER' }
+          'Missing Meter Song'
         );
       },
       (err: any) =>
@@ -640,7 +657,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
   // ==========================================================================
   // 3. TONALIDADES Y CÍRCULO DE QUINTAS (R2 & R2-02)
   // ==========================================================================
-  it('3.1: should preserve detected key signature (G Major = 1 sharp, Eb Major = 3 flats) without defaulting to 0', async () => {
+  it('3.1: should preserve detected key signature (Eb Major = 3 flats) without defaulting to 0', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Himno en Mi Bemol Mayor',
       detectedKey: 'Eb',
@@ -672,12 +689,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -715,16 +732,16 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     // Intentar comprometer sin tonalidad debe fallar (CERO fallback silencioso a C)
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -734,7 +751,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     // Con anulación explícita validada, procede exitosamente
     const committed = await omrService.commitToCanonicalSong(
       proposal.proposalId,
-      testUserId,
+      leaderPrincipal,
       { key: 'F' }
     );
     createdSongIds.push(committed.song.id);
@@ -760,10 +777,9 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       async () => {
         await omrRepo.commitProposalTransaction(
           'non-existent-id',
-          testUserId,
+          leaderPrincipal,
           dummyDto as any,
-          'Missing Key Song',
-          { id: testUserId, role: 'WORSHIP_LEADER' }
+          'Missing Key Song'
         );
       },
       (err: any) =>
@@ -806,12 +822,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -855,22 +871,20 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Debe registrar la bandera UNRESOLVED_NOTE_GLYPH en el compás
     assert.ok(
       proposal.measures[0]?.flags?.some((f) => f.includes('UNRESOLVED_NOTE_GLYPH')),
       'Debe marcar la bandera UNRESOLVED_NOTE_GLYPH en el compás con glifo corrupto'
     );
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
-    // Intentar comprometer al catálogo canónico debe ser RECHAZADO (no crear silencios falsos ni notas falsas)
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -915,15 +929,15 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -970,15 +984,15 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -1005,7 +1019,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             { chord: 'C', beat: 1, confidence: 0.95 },
             { chord: 'ILEGIBLE_???/13b9#', beat: 3, confidence: 0.4 },
           ],
-          notesDetected: [],
+          notesDetected: [{ step: 'C', octave: 4, duration: 'whole', confidence: 0.95 }],
           lyricsDetected: [],
           flags: [],
         },
@@ -1020,12 +1034,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     assert.ok(
@@ -1083,12 +1097,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -1132,15 +1146,15 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     await assert.rejects(
       async () => {
-        await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -1149,9 +1163,9 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
   });
 
   // ==========================================================================
-  // 7. SILENCIO DE COMPÁS VACÍO LEGÍTIMO (R2-03)
+  // 7. SILENCIOS EXPLÍCITOS VS COMPÁS SIN NOTAS (R3-03)
   // ==========================================================================
-  it('7.1: should insert rest with exact metric duration (960 ticks for 2/4) on empty measure', async () => {
+  it('7.1: should REJECT canonical commit on empty measure (notesDetected: []) with ValidationError (R3-03)', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Compás Vacío en 2/4',
       detectedKey: 'C',
@@ -1179,18 +1193,163 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    // Debe marcar UNRESOLVED_MEASURE_CONTENT
+    assert.ok(proposal.measures[0]?.flags?.includes('UNRESOLVED_MEASURE_CONTENT'));
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+
+    // Intentar comprometer debe ser RECHAZADO (CERO fabricación de silencios de compás vacío)
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('no contiene notas ni silencios explícitos reconocidos')
+    );
+  });
+
+  it('7.2: should preserve explicit full-measure rest when isRest: true is recognized by OMR (R3-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Silencio Explícito en 2/4',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '2/4',
+      overallConfidence: 0.95,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '2/4',
+          measureConfidence: 0.95,
+          chordsDetected: [],
+          notesDetected: [
+            { step: 'B', octave: 4, duration: 'half', confidence: 0.95, isRest: true },
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 explicit rest 2/4 test buffer');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'explicit_rest_2_4.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
     const rests = payload.measures[0].voices[0].events.filter((e: any) => e.type === 'REST');
     assert.equal(rests.length, 1);
-    assert.equal(rests[0].durationTicks, 960, 'El silencio de compás en 2/4 debe durar 960 ticks');
+    assert.equal(rests[0].durationTicks, 960, 'El silencio explícito en 2/4 (half) debe durar 960 ticks');
+  });
+
+  it('7.3: should preserve explicit partial rest and note sequence in correct order (R3-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Silencio Parcial y Nota en 2/4',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '2/4',
+      overallConfidence: 0.95,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '2/4',
+          measureConfidence: 0.95,
+          chordsDetected: [],
+          notesDetected: [
+            { step: 'B', octave: 4, duration: 'quarter', confidence: 0.95, isRest: true },
+            { step: 'C', octave: 4, duration: 'quarter', confidence: 0.95, isRest: false },
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 partial rest and note buffer');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'partial_rest_note.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
+    createdSongIds.push(committed.song.id);
+
+    const payload = committed.version.canonicalPayload as any;
+    const events = payload.measures[0].voices[0].events;
+    assert.equal(events.length, 2);
+    assert.equal(events[0].type, 'REST');
+    assert.equal(events[0].durationTicks, 480);
+    assert.equal(events[1].type, 'NOTE');
+    assert.equal(events[1].durationTicks, 480);
+  });
+
+  it('7.4: should reject commit when measure duration is incomplete (R3-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Compás Incompleto',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4', // Requiere 1920 ticks
+          measureConfidence: 0.9,
+          chordsDetected: [],
+          notesDetected: [
+            // Solo una negra (480 ticks) en compás de 4/4 (faltan 1440 ticks)
+            { step: 'C', octave: 4, duration: 'quarter', confidence: 0.95 },
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 incomplete measure duration buffer');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'incomplete_measure.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('duración acumulada de 480 ticks, distinta a los 1920 ticks requeridos')
+    );
   });
 
   // ==========================================================================
@@ -1234,12 +1393,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
     const payload = committed.version.canonicalPayload as any;
@@ -1283,7 +1442,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
@@ -1306,7 +1465,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: 0,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       { name: 'ValidationError' }
@@ -1328,7 +1487,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: 10,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       (err: any) =>
@@ -1348,7 +1507,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: 100,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       (err: any) =>
@@ -1370,7 +1529,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: boundaryBytes,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       (err: any) =>
@@ -1390,7 +1549,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
             mimeType: 'application/pdf',
             fileSizeBytes: invalidHeaderBuffer.length,
           },
-          testUserId
+          leaderPrincipal
         );
       },
       (err: any) =>
@@ -1400,7 +1559,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
   });
 
   // ==========================================================================
-  // 11. AUDITORÍA INMUTABLE (R3 & R2-05) & TRANSACCIONES ATÓMICAS (R4)
+  // 11. AUDITORÍA INMUTABLE SIN BYPASS (R3-02) & TRANSACCIONES ATÓMICAS (R4)
   // ==========================================================================
   it('11.1: should log creation, review, and commit events into omr_audit_history without sensitive tokens', async () => {
     mockProvider.customProposal = {
@@ -1430,24 +1589,22 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
     await omrService.reviewProposalAsync(
       proposal.proposalId,
-      testUserId,
       'APPROVED_FOR_IMPORT',
+      leaderPrincipal,
       'Aprobado tras verificar métrica y notas'
     );
 
-    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(committed.song.id);
 
-    const auditHistory = await omrRepo.getAuditHistory(proposal.proposalId, {
-      id: testUserId,
-      role: 'WORSHIP_LEADER',
-    });
+    const auditHistory = await omrRepo.getAuditHistory(proposal.proposalId, leaderPrincipal);
+
     assert.ok(auditHistory.length >= 3, 'Debe haber al menos 3 eventos de auditoría');
 
     const actionTypes = auditHistory.map((a) => a.actionType);
@@ -1479,14 +1636,14 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Intentar eliminar la propuesta debe ser rechazado por la BD (ON DELETE RESTRICT)
+    // Intentar eliminar la propuesta debe ser rechazado por la BD (ON DELETE RESTRICT en auditoría)
     await assert.rejects(
       async () => {
-        await omrRepo.deleteProposal(proposal.proposalId, { id: testUserId, role: 'ADMIN' });
+        await omrRepo.deleteProposal(proposal.proposalId, adminPrincipal);
       },
       (err: any) =>
         err.name === 'ValidationError' &&
@@ -1494,7 +1651,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     );
   });
 
-  it('11.3: should block UPDATE on omr_audit_history at database trigger level (R2-05)', async () => {
+  it('11.3: should block UPDATE on omr_audit_history at database trigger level even if app.allow_audit_cleanup is set (R3-02)', async () => {
     const dummyBuffer = Buffer.from('%PDF-1.4 trigger update test buffer');
     const proposal = await omrService.processUpload(
       {
@@ -1503,24 +1660,30 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Intentar modificar directamente un registro de auditoría debe ser abortado por el trigger
-    await assert.rejects(
-      async () => {
-        await db.execute(
-          sql`UPDATE omr_audit_history SET reason = 'Manipulado' WHERE proposal_id = ${proposal.proposalId}`
-        );
-      },
-      (err: any) =>
-        err.message.includes('omr_audit_history records are immutable') ||
-        err.code === '55000'
-    );
+    // Intentar eludir con SET app.allow_audit_cleanup = 'true'
+    await db.execute(sql`SET app.allow_audit_cleanup = 'true'`);
+
+    try {
+      await assert.rejects(
+        async () => {
+          await db.execute(
+            sql`UPDATE omr_audit_history SET reason = 'Manipulado' WHERE proposal_id = ${proposal.proposalId}`
+          );
+        },
+        (err: any) =>
+          err.message.includes('OMR audit history is strictly immutable') ||
+          err.code === '55000'
+      );
+    } finally {
+      await db.execute(sql`RESET app.allow_audit_cleanup`);
+    }
   });
 
-  it('11.4: should block DELETE on omr_audit_history at database trigger level (R2-05)', async () => {
+  it('11.4: should block DELETE on omr_audit_history at database trigger level even if app.allow_audit_cleanup is set (R3-02)', async () => {
     const dummyBuffer = Buffer.from('%PDF-1.4 trigger delete test buffer');
     const proposal = await omrService.processUpload(
       {
@@ -1529,21 +1692,27 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Intentar eliminar directamente un registro de auditoría debe ser abortado por el trigger
-    await assert.rejects(
-      async () => {
-        await db.execute(
-          sql`DELETE FROM omr_audit_history WHERE proposal_id = ${proposal.proposalId}`
-        );
-      },
-      (err: any) =>
-        err.message.includes('omr_audit_history records are immutable') ||
-        err.code === '55000'
-    );
+    // Intentar eludir con SET app.allow_audit_cleanup = 'true'
+    await db.execute(sql`SET app.allow_audit_cleanup = 'true'`);
+
+    try {
+      await assert.rejects(
+        async () => {
+          await db.execute(
+            sql`DELETE FROM omr_audit_history WHERE proposal_id = ${proposal.proposalId}`
+          );
+        },
+        (err: any) =>
+          err.message.includes('OMR audit history is strictly immutable') ||
+          err.code === '55000'
+      );
+    } finally {
+      await db.execute(sql`RESET app.allow_audit_cleanup`);
+    }
   });
 
   // ==========================================================================
@@ -1580,9 +1749,9 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
   });
 
   // ==========================================================================
-  // 13. SEGURIDAD Y CONTROL DE ACCESO / IDOR (R7 & R2-04)
+  // 13. SEGURIDAD Y CONTROL DE ACCESO / IDOR (R3-01)
   // ==========================================================================
-  it('13.1: should enforce ownership and reject unauthorized access to another user proposal (R7 & R2-04)', async () => {
+  it('13.1: should enforce ownership and reject unauthorized access to another user proposal (R3-01)', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Propuesta Privada de Juan',
       detectedKey: 'G',
@@ -1600,23 +1769,20 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
     // Usuario 'otherUserId' (MUSICIAN) intenta acceder a la propuesta de Juan
     await assert.rejects(
       async () => {
-        await omrRepo.findProposalById(proposal.proposalId, {
-          id: otherUserId,
-          role: 'MUSICIAN',
-        });
+        await omrRepo.findProposalById(proposal.proposalId, musicianPrincipal);
       },
       { name: 'ForbiddenError' }
     );
   });
 
-  it('13.2: should reject proposal review by unprivileged roles (R7 & R2-04)', async () => {
+  it('13.2: should reject proposal review by unprivileged roles (R3-01)', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Propuesta para Revisión por Viewer',
       detectedKey: 'C',
@@ -1634,7 +1800,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
@@ -1643,17 +1809,16 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
       async () => {
         await omrService.reviewProposalAsync(
           proposal.proposalId,
-          viewerUserId,
           'APPROVED_FOR_IMPORT',
-          'Intento no autorizado',
-          { id: viewerUserId, role: 'VIEWER' }
+          viewerPrincipal,
+          'Intento no autorizado'
         );
       },
       { name: 'ForbiddenError' }
     );
   });
 
-  it('13.3: should reject access to proposal with null owner by ordinary users (R2-04)', async () => {
+  it('13.3: should reject access to proposal with null owner by ordinary users (R3-01)', async () => {
     const nullOwnerProposalId = crypto.randomUUID();
     await db.insert(omrProposals).values({
       id: nullOwnerProposalId,
@@ -1668,10 +1833,7 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     // Usuario MUSICIAN intenta acceder: debe ser rechazado con ForbiddenError
     await assert.rejects(
       async () => {
-        await omrRepo.findProposalById(nullOwnerProposalId, {
-          id: otherUserId,
-          role: 'MUSICIAN',
-        });
+        await omrRepo.findProposalById(nullOwnerProposalId, musicianPrincipal);
       },
       (err: any) =>
         err.name === 'ForbiddenError' &&
@@ -1679,15 +1841,12 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     );
 
     // Usuario ADMIN intenta acceder: debe ser permitido para recuperación
-    const adminAccess = await omrRepo.findProposalById(nullOwnerProposalId, {
-      id: testUserId,
-      role: 'ADMIN',
-    });
+    const adminAccess = await omrRepo.findProposalById(nullOwnerProposalId, adminPrincipal);
     assert.ok(adminAccess);
     assert.equal(adminAccess.proposalId, nullOwnerProposalId);
   });
 
-  it('13.4: should reject access when requestingUser is missing (R2-04)', async () => {
+  it('13.4: should reject access when requestingUser is missing or invalid (R3-01)', async () => {
     const dummyBuffer = Buffer.from('%PDF-1.4 missing requester test buffer');
     const proposal = await omrService.processUpload(
       {
@@ -1696,20 +1855,28 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    // Llamar findProposalById sin requestingUser debe lanzar UnauthorizedError (HTTP 401)
+    // Llamar findProposalById sin requestingUser debe lanzar UnauthorizedError
     await assert.rejects(
       async () => {
-        await omrRepo.findProposalById(proposal.proposalId);
+        await omrRepo.findProposalById(proposal.proposalId, undefined as any);
       },
       { name: 'UnauthorizedError' }
     );
+
+    // Llamar findProposalById con rol no válido debe lanzar ForbiddenError
+    await assert.rejects(
+      async () => {
+        await omrRepo.findProposalById(proposal.proposalId, { id: testUserId, role: 'INVALID_ROLE' });
+      },
+      { name: 'ForbiddenError' }
+    );
   });
 
-  it('13.5: should reject unauthorized users from inspecting audit history (R2-04)', async () => {
+  it('13.5: should reject unauthorized users from inspecting audit history (R3-01)', async () => {
     const dummyBuffer = Buffer.from('%PDF-1.4 audit history security test buffer');
     const proposal = await omrService.processUpload(
       {
@@ -1718,26 +1885,23 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
     // Usuario 'otherUserId' (MUSICIAN) intenta inspeccionar la auditoría de Juan
     await assert.rejects(
       async () => {
-        await omrRepo.getAuditHistory(proposal.proposalId, {
-          id: otherUserId,
-          role: 'MUSICIAN',
-        });
+        await omrRepo.getAuditHistory(proposal.proposalId, musicianPrincipal);
       },
       { name: 'ForbiddenError' }
     );
   });
 
   // ==========================================================================
-  // 14. IDEMPOTENCIA Y SEGURIDAD BAJO CONCURRENCIA (R2-06)
+  // 14. IDEMPOTENCIA Y SEGURIDAD BAJO CONCURRENCIA (R2-06 & R3-06)
   // ==========================================================================
-  it('14.1: should ensure canonical commit is idempotent and returns existing song on retry (R2-06)', async () => {
+  it('14.1: should ensure canonical commit is idempotent and returns existing song on retry (R3-06)', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Canción Idempotente de Prueba',
       detectedKey: 'D',
@@ -1766,24 +1930,24 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     // Primer commit
-    const firstCommit = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    const firstCommit = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     createdSongIds.push(firstCommit.song.id);
     assert.ok(firstCommit.song.id);
 
     // Segundo commit (retry) debe retornar la MISMA canción sin duplicar registros en songs
-    const secondCommit = await omrService.commitToCanonicalSong(proposal.proposalId, testUserId);
+    const secondCommit = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
     assert.equal(secondCommit.song.id, firstCommit.song.id);
     assert.equal(secondCommit.song.title, firstCommit.song.title);
   });
 
-  it('14.2: should serialize concurrent canonical commits via SELECT FOR UPDATE producing exactly 1 song (R2-06)', async () => {
+  it('14.2: should serialize concurrent canonical commits via SELECT FOR UPDATE producing exactly 1 song (R3-06)', async () => {
     mockProvider.customProposal = {
       detectedTitle: 'Canción Concurrente de Prueba',
       detectedKey: 'A',
@@ -1812,16 +1976,16 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
         mimeType: 'application/pdf',
         fileSizeBytes: dummyBuffer.length,
       },
-      testUserId
+      leaderPrincipal
     );
     createdProposalIds.push(proposal.proposalId);
 
-    await omrService.reviewProposal(proposal.proposalId, testUserId, 'APPROVED_FOR_IMPORT');
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
 
     // Disparar dos llamadas concurrentes simultáneas sobre la misma propuesta
     const [res1, res2] = await Promise.all([
-      omrService.commitToCanonicalSong(proposal.proposalId, testUserId),
-      omrService.commitToCanonicalSong(proposal.proposalId, testUserId),
+      omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal),
+      omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal),
     ]);
 
     createdSongIds.push(res1.song.id);
@@ -1838,8 +2002,126 @@ describe('Fase 1A-R2 — Integridad Musical OMR, Persistencia Relacional, Transa
     assert.equal(pRow?.canonicalSongId, res1.song.id);
   });
 
-  it('14.3: should rollback complete transaction if intermediate step fails during commit (R2-06)', async () => {
-    // Si la serialización o inserción falla, la transacción de PostgreSQL revierte todos los cambios
-    assert.ok(true);
+  // ==========================================================================
+  // 15. POSTGRESQL COMO ÚNICA FUENTE DE VERDAD & HIGIENE DE CACHÉ (R3-04)
+  // ==========================================================================
+  it('15.1: should evict L1 cache and return NotFoundError when proposal is deleted directly in PostgreSQL (R3-04)', async () => {
+    const testProposalId = crypto.randomUUID();
+
+    // Insertar propuesta directamente en PostgreSQL sin historial de auditoría
+    await db.insert(omrProposals).values({
+      id: testProposalId,
+      userId: testUserId,
+      sourceFilename: 'cache_test.pdf',
+      sourceHash: 'cache_hash_123',
+      detectedTitle: 'Cache Test Song',
+      reviewStatus: 'PENDING_REVIEW',
+    });
+
+    // 1. Cargar mediante getProposalAsync para que se indexe en caché L1
+    const loaded = await omrService.getProposalAsync(testProposalId, leaderPrincipal);
+    assert.equal(loaded.proposalId, testProposalId);
+
+    // Verificar que está presente en la caché síncrona
+    const inMemory = omrService.getProposal(testProposalId, leaderPrincipal);
+    assert.equal(inMemory.proposalId, testProposalId);
+
+    // 2. Eliminar el registro directamente de PostgreSQL (sin registros de auditoría que lo restrinjan)
+    await db.delete(omrProposals).where(eq(omrProposals.id, testProposalId));
+
+    // 3. getProposalAsync DEBE consultar PostgreSQL, verificar ausencia, desalojar de caché L1 y lanzar NotFoundError (CERO fallback a memoria)
+    await assert.rejects(
+      async () => {
+        await omrService.getProposalAsync(testProposalId, leaderPrincipal);
+      },
+      { name: 'NotFoundError' }
+    );
+
+    // 4. Verificar que la entrada fue desalojada de la memoria y posterior getProposal síncrono también falla
+    assert.throws(
+      () => omrService.getProposal(testProposalId, leaderPrincipal),
+      { name: 'NotFoundError' }
+    );
+  });
+
+  // ==========================================================================
+  // 16. PRESERVACIÓN DE HISTORIAL DE COMPROMISO & ON DELETE RESTRICT (R3-05)
+  // ==========================================================================
+  it('16.1: should prevent deleting canonical song committed from OMR proposal via ON DELETE RESTRICT (R3-05)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Canción Inseparable OMR',
+      detectedKey: 'E',
+      detectedBpm: 100,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.95,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.95,
+          chordsDetected: [{ chord: 'E', beat: 1, confidence: 0.95 }],
+          notesDetected: [{ step: 'E', octave: 4, duration: 'whole', confidence: 0.95 }],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 restrict delete canonical song buffer');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'restrict_song.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+    const committed = await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
+    createdSongIds.push(committed.song.id);
+
+    // Intentar eliminar la canción canónica directamente en PostgreSQL debe ser BLOQUEADO por la FK ON DELETE RESTRICT
+    await assert.rejects(
+      async () => {
+        await db.delete(songs).where(eq(songs.id, committed.song.id));
+      },
+      (err: any) =>
+        err.message.includes('violates RESTRICT setting') ||
+        err.message.includes('foreign key constraint') ||
+        err.code === '23001' ||
+        err.code === '23503'
+    );
+  });
+
+  it('16.2: should throw ConflictError if committed proposal references non-existent canonical song (R3-05)', async () => {
+    // Si una propuesta en estado COMMITTED tiene un canonical_song_id que no existe en el catálogo, debe lanzar ConflictError
+    const orphanCommittedProposalId = crypto.randomUUID();
+
+    await db.insert(omrProposals).values({
+      id: orphanCommittedProposalId,
+      userId: testUserId,
+      sourceFilename: 'orphan_committed.pdf',
+      sourceHash: 'dummy_orphan_hash_2',
+      detectedTitle: 'Orphan Committed',
+      reviewStatus: 'COMMITTED',
+      canonicalSongId: null, // Huérfano o corrupto
+    });
+    createdProposalIds.push(orphanCommittedProposalId);
+
+    // Al llamar commitProposalTransaction sobre una propuesta COMMITTED sin canción válida, debe lanzar ConflictError
+    await assert.rejects(
+      async () => {
+        await omrRepo.commitProposalTransaction(
+          orphanCommittedProposalId,
+          leaderPrincipal,
+          {} as any,
+          'Orphan Committed'
+        );
+      },
+      { name: 'ConflictError' }
+    );
   });
 });

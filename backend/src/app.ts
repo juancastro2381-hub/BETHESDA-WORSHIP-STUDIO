@@ -21,6 +21,7 @@ import { audioRoutes } from './interfaces/http/routes/audio.routes.ts';
 import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { multitrackRoutes } from './interfaces/http/routes/multitrack.routes.ts';
 import { documentRoutes } from './interfaces/http/routes/document.routes.ts';
+import { omrRoutes } from './interfaces/http/routes/omr.routes.ts';
 import { JwtTokenService } from './application/token-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
 import { AuthGuard } from './interfaces/http/middlewares/auth-middleware.ts';
@@ -133,6 +134,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(realtimeRoutes, { prefix: '/realtime' });
       await v1.register(multitrackRoutes, { prefix: '/multitrack' });
       await v1.register(documentRoutes, { prefix: '/documents' });
+      await v1.register(omrRoutes, { prefix: '/omr' });
     },
     { prefix: '/api/v1' }
   );

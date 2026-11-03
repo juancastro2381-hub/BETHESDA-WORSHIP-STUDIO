@@ -24,6 +24,7 @@ import type {
   OmrProposal,
   OmrMeasureProposal,
   OmrAuditEntry,
+  CreateOmrAuditEntryInput,
   OmrReviewStatus,
   OmrActionType,
   AuthenticatedUser,
@@ -57,7 +58,10 @@ export interface IOmrProposalRepository {
     measure: OmrMeasureProposal,
     requestingUser: AuthenticatedUser
   ): Promise<void>;
-  recordAudit(entry: OmrAuditEntry, requestingUser?: AuthenticatedUser): Promise<void>;
+  recordAudit(
+    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    requestingUser: AuthenticatedUser
+  ): Promise<void>;
   getAuditHistory(
     proposalId: string,
     requestingUser: AuthenticatedUser
@@ -377,11 +381,29 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
     });
   }
 
-  public async recordAudit(entry: OmrAuditEntry, requestingUser?: AuthenticatedUser): Promise<void> {
-    const actorId = requestingUser?.id ?? entry.userId ?? null;
+  public async recordAudit(
+    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    requestingUser: AuthenticatedUser
+  ): Promise<void> {
+    assertRepoAuthenticatedUser(requestingUser);
+
+    // Prevención de falsificación de actor (R3.1-01):
+    // El actor de auditoría se deriva estrictamente del principal autenticado requestingUser.id.
+    // Si entry.userId viene especificado en tiempo de ejecución, DEBE coincidir exactamente con requestingUser.id.
+    if ((entry as any).userId !== undefined && (entry as any).userId !== null && (entry as any).userId !== requestingUser.id) {
+      throw new ForbiddenError(
+        'Violación de seguridad: El actor de auditoría especificado en el payload no coincide con el principal autenticado.'
+      );
+    }
+
+    const proposal = await this.findProposalById(entry.proposalId, requestingUser);
+    if (!proposal) {
+      throw new NotFoundError('Propuesta OMR', entry.proposalId);
+    }
+
     await this.db.insert(omrAuditHistory).values({
       proposalId: entry.proposalId,
-      userId: actorId,
+      userId: requestingUser.id,
       actionType: entry.actionType,
       targetMeasure: entry.targetMeasure ?? null,
       targetTick: entry.targetTick ?? null,

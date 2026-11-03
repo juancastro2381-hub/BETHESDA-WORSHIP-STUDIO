@@ -7,6 +7,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import pg from 'pg';
 import { db } from '../db/index.ts';
 import { runMigrations } from '../db/migrate.ts';
 import {
@@ -261,9 +262,12 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     );
 
     // Verificar que CERO propuestas quedaron registradas en la memoria caché
-    assert.throws(() => failingOmrService.getProposal('cualquier-id', leaderPrincipal), {
-      name: 'NotFoundError',
-    });
+    await assert.rejects(
+      async () => {
+        await failingOmrService.getProposal('cualquier-id', leaderPrincipal);
+      },
+      { name: 'NotFoundError' }
+    );
   });
 
   it('1.3: should fail review, NOT return success, and NOT update L1 cache when database write fails during review (R2-01)', async () => {
@@ -328,7 +332,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     );
 
     // El estado en memoria caché debe permanecer como PENDING_REVIEW (cero falso éxito)
-    const cached = failingService.getProposal(p.proposalId, leaderPrincipal);
+    const cached = await failingService.getProposal(p.proposalId, leaderPrincipal);
     assert.equal(cached.reviewStatus, 'PENDING_REVIEW');
   });
 
@@ -2022,8 +2026,8 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     const loaded = await omrService.getProposalAsync(testProposalId, leaderPrincipal);
     assert.equal(loaded.proposalId, testProposalId);
 
-    // Verificar que está presente en la caché síncrona
-    const inMemory = omrService.getProposal(testProposalId, leaderPrincipal);
+    // Verificar que está presente y se consulta asíncronamente
+    const inMemory = await omrService.getProposal(testProposalId, leaderPrincipal);
     assert.equal(inMemory.proposalId, testProposalId);
 
     // 2. Eliminar el registro directamente de PostgreSQL (sin registros de auditoría que lo restrinjan)
@@ -2037,9 +2041,11 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       { name: 'NotFoundError' }
     );
 
-    // 4. Verificar que la entrada fue desalojada de la memoria y posterior getProposal síncrono también falla
-    assert.throws(
-      () => omrService.getProposal(testProposalId, leaderPrincipal),
+    // 4. Verificar que la entrada fue desalojada de la memoria y posterior getProposal también falla en DB y memoria
+    await assert.rejects(
+      async () => {
+        await omrService.getProposal(testProposalId, leaderPrincipal);
+      },
       { name: 'NotFoundError' }
     );
   });
@@ -2123,5 +2129,469 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       },
       { name: 'ConflictError' }
     );
+  });
+
+  // ==========================================================================
+  // 17. ACTOR AUTENTICADO OBLIGATORIO EN AUDITORÍA (R3.1-01)
+  // ==========================================================================
+  it('17.1: should reject recordAudit when requestingUser is missing or invalid (R3.1-01)', async () => {
+    await assert.rejects(
+      async () => {
+        await omrRepo.recordAudit(
+          {
+            proposalId: crypto.randomUUID(),
+            actionType: 'CREATE_PROPOSAL',
+          } as any,
+          undefined as any
+        );
+      },
+      (err: any) => err.name === 'UnauthorizedError' || err.message.includes('Authentication principal is required')
+    );
+  });
+
+  it('17.2: should reject recordAudit when entry.userId attempts to spoof a different actor (R3.1-01)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 audit actor spoof test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'spoof_test.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    const forgedActorId = crypto.randomUUID();
+    await assert.rejects(
+      async () => {
+        await omrRepo.recordAudit(
+          {
+            proposalId: proposal.proposalId,
+            userId: forgedActorId as any,
+            actionType: 'FLAG_MEASURE',
+            reason: 'Intento de falsificación de actor',
+          },
+          leaderPrincipal
+        );
+      },
+      (err: any) =>
+        err.name === 'ForbiddenError' &&
+        err.message.includes('El actor de auditoría especificado en el payload no coincide')
+    );
+  });
+
+  it('17.3: should attribute audit entry strictly to validated requestingUser.id in PostgreSQL (R3.1-01)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 audit actor correct attribution');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'attribution_test.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrRepo.recordAudit(
+      {
+        proposalId: proposal.proposalId,
+        actionType: 'FLAG_MEASURE',
+        reason: 'Compás flagged por usuario autenticado legítimo',
+      },
+      leaderPrincipal
+    );
+
+    const [audit] = await db
+      .select()
+      .from(omrAuditHistory)
+      .where(
+        sql`${omrAuditHistory.proposalId} = ${proposal.proposalId} AND ${omrAuditHistory.actionType} = 'FLAG_MEASURE'`
+      );
+
+    assert.ok(audit);
+    assert.equal(audit.userId, leaderPrincipal.id);
+  });
+
+  it('17.4: should reject ordinary user attempting to record audit on another user proposal (R3.1-01)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 other user proposal audit');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'other_user_audit.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    const otherUser = { id: crypto.randomUUID(), role: 'WORSHIP_LEADER' };
+    await assert.rejects(
+      async () => {
+        await omrRepo.recordAudit(
+          {
+            proposalId: proposal.proposalId,
+            actionType: 'FLAG_MEASURE',
+            reason: 'Intento de auditar propuesta ajena',
+          },
+          otherUser
+        );
+      },
+      (err: any) => err.name === 'ForbiddenError'
+    );
+  });
+
+  // ==========================================================================
+  // 18. ASINCRONISMO AUTORITATIVO Y FUENTE ÚNICA DE VERDAD (R3.1-02)
+  // ==========================================================================
+  it('18.1: should retrieve proposal asynchronously from PostgreSQL and update cache (R3.1-02)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 async authoritative retrieval');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'async_auth.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Limpiar memoria para asegurar que se lee de PostgreSQL
+    omrService.clearProposals();
+
+    const retrieved = await omrService.getProposal(proposal.proposalId, leaderPrincipal);
+    assert.equal(retrieved.proposalId, proposal.proposalId);
+    assert.equal(retrieved.sourceFilename, 'async_auth.pdf');
+  });
+
+  it('18.2: should fail with NotFoundError and evict cache when record deleted directly in PostgreSQL (R3.1-02)', async () => {
+    const testId = crypto.randomUUID();
+    await db.insert(omrProposals).values({
+      id: testId,
+      userId: testUserId,
+      sourceFilename: 'deleted_in_db.pdf',
+      sourceHash: 'hash_del_123',
+      detectedTitle: 'Deleted in DB',
+      reviewStatus: 'PENDING_REVIEW',
+    });
+
+    // Cargar para poblar la caché
+    const loaded = await omrService.getProposal(testId, leaderPrincipal);
+    assert.equal(loaded.proposalId, testId);
+
+    // Eliminar directamente en PostgreSQL
+    await db.delete(omrProposals).where(eq(omrProposals.id, testId));
+
+    // getProposal debe consultar la BD, detectar ausencia, desalojar la caché y lanzar NotFoundError
+    await assert.rejects(
+      async () => {
+        await omrService.getProposal(testId, leaderPrincipal);
+      },
+      { name: 'NotFoundError' }
+    );
+  });
+
+  it('18.3: should propagate infrastructure error if database query fails during getProposal (R3.1-02)', async () => {
+    const severedRepo: IOmrProposalRepository = Object.create(omrRepo);
+    severedRepo.findProposalById = async () => {
+      throw new Error('Postgres connection pool exhausted (simulated DB failure)');
+    };
+
+    const isolatedService = new OmrService(mockProvider, songRepo, severedRepo);
+    await assert.rejects(
+      async () => {
+        await isolatedService.getProposal(crypto.randomUUID(), leaderPrincipal);
+      },
+      (err: any) => err.message.includes('Postgres connection pool exhausted')
+    );
+  });
+
+  // ==========================================================================
+  // 19. PROHIBICIÓN DE FALLBACK A NOTA C Y VALIDACIÓN DE GLIFOS (R3.1-03)
+  // ==========================================================================
+  it('19.1: should flag UNRESOLVED_NOTE_GLYPH and NOT default empty step to C (R3.1-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Empty Note Step Test',
+      detectedKey: 'G',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.9,
+          chordsDetected: [],
+          notesDetected: [
+            { step: '', octave: 4, duration: 'whole', confidence: 0.9 }, // Paso vacío
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 empty step note test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'empty_step.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Debe contener el flag UNRESOLVED_NOTE_GLYPH:EMPTY y NO haber fabricado la nota C
+    assert.ok(proposal.measures[0]?.flags?.some((f) => f.includes('UNRESOLVED_NOTE_GLYPH')));
+    assert.equal(proposal.measures[0]?.notesDetected[0]?.step, '');
+  });
+
+  it('19.2: should reject invalid note step letter (X) without defaulting to C (R3.1-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Invalid Note Step Test',
+      detectedKey: 'G',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.9,
+          chordsDetected: [],
+          notesDetected: [
+            { step: 'X', octave: 4, duration: 'whole', confidence: 0.9 }, // Letra no válida
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 invalid step note test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'invalid_step.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    assert.ok(proposal.measures[0]?.flags?.some((f) => f.includes('UNRESOLVED_NOTE_GLYPH:X')));
+  });
+
+  it('19.3: should reject note with numeric accidental but empty step without becoming C# (R3.1-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Empty Step With Accidental Test',
+      detectedKey: 'G',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.9,
+          chordsDetected: [],
+          notesDetected: [
+            { step: '', alter: 1, octave: 4, duration: 'whole', confidence: 0.9 }, // alter sin step
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 empty step with accidental test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'accidental_no_step.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    assert.ok(proposal.measures[0]?.flags?.some((f) => f.includes('UNRESOLVED_NOTE_GLYPH')));
+    assert.equal(proposal.measures[0]?.notesDetected[0]?.step, '');
+  });
+
+  it('19.4: should block canonical commit for proposal containing UNRESOLVED_NOTE_GLYPH (R3.1-03)', async () => {
+    mockProvider.customProposal = {
+      detectedTitle: 'Commit Blocked Due To Glyph',
+      detectedKey: 'C',
+      detectedBpm: 120,
+      detectedTimeSignature: '4/4',
+      overallConfidence: 0.9,
+      measures: [
+        {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          measureConfidence: 0.9,
+          chordsDetected: [],
+          notesDetected: [
+            { step: 'Z', octave: 4, duration: 'whole', confidence: 0.9 },
+          ],
+          lyricsDetected: [],
+          flags: [],
+        },
+      ],
+    };
+
+    const dummyBuffer = Buffer.from('%PDF-1.4 unresolved note commit block test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'blocked_commit.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrService.reviewProposal(proposal.proposalId, 'APPROVED_FOR_IMPORT', leaderPrincipal);
+
+    await assert.rejects(
+      async () => {
+        await omrService.commitToCanonicalSong(proposal.proposalId, leaderPrincipal);
+      },
+      (err: any) =>
+        err.name === 'ValidationError' &&
+        err.message.includes('No se puede comprometer al catálogo canónico: el compás') &&
+        err.message.includes('UNRESOLVED_NOTE_GLYPH:Z')
+    );
+  });
+
+  // ==========================================================================
+  // 20. SEPARACIÓN DE ROLES EN POSTGRESQL Y PRUEBAS ADVERSARIALES (R3.1-04)
+  // ==========================================================================
+  it('20.1 to 20.9: should verify that application runtime role cannot UPDATE, DELETE, TRUNCATE, or disable audit trigger (R3.1-04)', async () => {
+    // 1. Aprovisionar rol no privilegiado en bethesda_worship_test usando credenciales DBA (postgres)
+    await db.execute(sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bethesda_app_test_runtime') THEN
+          CREATE ROLE bethesda_app_test_runtime WITH LOGIN PASSWORD 'TestAppPassword2026!';
+        ELSE
+          ALTER ROLE bethesda_app_test_runtime WITH LOGIN PASSWORD 'TestAppPassword2026!';
+        END IF;
+      END
+      $$;
+    `);
+
+    await db.execute(sql`
+      GRANT CONNECT ON DATABASE bethesda_worship_test TO bethesda_app_test_runtime;
+      GRANT USAGE ON SCHEMA public TO bethesda_app_test_runtime;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bethesda_app_test_runtime;
+      REVOKE ALL ON "omr_audit_history" FROM bethesda_app_test_runtime;
+      GRANT SELECT, INSERT ON "omr_audit_history" TO bethesda_app_test_runtime;
+      REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM bethesda_app_test_runtime;
+      GRANT EXECUTE ON FUNCTION trg_prevent_omr_audit_modification() TO bethesda_app_test_runtime;
+    `);
+
+    // 2. Conectar mediante el rol de ejecución en tiempo de ejecución (bethesda_app_test_runtime)
+    const runtimePool = new pg.Pool({
+      connectionString: 'postgresql://bethesda_app_test_runtime:TestAppPassword2026!@localhost:5432/bethesda_worship_test',
+    });
+
+    try {
+      // 20.1: UPDATE denegado
+      await assert.rejects(
+        async () => {
+          await runtimePool.query("UPDATE omr_audit_history SET reason = 'tampered'");
+        },
+        (err: any) => err.code === '42501' || err.code === '55000'
+      );
+
+      // 20.2: DELETE denegado
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('DELETE FROM omr_audit_history');
+        },
+        (err: any) => err.code === '42501' || err.code === '55000'
+      );
+
+      // 20.3: TRUNCATE denegado
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('TRUNCATE omr_audit_history');
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.4: ALTER TABLE DISABLE TRIGGER denegado (requiere ser dueño de la tabla)
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('ALTER TABLE omr_audit_history DISABLE TRIGGER trg_omr_audit_immutability');
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.5: Modificación de la función de trigger denegada (requiere ser dueño de la función)
+      await assert.rejects(
+        async () => {
+          await runtimePool.query(`
+            CREATE OR REPLACE FUNCTION trg_prevent_omr_audit_modification()
+            RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;
+          `);
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.6: DROP TRIGGER denegado (requiere ser dueño de la tabla)
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('DROP TRIGGER IF EXISTS trg_omr_audit_immutability ON omr_audit_history');
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.7: Bypass mediante variable de sesión fallido
+      await runtimePool.query("SET app.allow_audit_cleanup = 'true'");
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('DELETE FROM omr_audit_history');
+        },
+        (err: any) => err.code === '42501' || err.code === '55000'
+      );
+
+      // 20.8: INSERT legítimo de auditoría por el rol runtime permitido
+      const dummyPropId = crypto.randomUUID();
+      await db.insert(omrProposals).values({
+        id: dummyPropId,
+        userId: testUserId,
+        sourceFilename: 'runtime_role_test.pdf',
+        sourceHash: 'hash_runtime_123',
+        detectedTitle: 'Runtime Role Proposal',
+        reviewStatus: 'PENDING_REVIEW',
+      });
+      createdProposalIds.push(dummyPropId);
+
+      const insertRes = await runtimePool.query(`
+        INSERT INTO omr_audit_history (proposal_id, user_id, action_type, reason)
+        VALUES ('${dummyPropId}', '${testUserId}', 'CREATE_PROPOSAL', 'Prueba de inserción rol runtime')
+        RETURNING id
+      `);
+      assert.ok(insertRes.rows[0]?.id);
+
+      // 20.9: SELECT de auditoría por el rol runtime permitido
+      const selectRes = await runtimePool.query(`
+        SELECT * FROM omr_audit_history WHERE proposal_id = '${dummyPropId}'
+      `);
+      assert.equal(selectRes.rows.length, 1);
+    } finally {
+      await runtimePool.end();
+    }
   });
 });

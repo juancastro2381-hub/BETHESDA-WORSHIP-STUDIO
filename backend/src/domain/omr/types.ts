@@ -104,7 +104,7 @@ export type OmrActionType =
 export interface OmrAuditEntry {
   id?: string;
   proposalId: string;
-  userId?: string;
+  userId?: string | null;
   actionType: OmrActionType;
   targetMeasure?: number;
   targetTick?: number;
@@ -113,3 +113,13 @@ export interface OmrAuditEntry {
   reason?: string;
   createdAt?: string;
 }
+
+/**
+ * Payload de entrada para registrar auditoría (R3.1-01).
+ * `userId` está estrictamente prohibido como entrada del cliente o llamador
+ * para prevenir la falsificación del actor de auditoría.
+ * El actor se deriva exclusivamente del principal autenticado validado.
+ */
+export type CreateOmrAuditEntryInput = Omit<OmrAuditEntry, 'id' | 'userId' | 'createdAt'> & {
+  userId?: never;
+};

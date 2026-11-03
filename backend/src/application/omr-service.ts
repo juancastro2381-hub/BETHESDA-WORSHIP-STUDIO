@@ -25,6 +25,8 @@ import {
   type OmrChordDetected,
   type OmrLyricDetected,
   type AuthenticatedUser,
+  type OmrAuditEntry,
+  type CreateOmrAuditEntryInput,
   MAX_OMR_FILE_SIZE_BYTES,
 } from '../domain/omr/types.ts';
 import type { ISongRepository, SongWithVersion } from '../repositories/song-repository.ts';
@@ -91,6 +93,29 @@ function assertAuthenticatedUser(user: unknown): asserts user is AuthenticatedUs
   if (!VALID_ROLES.includes((user as any).role)) {
     throw new ForbiddenError(`Rol de usuario '${(user as any).role}' no reconocido o no autorizado.`);
   }
+}
+
+const VALID_NOTE_LETTERS: ReadonlySet<string> = new Set(['C', 'D', 'E', 'F', 'G', 'A', 'B']);
+
+/**
+ * Valida de forma estricta la letra base del paso de nota (step) sin ningún fallback silencioso a C (R3.1-03).
+ * Acepta únicamente letras A, B, C, D, E, F, G y rechaza vacíos, nulos o caracteres desconocidos.
+ */
+export function validateAndParseNoteStep(step: unknown): BaseNoteLetter {
+  if (typeof step !== 'string') {
+    throw new ValidationError('El paso de nota musical (step) debe ser una cadena de texto no vacía.');
+  }
+  const trimmed = step.trim().toUpperCase();
+  if (!trimmed) {
+    throw new ValidationError('El paso de nota musical (step) no puede ser una cadena vacía.');
+  }
+  const firstChar = trimmed[0];
+  if (!firstChar || !VALID_NOTE_LETTERS.has(firstChar)) {
+    throw new ValidationError(
+      `Paso de nota musical inválido: "${step}". Letras base permitidas: A, B, C, D, E, F, G. Se prohíbe la fabricación de notas.`
+    );
+  }
+  return firstChar as BaseNoteLetter;
 }
 
 export class OmrService {
@@ -203,15 +228,15 @@ export class OmrService {
             continue; // Silencio explícito reconocido
           }
           try {
+            const letter = validateAndParseNoteStep(n.step);
             if (typeof n.alter === 'number') {
               const acc = Accidental.fromSemitones(n.alter);
-              const letter = (n.step[0] ?? 'C').toUpperCase() as BaseNoteLetter;
               new NoteName(letter, acc);
             } else {
               NoteName.parse(n.step);
             }
           } catch {
-            const flag = `UNRESOLVED_NOTE_GLYPH:${n.step}`;
+            const flag = `UNRESOLVED_NOTE_GLYPH:${n.step ?? 'EMPTY'}`;
             if (!m.flags.includes(flag)) {
               m.flags.push(flag);
             }
@@ -230,27 +255,16 @@ export class OmrService {
   }
 
   /**
-   * Obtiene una propuesta OMR por ID de manera síncrona (Caché L1).
-   * Requiere validación de autorización del principal solicitante (R3-01).
+   * Obtiene una propuesta OMR por ID de manera autoritativa asíncrona directamente desde PostgreSQL (R3.1-02).
+   * La recuperación síncrona exclusiva de memoria ha sido ELIMINADA para garantizar PostgreSQL como ÚNICA fuente de verdad.
+   * Si PostgreSQL retorna null, se desaloja la memoria caché y se lanza NotFoundError.
+   * Si la base de datos no está disponible, propaga el error sin retornar datos obsoletos de memoria.
    */
-  public getProposal(
+  public async getProposal(
     proposalId: string,
     requestingUser: AuthenticatedUser
-  ): OmrProposal {
-    assertAuthenticatedUser(requestingUser);
-
-    const proposal = this.proposals.get(proposalId);
-    if (!proposal) {
-      throw new NotFoundError('Propuesta OMR', proposalId);
-    }
-
-    if (!['ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
-      if (!proposal.userId || proposal.userId !== requestingUser.id) {
-        throw new ForbiddenError('No tiene autorización para acceder a una propuesta de otro usuario.');
-      }
-    }
-
-    return proposal;
+  ): Promise<OmrProposal> {
+    return await this.getProposalAsync(proposalId, requestingUser);
   }
 
   /**
@@ -492,6 +506,56 @@ export class OmrService {
   }
 
   /**
+   * Modifica un compás de la propuesta OMR con auditoría (R3.1-01 / R3.1-05).
+   */
+  public async updateMeasure(
+    proposalId: string,
+    measure: OmrMeasureProposal,
+    requestingUser: AuthenticatedUser
+  ): Promise<void> {
+    assertAuthenticatedUser(requestingUser);
+    await this.omrRepo.updateMeasure(proposalId, measure, requestingUser);
+    this.proposals.delete(proposalId);
+  }
+
+  /**
+   * Consulta el historial inmutable de auditoría para una propuesta OMR (R3.1-01).
+   */
+  public async getAuditHistory(
+    proposalId: string,
+    requestingUser: AuthenticatedUser
+  ): Promise<OmrAuditEntry[]> {
+    assertAuthenticatedUser(requestingUser);
+    return await this.omrRepo.getAuditHistory(proposalId, requestingUser);
+  }
+
+  /**
+   * Registra un evento de auditoría obligatorio vinculado al principal autenticado (R3.1-01).
+   */
+  public async recordAudit(
+    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    requestingUser: AuthenticatedUser
+  ): Promise<void> {
+    assertAuthenticatedUser(requestingUser);
+    return await this.omrRepo.recordAudit(entry, requestingUser);
+  }
+
+  /**
+   * Elimina una propuesta OMR si no tiene registros de auditoría restringidos (R3-05).
+   */
+  public async deleteProposal(
+    proposalId: string,
+    requestingUser: AuthenticatedUser
+  ): Promise<boolean> {
+    assertAuthenticatedUser(requestingUser);
+    const result = await this.omrRepo.deleteProposal(proposalId, requestingUser);
+    if (result) {
+      this.proposals.delete(proposalId);
+    }
+    return result;
+  }
+
+  /**
    * Convierte los compases validados de una propuesta OMR aprobada en CanonicalMusicPayload.
    * Remedia exhaustivamente los defectos musicales: CERO silencios fabricados en compases vacíos (R3-03).
    */
@@ -624,16 +688,16 @@ export class OmrService {
           // Nota detectada
           let noteName: NoteName;
           try {
+            const letter = validateAndParseNoteStep(n.step);
             if (typeof n.alter === 'number') {
               const acc = Accidental.fromSemitones(n.alter);
-              const letter = (n.step[0] ?? 'C').toUpperCase() as BaseNoteLetter;
               noteName = new NoteName(letter, acc);
             } else {
               noteName = NoteName.parse(n.step);
             }
           } catch {
             mProp.flags = mProp.flags ?? [];
-            const flag = `UNRESOLVED_NOTE_GLYPH:${n.step}`;
+            const flag = `UNRESOLVED_NOTE_GLYPH:${n.step ?? 'EMPTY'}`;
             if (!mProp.flags.includes(flag)) {
               mProp.flags.push(flag);
             }

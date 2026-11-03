@@ -571,8 +571,8 @@ describe('Workstream D — Phase 3C Multitracks & OMR Suite', () => {
     );
   });
 
-  it('D2.4: should guarantee ZERO note fabrication: dubious regions must be logged as unrecognizedRegions', () => {
-    const proposal = omrService.getProposal(testProposalId, testPrincipal);
+  it('D2.4: should guarantee ZERO note fabrication: dubious regions must be logged as unrecognizedRegions', async () => {
+    const proposal = await omrService.getProposal(testProposalId, testPrincipal);
 
     assert.ok(proposal.unrecognizedRegions.length > 0);
     const region = proposal.unrecognizedRegions[0];

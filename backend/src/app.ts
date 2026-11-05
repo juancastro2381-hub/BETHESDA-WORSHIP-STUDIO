@@ -22,6 +22,7 @@ import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { multitrackRoutes } from './interfaces/http/routes/multitrack.routes.ts';
 import { documentRoutes } from './interfaces/http/routes/document.routes.ts';
 import { omrRoutes } from './interfaces/http/routes/omr.routes.ts';
+import { ingestionRoutes } from './interfaces/http/routes/ingestion.routes.ts';
 import { MAX_OMR_HTTP_BODY_LIMIT_BYTES } from './domain/omr/types.ts';
 import { JwtTokenService } from './application/token-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
@@ -137,6 +138,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(multitrackRoutes, { prefix: '/multitrack' });
       await v1.register(documentRoutes, { prefix: '/documents' });
       await v1.register(omrRoutes, { prefix: '/omr' });
+      await v1.register(ingestionRoutes, { prefix: '/ingestion' });
     },
     { prefix: '/api/v1' }
   );

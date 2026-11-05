@@ -1,0 +1,123 @@
+/**
+ * @file source-storage-provider.ts
+ * @description Proveedor de almacenamiento físico y preservación inmutable de fuentes musicales (Fase 1B).
+ * Garantiza aislamiento en disco, prevención estricta de Path Traversal, cálculo de hash SHA-256
+ * y verificación de integridad criptográfica de los archivos originales importados.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { MAX_OMR_FILE_SIZE_BYTES } from '../omr/types.ts';
+import { ValidationError } from '../errors.ts';
+
+export interface SourceStorageSaveResult {
+  readonly storageKey: string;
+  readonly checksumSha256: string;
+  readonly fileSizeBytes: number;
+}
+
+export interface ISourceStorageProvider {
+  save(filename: string, buffer: Buffer): Promise<SourceStorageSaveResult>;
+  getBuffer(storageKey: string): Promise<Buffer>;
+  exists(storageKey: string): Promise<boolean>;
+  delete(storageKey: string): Promise<boolean>;
+  resolveSafePath(storageKey: string): string;
+}
+
+export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvider {
+  private readonly baseDir: string;
+  private readonly maxSizeBytes: number;
+
+  public constructor(
+    baseDir: string = 'storage/sources',
+    maxSizeBytes: number = MAX_OMR_FILE_SIZE_BYTES // 15 MiB
+  ) {
+    this.baseDir = path.resolve(process.cwd(), baseDir);
+    this.maxSizeBytes = maxSizeBytes;
+
+    if (!fs.existsSync(this.baseDir)) {
+      fs.mkdirSync(this.baseDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Resuelve y valida una clave contra ataques de Path Traversal.
+   */
+  public resolveSafePath(storageKey: string): string {
+    if (!storageKey || storageKey.includes('..') || path.isAbsolute(storageKey)) {
+      throw new ValidationError(`Violación de seguridad: Intento de Path Traversal detectado en: ${storageKey}`);
+    }
+
+    const sanitizedKey = path.basename(storageKey);
+    const resolvedPath = path.resolve(this.baseDir, sanitizedKey);
+
+    if (!resolvedPath.startsWith(this.baseDir)) {
+      throw new ValidationError(`Violación de seguridad: Intento de Path Traversal detectado en: ${storageKey}`);
+    }
+
+    return resolvedPath;
+  }
+
+  /**
+   * Guarda un buffer de fuente validando límites de tamaño y calculando hash SHA-256.
+   */
+  public async save(filename: string, buffer: Buffer): Promise<SourceStorageSaveResult> {
+    if (buffer.length > this.maxSizeBytes) {
+      throw new ValidationError(
+        `El archivo (${(buffer.length / (1024 * 1024)).toFixed(2)} MB) excede el tamaño máximo permitido de ${(this.maxSizeBytes / (1024 * 1024)).toFixed(2)} MB.`
+      );
+    }
+
+    if (buffer.length === 0) {
+      throw new ValidationError('El archivo fuente suministrado está vacío (0 bytes).');
+    }
+
+    const ext = path.extname(filename).toLowerCase() || '.bin';
+    const checksumSha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const storageKey = `${checksumSha256}${ext}`;
+    const targetPath = this.resolveSafePath(storageKey);
+
+    // Escribir archivo si aún no existe (idempotencia en almacenamiento físico)
+    if (!fs.existsSync(targetPath)) {
+      await fs.promises.writeFile(targetPath, buffer);
+    }
+
+    return {
+      storageKey,
+      checksumSha256,
+      fileSizeBytes: buffer.length,
+    };
+  }
+
+  public async getBuffer(storageKey: string): Promise<Buffer> {
+    const filePath = this.resolveSafePath(storageKey);
+    if (!fs.existsSync(filePath)) {
+      throw new ValidationError(`Archivo fuente no encontrado en almacenamiento: ${storageKey}`);
+    }
+    return await fs.promises.readFile(filePath);
+  }
+
+  public async exists(storageKey: string): Promise<boolean> {
+    try {
+      const filePath = this.resolveSafePath(storageKey);
+      return fs.existsSync(filePath);
+    } catch {
+      return false;
+    }
+  }
+
+  public async delete(storageKey: string): Promise<boolean> {
+    try {
+      const filePath = this.resolveSafePath(storageKey);
+      if (fs.existsSync(filePath)) {
+        await fs.promises.unlink(filePath);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+}
+

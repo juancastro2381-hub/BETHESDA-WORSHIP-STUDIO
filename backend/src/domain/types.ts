@@ -7,7 +7,15 @@ import type { CanonicalMusicPayloadJSON } from '../../../frontend/src/core/canon
 
 export type SongReviewStatus = 'DRAFT' | 'APPROVED' | 'ARCHIVED';
 
-export type SongSourceFormat = 'MUSIC_XML' | 'CHORD_PRO' | 'INTERNAL' | 'PDF' | 'IMAGE';
+export type SongSourceFormat =
+  | 'MUSIC_XML'
+  | 'CHORD_PRO'
+  | 'INTERNAL'
+  | 'PDF'
+  | 'IMAGE'
+  | 'MIDI'
+  | 'AUDIO'
+  | 'VIDEO_URL';
 
 export interface SongEntity {
   id: string;
@@ -42,7 +50,7 @@ export interface SongSourceEntity {
   id: string;
   songId: string;
   versionId: string | null;
-  sourceType: 'MUSIC_XML' | 'CHORD_PRO' | 'PDF' | 'IMAGE';
+  sourceType: SongSourceFormat;
   filename: string | null;
   rawContent: string | null;
   importerName: string;

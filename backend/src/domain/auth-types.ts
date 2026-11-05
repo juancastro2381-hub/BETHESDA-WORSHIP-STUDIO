@@ -201,3 +201,12 @@ export interface JwtTokenPayload {
 
 export type JwtPayload = JwtTokenPayload;
 
+export interface AuthenticatedUser {
+  id: string;
+  role?: string | UserRole;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
+

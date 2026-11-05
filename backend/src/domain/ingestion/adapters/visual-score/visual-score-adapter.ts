@@ -56,6 +56,13 @@ export class VisualScoreIngestionAdapter implements IIngestionAdapter {
       if (input.buffer[0] === 0xff && input.buffer[1] === 0xd8 && input.buffer[2] === 0xff) {
         return true;
       }
+      // TIFF: 0x49 0x49 (little-endian) or 0x4D 0x4D (big-endian)
+      if (
+        (input.buffer[0] === 0x49 && input.buffer[1] === 0x49 && input.buffer[2] === 0x2a && input.buffer[3] === 0x00) ||
+        (input.buffer[0] === 0x4d && input.buffer[1] === 0x4d && input.buffer[2] === 0x00 && input.buffer[3] === 0x2a)
+      ) {
+        return true;
+      }
     }
     return false;
   }

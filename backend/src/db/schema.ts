@@ -315,9 +315,9 @@ export const songSources = pgTable(
   'song_sources',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    songId: uuid('song_id').references(() => songs.id, { onDelete: 'cascade' }),
+    songId: uuid('song_id').references(() => songs.id, { onDelete: 'set null' }),
     versionId: uuid('version_id').references(() => songVersions.id, { onDelete: 'set null' }),
-    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     sourceType: varchar('source_type', { length: 32 }).notNull(), // 'MUSIC_XML' | 'CHORD_PRO' | 'MIDI' | 'WRITTEN_NOTES' | 'VISUAL_SCORE' | 'AUDIO' | 'VIDEO_URL'
     filename: varchar('filename', { length: 255 }),
     storagePath: text('storage_path'),

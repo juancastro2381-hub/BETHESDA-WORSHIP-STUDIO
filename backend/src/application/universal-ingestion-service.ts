@@ -22,6 +22,7 @@ import {
   ForbiddenError,
   NotFoundError,
   PersistenceError,
+  SourceIntegrityError,
   ValidationError,
 } from '../domain/errors.ts';
 import type { AuthenticatedUser } from '../domain/auth-types.ts';
@@ -96,18 +97,62 @@ export class UniversalIngestionService {
   }
 
   /**
+   * Serialización determinista canónica JSON (claves ordenadas) para preservar
+   * invariancia criptográfica exacta: SHA256(original) === SHA256(stored) === SHA256(retrieved).
+   */
+  public static canonicalJsonStringify(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') {
+      return JSON.stringify(obj);
+    }
+    if (Array.isArray(obj)) {
+      return '[' + obj.map(UniversalIngestionService.canonicalJsonStringify).join(',') + ']';
+    }
+    const keys = Object.keys(obj as Record<string, unknown>).sort();
+    const pairs = keys.map(
+      (k) => `${JSON.stringify(k)}:${UniversalIngestionService.canonicalJsonStringify((obj as Record<string, unknown>)[k])}`
+    );
+    return '{' + pairs.join(',') + '}';
+  }
+
+  /**
+   * Discrimina si un buffer o nombre de archivo corresponde a un formato de imagen visual (PNG, JPEG, TIFF).
+   */
+  public static isImageSource(buffer?: Buffer, filename?: string): boolean {
+    if (buffer && buffer.length >= 4) {
+      if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return true; // PNG
+      if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return true; // JPEG
+      if ((buffer[0] === 0x49 && buffer[1] === 0x49) || (buffer[0] === 0x4d && buffer[1] === 0x4d)) return true; // TIFF
+    }
+    if (filename) {
+      const ext = path.extname(filename).toLowerCase();
+      if (['.png', '.jpg', '.jpeg', '.tiff', '.tif', '.webp'].includes(ext)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Calcula el hash criptográfico SHA-256 de la entrada para verificación de integridad e idempotencia.
    */
   public static calculateSourceHash(input: IngestionInput): string {
     const hasher = crypto.createHash('sha256');
     if (input.buffer) {
       hasher.update(input.buffer);
-    } else if (input.rawText) {
+    } else if (input.rawText !== undefined) {
       hasher.update(Buffer.from(input.rawText, 'utf-8'));
-    } else if (input.videoUrl) {
-      hasher.update(Buffer.from(input.videoUrl.trim(), 'utf-8'));
-    } else if (input.writtenNotes) {
-      hasher.update(Buffer.from(JSON.stringify(input.writtenNotes), 'utf-8'));
+    } else if (input.videoUrl !== undefined) {
+      hasher.update(
+        Buffer.from(
+          UniversalIngestionService.canonicalJsonStringify({
+            sourceKind: 'VIDEO_REFERENCE',
+            videoUrl: input.videoUrl.trim(),
+            title: input.title || null,
+            artist: input.artist || null,
+          }),
+          'utf-8'
+        )
+      );
+    } else if (input.writtenNotes !== undefined) {
+      hasher.update(Buffer.from(UniversalIngestionService.canonicalJsonStringify(input.writtenNotes), 'utf-8'));
     } else {
       hasher.update(crypto.randomUUID());
     }
@@ -141,13 +186,24 @@ export class UniversalIngestionService {
   }
 
   /**
-   * Determina el buffer y el MIME type adecuado para la preservación física.
+   * Determina el buffer y el MIME type adecuado para la preservación física y calcula el SHA-256
+   * de forma determinista y como única fuente de verdad criptográfica.
    */
   private prepareBufferAndMime(
     input: IngestionInput,
-    adapter: IIngestionAdapter,
-    sourceHash: string
-  ): { bufferToSave: Buffer; detectedMime: string; filename: string } {
+    adapter: IIngestionAdapter
+  ): {
+    bufferToSave: Buffer;
+    detectedMime: string;
+    filename: string;
+    sourceHash: string;
+    effectiveSourceType: IngestionSourceType;
+  } {
+    let effectiveSourceType: IngestionSourceType = input.sourceType || adapter.sourceType;
+    if (adapter.sourceType === 'PDF_SCORE' && UniversalIngestionService.isImageSource(input.buffer, input.filename)) {
+      effectiveSourceType = 'IMAGE_SCORE';
+    }
+
     let bufferToSave: Buffer;
     let detectedMime = input.mimeType || 'application/octet-stream';
     let filename = input.filename;
@@ -159,27 +215,24 @@ export class UniversalIngestionService {
       }
     } else if (input.rawText !== undefined) {
       bufferToSave = Buffer.from(input.rawText, 'utf-8');
-      if (adapter.sourceType === 'CHORDPRO') {
+      if (effectiveSourceType === 'CHORDPRO') {
         detectedMime = 'text/x-chordpro';
-      } else if (adapter.sourceType === 'MUSICXML') {
+      } else if (effectiveSourceType === 'MUSICXML') {
         detectedMime = 'application/vnd.recordare.musicxml+xml';
       } else {
         detectedMime = 'text/plain';
       }
     } else if (input.writtenNotes !== undefined) {
-      bufferToSave = Buffer.from(JSON.stringify(input.writtenNotes, null, 2), 'utf-8');
+      bufferToSave = Buffer.from(UniversalIngestionService.canonicalJsonStringify(input.writtenNotes), 'utf-8');
       detectedMime = 'application/json';
     } else if (input.videoUrl !== undefined) {
       bufferToSave = Buffer.from(
-        JSON.stringify(
-          {
-            videoUrl: input.videoUrl,
-            title: input.title,
-            artist: input.artist,
-          },
-          null,
-          2
-        ),
+        UniversalIngestionService.canonicalJsonStringify({
+          sourceKind: 'VIDEO_REFERENCE',
+          videoUrl: input.videoUrl.trim(),
+          title: input.title || null,
+          artist: input.artist || null,
+        }),
         'utf-8'
       );
       detectedMime = 'application/json';
@@ -187,8 +240,10 @@ export class UniversalIngestionService {
       bufferToSave = Buffer.alloc(0);
     }
 
+    const sourceHash = crypto.createHash('sha256').update(bufferToSave).digest('hex');
+
     if (!filename) {
-      switch (adapter.sourceType) {
+      switch (effectiveSourceType) {
         case 'MUSICXML':
           filename = `source_${sourceHash.slice(0, 8)}.musicxml`;
           break;
@@ -218,7 +273,7 @@ export class UniversalIngestionService {
       }
     }
 
-    return { bufferToSave, detectedMime, filename };
+    return { bufferToSave, detectedMime, filename, sourceHash, effectiveSourceType };
   }
 
   /**
@@ -234,9 +289,9 @@ export class UniversalIngestionService {
       throw new ValidationError('Se requiere un usuario autenticado para realizar la ingesta musical.');
     }
 
-    // 1. Resolver adaptador
+    // 1. Resolver adaptador y preparar buffer canónico con hash como única fuente de verdad
     const adapter = this.resolveAdapter(input);
-    const sourceHash = UniversalIngestionService.calculateSourceHash(input);
+    const { bufferToSave, detectedMime, filename, sourceHash, effectiveSourceType } = this.prepareBufferAndMime(input, adapter);
 
     // 2. Comprobar Idempotencia multi-inquilino: acotada estrictamente al usuario actual
     const existingSource = await this.database
@@ -311,10 +366,7 @@ export class UniversalIngestionService {
       }
     }
 
-    // 3. Preparar buffer y metadatos para preservación física
-    const { bufferToSave, detectedMime, filename } = this.prepareBufferAndMime(input, adapter, sourceHash);
-
-    // 4. Registrar tarea de procesamiento en background_jobs
+    // 3. Registrar tarea de procesamiento en background_jobs
     const job = await this.jobRepository.createJob({
       jobType: 'IMPORT_COMMIT',
       status: 'PROCESSING',
@@ -323,7 +375,7 @@ export class UniversalIngestionService {
       startedAt: new Date(),
     });
 
-    // 5. Preservación física incondicional en almacenamiento seguro
+    // 4. Preservación física incondicional en almacenamiento seguro
     let saveResult: SourceStorageSaveResult;
     try {
       saveResult = await this.storageProvider.save(filename, bufferToSave);
@@ -339,8 +391,8 @@ export class UniversalIngestionService {
       );
     }
 
-    // 6. Registrar fila inmutable en `song_sources` ANTES de parsear
-    const sourceFormat = UniversalIngestionService.mapSourceTypeToFormat(adapter.sourceType);
+    // 5. Registrar fila inmutable en `song_sources` ANTES de parsear
+    const sourceFormat = UniversalIngestionService.mapSourceTypeToFormat(effectiveSourceType);
     let sourceRecordId: string;
 
     try {
@@ -376,6 +428,8 @@ export class UniversalIngestionService {
       // 7. Ejecutar adaptador especializado
       const output = await adapter.ingest(input, user);
       output.sourceId = sourceRecordId;
+      output.sourceHash = sourceHash;
+      output.sourceChecksumSha256 = sourceHash;
 
       // 8. Si produjo un payload canónico válido, persistir en base de datos
       if (
@@ -445,7 +499,7 @@ export class UniversalIngestionService {
       throw new NotFoundError('Fuente musical', sourceId);
     }
 
-    const isOwner = source.userId === user.id;
+    const isOwner = Boolean(source.userId && source.userId === user.id);
     const isPrivileged = user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
 
     if (!isOwner && !isPrivileged) {
@@ -456,7 +510,8 @@ export class UniversalIngestionService {
   }
 
   /**
-   * Obtiene el flujo de bytes original de una fuente preservada verificando autorización multi-inquilino.
+   * Obtiene el flujo de bytes original de una fuente preservada verificando autorización multi-inquilino
+   * e integridad criptográfica estricta (SHA256(retrievedBytes) === SHA256(storedBytes)).
    */
   public async getSourceFile(sourceId: string, user: AuthenticatedUser) {
     const source = await this.getSource(sourceId, user);
@@ -466,6 +521,18 @@ export class UniversalIngestionService {
     }
 
     const buffer = await this.storageProvider.getBuffer(source.storagePath);
+    const retrievedChecksum = crypto.createHash('sha256').update(buffer).digest('hex');
+
+    if (source.checksumSha256 && retrievedChecksum !== source.checksumSha256) {
+      throw new SourceIntegrityError(
+        `Fallo de verificación de integridad criptográfica: el hash SHA-256 de los bytes recuperados (${retrievedChecksum}) no coincide con el hash canónico registrado (${source.checksumSha256}). El archivo no puede ser entregado.`,
+        {
+          sourceId,
+          expectedChecksum: source.checksumSha256,
+          actualChecksum: retrievedChecksum,
+        }
+      );
+    }
 
     return {
       source,
@@ -482,7 +549,7 @@ export class UniversalIngestionService {
       throw new NotFoundError('Tarea de ingesta', jobId);
     }
 
-    const isOwner = job.userId === user.id;
+    const isOwner = Boolean(job.userId && job.userId === user.id);
     const isPrivileged = user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
 
     if (!isOwner && !isPrivileged) {

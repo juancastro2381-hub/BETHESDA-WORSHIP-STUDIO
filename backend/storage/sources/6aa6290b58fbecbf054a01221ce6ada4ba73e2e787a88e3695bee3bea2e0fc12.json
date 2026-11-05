@@ -1,0 +1,45 @@
+{
+  "title": "Alabanza Escrita Manual",
+  "artist": "Salmista",
+  "timeSignature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "keySignature": "G",
+  "tempoBpm": 120,
+  "measures": [
+    {
+      "measureNumber": 1,
+      "notes": [
+        {
+          "step": "G",
+          "octave": 4,
+          "duration": "quarter"
+        },
+        {
+          "step": "B",
+          "octave": 4,
+          "duration": "quarter"
+        },
+        {
+          "step": "D",
+          "octave": 5,
+          "duration": "half"
+        }
+      ],
+      "chords": [
+        {
+          "root": "G",
+          "quality": "maj",
+          "startTick": 0
+        }
+      ],
+      "lyrics": [
+        {
+          "text": "Ben-di-to",
+          "startTick": 0
+        }
+      ]
+    }
+  ]
+}

@@ -107,6 +107,7 @@ export interface IngestionOutput {
   status: IngestionStatus;
   sourceType: IngestionSourceType;
   sourceHash: string;
+  sourceChecksumSha256?: string;
   sourceId?: string;
   filename?: string;
   storageKey?: string;

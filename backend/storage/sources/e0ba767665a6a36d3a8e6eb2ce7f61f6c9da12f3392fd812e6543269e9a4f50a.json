@@ -1,0 +1,26 @@
+{
+  "title": "Melodía con Metadatos Explícitos",
+  "timeSignature": {
+    "numerator": 3,
+    "denominator": 4
+  },
+  "keySignature": "F#m",
+  "tempoBpm": 84,
+  "measures": [
+    {
+      "measureNumber": 1,
+      "notes": [
+        {
+          "step": "A",
+          "octave": 4,
+          "duration": "quarter"
+        },
+        {
+          "step": "B",
+          "octave": 4,
+          "duration": "half"
+        }
+      ]
+    }
+  ]
+}

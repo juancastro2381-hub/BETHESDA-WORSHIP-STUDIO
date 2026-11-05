@@ -19,7 +19,9 @@ export type BackendErrorCode =
   | 'TOKEN_EXPIRED'
   | 'TOKEN_INVALID'
   | 'RATE_LIMIT_EXCEEDED'
-  | 'RANGE_NOT_SATISFIABLE';
+  | 'RANGE_NOT_SATISFIABLE'
+  // Errores de Integridad Criptográfica de Fuentes (Fase 1B-R2)
+  | 'SOURCE_INTEGRITY_ERROR';
 
 export class AppError extends Error {
   public readonly code: BackendErrorCode;
@@ -169,4 +171,15 @@ export class RangeNotSatisfiableError extends AppError {
     this.name = 'RangeNotSatisfiableError';
   }
 }
+
+export class SourceIntegrityError extends AppError {
+  public constructor(
+    message: string = 'Fallo de verificación de integridad criptográfica en la fuente musical.',
+    details?: unknown
+  ) {
+    super('SOURCE_INTEGRITY_ERROR', message, 500, details);
+    this.name = 'SourceIntegrityError';
+  }
+}
+
 

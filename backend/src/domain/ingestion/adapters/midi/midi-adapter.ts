@@ -118,6 +118,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
     }
 
     let defaultTimeSignatureStr: string | null = null;
+    const hasDeclaredMeter = parsedData.timeSignatures.length > 0;
     if (parsedData.defaultTimeSignature) {
       defaultTimeSignatureStr = `${parsedData.defaultTimeSignature.numerator}/${parsedData.defaultTimeSignature.denominator}`;
     } else {
@@ -173,24 +174,8 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       );
     }
 
-    // 6. Generación de compases dinámicos respetando cambios de métrica
-    // Función para obtener la TimeSignature activa en un tick canónico
-    const getTimeSignatureAtTick = (tick: number): TimeSignature => {
-      if (parsedData.timeSignatures.length === 0) {
-        return new TimeSignature(4, 4);
-      }
-      let active = parsedData.timeSignatures[0];
-      for (const ts of parsedData.timeSignatures) {
-        if (ts.tickCanonical <= tick) {
-          active = ts;
-        } else {
-          break;
-        }
-      }
-      return new TimeSignature(active.numerator, active.denominator);
-    };
-
-    const totalDurationTicks = Math.max(1920, parsedData.totalDurationTicksCanonical);
+    // 6. Generación de compases respetando eventos declarados o preservando timeline sin métrica ficticia
+    const rawTotalTicks = parsedData.totalDurationTicksCanonical;
 
     interface MeasureBoundary {
       mNum: number;
@@ -200,25 +185,59 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
     }
 
     const measureBoundaries: MeasureBoundary[] = [];
-    let curTick = 0;
-    let measureNumber = 1;
 
-    while (curTick < totalDurationTicks || measureNumber === 1) {
-      const activeTs = getTimeSignatureAtTick(curTick);
-      const mDuration = activeTs.calculateMeasureDurationTicks();
-
-      measureBoundaries.push({
-        mNum: measureNumber,
-        startTick: curTick,
-        durationTicks: mDuration,
-        timeSignature: activeTs,
+    if (!hasDeclaredMeter) {
+      // CERO FABRICACIÓN MÉTRICA: Si el archivo MIDI no declara métrica, no construir compases artificiales de 4/4
+      diagnostics.push({
+        code: 'UNMETERED_TIMELINE',
+        severity: 'INFO',
+        message: 'La secuencia MIDI no declara eventos de métrica (Time Signature); la línea temporal se preserva sin compases artificiales de 4/4.',
       });
 
-      curTick += mDuration;
-      measureNumber++;
+      if (rawTotalTicks > 0) {
+        const quarterCount = Math.max(1, Math.ceil(rawTotalTicks / 480));
+        const unmeteredDuration = quarterCount * 480;
+        measureBoundaries.push({
+          mNum: 1,
+          startTick: 0,
+          durationTicks: unmeteredDuration,
+          timeSignature: new TimeSignature(quarterCount, 4),
+        });
+      }
+    } else {
+      // Función para obtener la TimeSignature activa en un tick canónico
+      const getTimeSignatureAtTick = (tick: number): TimeSignature => {
+        let active = parsedData.timeSignatures[0];
+        for (const ts of parsedData.timeSignatures) {
+          if (ts.tickCanonical <= tick) {
+            active = ts;
+          } else {
+            break;
+          }
+        }
+        return new TimeSignature(active.numerator, active.denominator);
+      };
+
+      let curTick = 0;
+      let measureNumber = 1;
+
+      while (curTick < rawTotalTicks || (measureNumber === 1 && rawTotalTicks === 0)) {
+        const activeTs = getTimeSignatureAtTick(curTick);
+        const mDuration = activeTs.calculateMeasureDurationTicks();
+
+        measureBoundaries.push({
+          mNum: measureNumber,
+          startTick: curTick,
+          durationTicks: mDuration,
+          timeSignature: activeTs,
+        });
+
+        curTick += mDuration;
+        measureNumber++;
+      }
     }
 
-    // 7. Distribuir notas sin truncamiento dividiendo en ligaduras (ties) al cruzar compases
+    // 7. Distribuir notas sin truncamiento
     const measureVoiceNotes = new Map<string, Note[]>(); // key: `${mNum}_${voiceId}` -> Note[]
 
     for (const t of effectiveTracks) {
@@ -232,7 +251,29 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         const noteStart = rawNote.startTickCanonical;
         const noteEnd = noteStart + rawNote.durationTicksCanonical;
 
-        // Encontrar compases que se solapan con [noteStart, noteEnd)
+        if (!hasDeclaredMeter) {
+          // Línea temporal unmetered directa: no dividir en ligaduras artificiales
+          const mNum = 1;
+          const mvKey = `${mNum}_${voiceId}`;
+          if (!measureVoiceNotes.has(mvKey)) {
+            measureVoiceNotes.set(mvKey, []);
+          }
+          measureVoiceNotes.get(mvKey)!.push(
+            new Note({
+              id: `midi-n-1-${t.trackIndex}-${noteIdx + 1}`,
+              pitch,
+              startTick: noteStart,
+              durationTicks: Math.max(1, rawNote.durationTicksCanonical),
+              voice: voiceId,
+              staff: 1,
+              velocity: rawNote.velocity,
+              tie: 'NONE',
+            })
+          );
+          continue;
+        }
+
+        // Métrica formal declarada: encontrar compases que se solapan con [noteStart, noteEnd)
         const overlappingMeasures = measureBoundaries.filter(
           (mb) => noteStart < mb.startTick + mb.durationTicks && noteEnd > mb.startTick
         );
@@ -279,7 +320,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       }
     }
 
-    // 8. Construir objetos Measure correlativos con voces completas
+    // 8. Construir objetos Measure correlativos con voces completas (CERO SILENCIOS INVENTADOS)
     const measures: Measure[] = [];
 
     for (const mb of measureBoundaries) {
@@ -294,17 +335,8 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         notes.sort((a, b) => a.startTick - b.startTick || a.pitch.midiNumber - b.pitch.midiNumber);
 
         if (notes.length === 0) {
-          voices.push(
-            new Voice(voiceId, [
-              new Rest({
-                id: `midi-rest-${mb.mNum}-v${voiceId}`,
-                startTick: mb.startTick,
-                durationTicks: mb.durationTicks,
-                voice: voiceId,
-                staff: 1,
-              }),
-            ])
-          );
+          // Cero silencios artificiales: voz vacía en vez de fabricar Rest
+          voices.push(new Voice(voiceId, []));
         } else {
           voices.push(new Voice(voiceId, notes));
         }
@@ -322,7 +354,9 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       );
     }
 
-    // 9. Construir agregación canónica
+    // 9. Construir agregación canónica coherente con las fronteras de compases
+    const totalDurationTicks = measures.reduce((acc, m) => acc + m.durationTicks, 0);
+
     const timeline = new Timeline({
       totalDurationTicks,
       tempoMap,
@@ -339,9 +373,11 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         midiFormat: parsedData.format,
         division: parsedData.division,
         trackCount: parsedData.trackCount,
+        rawTotalDurationTicksCanonical: rawTotalTicks,
         hasUnresolvedKey: defaultKey === null,
         hasUnresolvedMeter: defaultTimeSignatureStr === null,
         hasUnresolvedTempo: defaultBpm === null,
+        isUnmetered: !hasDeclaredMeter,
         checksumSha256: sourceHash,
       },
     });
@@ -395,6 +431,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       if (programNumber >= 72 && programNumber <= 79) return 'WOODWINDS';
     }
 
-    return 'KEYS';
+    // CERO clasificación arbitraria: Si no se puede establecer con certeza, reportar OTHER
+    return 'OTHER';
   }
 }

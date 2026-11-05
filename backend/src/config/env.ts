@@ -25,6 +25,7 @@ const envSchema = z
     HOST: z.string().default('0.0.0.0'),
     DATABASE_URL: z.string().url('DATABASE_URL debe ser una URL de conexión PostgreSQL válida'),
     TEST_DATABASE_URL: z.string().url('TEST_DATABASE_URL debe ser una URL de conexión PostgreSQL válida').optional(),
+    MIGRATION_DATABASE_URL: z.string().url('MIGRATION_DATABASE_URL debe ser una URL de conexión PostgreSQL válida').optional(),
     CORS_ORIGIN: z.string().default('http://localhost:5173'),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

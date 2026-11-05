@@ -22,6 +22,7 @@ import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { multitrackRoutes } from './interfaces/http/routes/multitrack.routes.ts';
 import { documentRoutes } from './interfaces/http/routes/document.routes.ts';
 import { omrRoutes } from './interfaces/http/routes/omr.routes.ts';
+import { MAX_OMR_HTTP_BODY_LIMIT_BYTES } from './domain/omr/types.ts';
 import { JwtTokenService } from './application/token-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
 import { AuthGuard } from './interfaces/http/middlewares/auth-middleware.ts';
@@ -31,7 +32,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: {
       level: env.LOG_LEVEL,
     },
-    bodyLimit: 10 * 1024 * 1024, // 10 MB límite para archivos MusicXML grandes
+    // R3.2-05: Límite coherente de 25 MiB para acomodar archivos binarios de hasta 15 MiB codificados en Base64 (~20 MiB) + JSON
+    bodyLimit: MAX_OMR_HTTP_BODY_LIMIT_BYTES,
   });
 
   // 1. Manejo de Errores Global

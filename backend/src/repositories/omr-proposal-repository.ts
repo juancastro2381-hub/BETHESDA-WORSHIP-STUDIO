@@ -11,7 +11,7 @@
  * 5. CERO mutación ni eliminación sobre registros históricos de auditoría.
  */
 
-import { eq, asc, desc, sql } from 'drizzle-orm';
+import { eq, and, asc, desc, sql } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import {
   omrProposals,
@@ -55,11 +55,11 @@ export interface IOmrProposalRepository {
   ): Promise<void>;
   updateMeasure(
     proposalId: string,
-    measure: OmrMeasureProposal,
+    measure: Partial<OmrMeasureProposal> & { measureNumber: number },
     requestingUser: AuthenticatedUser
-  ): Promise<void>;
+  ): Promise<OmrMeasureProposal>;
   recordAudit(
-    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    entry: CreateOmrAuditEntryInput,
     requestingUser: AuthenticatedUser
   ): Promise<void>;
   getAuditHistory(
@@ -332,73 +332,158 @@ export class DrizzleOmrProposalRepository implements IOmrProposalRepository {
 
   public async updateMeasure(
     proposalId: string,
-    measure: OmrMeasureProposal,
+    measure: Partial<OmrMeasureProposal> & { measureNumber: number },
     requestingUser: AuthenticatedUser
-  ): Promise<void> {
+  ): Promise<OmrMeasureProposal> {
     assertRepoAuthenticatedUser(requestingUser);
 
-    await this.findProposalById(proposalId, requestingUser);
+    const proposal = await this.findProposalById(proposalId, requestingUser);
+    if (!proposal) {
+      throw new NotFoundError('Propuesta OMR', proposalId);
+    }
+
+    if (requestingUser.role !== 'ADMIN' && proposal.userId !== requestingUser.id) {
+      throw new ForbiddenError('No tiene autorización para modificar compases de una propuesta de otro usuario.');
+    }
 
     if (!['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(requestingUser.role)) {
       throw new ForbiddenError('No tiene autorización para modificar compases de la propuesta OMR.');
     }
 
-    await this.db.transaction(async (tx) => {
-      await tx
-        .insert(omrProposalMeasures)
-        .values({
-          proposalId,
-          measureNumber: measure.measureNumber,
-          timeSignature: measure.timeSignature ?? null,
-          keySignature: measure.keySignature ?? null,
-          chordsDetected: measure.chordsDetected ?? [],
-          notesDetected: measure.notesDetected ?? [],
-          lyricsDetected: measure.lyricsDetected ?? [],
-          measureConfidence: measure.measureConfidence ?? 0,
-          flags: measure.flags ?? [],
-        })
-        .onConflictDoUpdate({
-          target: [omrProposalMeasures.proposalId, omrProposalMeasures.measureNumber],
-          set: {
-            timeSignature: measure.timeSignature ?? null,
-            keySignature: measure.keySignature ?? null,
-            chordsDetected: measure.chordsDetected ?? [],
-            notesDetected: measure.notesDetected ?? [],
-            lyricsDetected: measure.lyricsDetected ?? [],
-            measureConfidence: measure.measureConfidence ?? 0,
-            flags: measure.flags ?? [],
-          },
-        });
+    let mergedResult: OmrMeasureProposal;
 
+    await this.db.transaction(async (tx) => {
+      // 1. Cargar el compás existente desde la base de datos
+      const [existingRow] = await tx
+        .select()
+        .from(omrProposalMeasures)
+        .where(
+          and(
+            eq(omrProposalMeasures.proposalId, proposalId),
+            eq(omrProposalMeasures.measureNumber, measure.measureNumber)
+          )
+        );
+
+      if (!existingRow) {
+        throw new NotFoundError(
+          `Compás ${measure.measureNumber} de la propuesta OMR`,
+          proposalId
+        );
+      }
+
+      // 2. Semántica PATCH segura (R3.2-04):
+      // Los campos omitidos conservan sus valores persistidos previos.
+      // Los campos provistos explícitamente se actualizan.
+      // La confianza no se incrementa a 1 por omisión.
+      const previousValue = {
+        measureNumber: existingRow.measureNumber,
+        timeSignature: existingRow.timeSignature ?? undefined,
+        keySignature: existingRow.keySignature ?? undefined,
+        chordsDetected: (existingRow.chordsDetected as any[]) ?? [],
+        notesDetected: (existingRow.notesDetected as any[]) ?? [],
+        lyricsDetected: (existingRow.lyricsDetected as any[]) ?? [],
+        measureConfidence: Number(existingRow.measureConfidence ?? 0),
+        flags: (existingRow.flags as string[]) ?? [],
+      };
+
+      const mergedTimeSignature =
+        measure.timeSignature !== undefined
+          ? measure.timeSignature
+          : existingRow.timeSignature;
+      const mergedKeySignature =
+        measure.keySignature !== undefined
+          ? measure.keySignature
+          : existingRow.keySignature;
+      const mergedChords =
+        measure.chordsDetected !== undefined
+          ? measure.chordsDetected
+          : ((existingRow.chordsDetected as any[]) ?? []);
+      const mergedNotes =
+        measure.notesDetected !== undefined
+          ? measure.notesDetected
+          : ((existingRow.notesDetected as any[]) ?? []);
+      const mergedLyrics =
+        measure.lyricsDetected !== undefined
+          ? measure.lyricsDetected
+          : ((existingRow.lyricsDetected as any[]) ?? []);
+      const mergedConfidence =
+        measure.measureConfidence !== undefined
+          ? measure.measureConfidence
+          : Number(existingRow.measureConfidence ?? 0);
+      const mergedFlags =
+        measure.flags !== undefined
+          ? measure.flags
+          : ((existingRow.flags as string[]) ?? []);
+
+      mergedResult = {
+        measureNumber: measure.measureNumber,
+        timeSignature: mergedTimeSignature ?? undefined,
+        keySignature: mergedKeySignature ?? undefined,
+        chordsDetected: mergedChords,
+        notesDetected: mergedNotes,
+        lyricsDetected: mergedLyrics,
+        measureConfidence: mergedConfidence,
+        flags: mergedFlags,
+      };
+
+      // 3. Persistir compás fusionado
+      await tx
+        .update(omrProposalMeasures)
+        .set({
+          timeSignature: mergedTimeSignature ?? null,
+          keySignature: mergedKeySignature ?? null,
+          chordsDetected: mergedChords,
+          notesDetected: mergedNotes,
+          lyricsDetected: mergedLyrics,
+          measureConfidence: mergedConfidence,
+          flags: mergedFlags,
+        })
+        .where(
+          and(
+            eq(omrProposalMeasures.proposalId, proposalId),
+            eq(omrProposalMeasures.measureNumber, measure.measureNumber)
+          )
+        );
+
+      // 4. Registrar auditoría con valores previo y nuevo completos
       await tx.insert(omrAuditHistory).values({
         proposalId,
         userId: requestingUser.id,
         actionType: 'UPDATE_MEASURE',
         targetMeasure: measure.measureNumber,
-        newValue: { measureNumber: measure.measureNumber, flags: measure.flags },
-        reason: 'Modificación de compás por usuario autorizado',
+        previousValue,
+        newValue: mergedResult,
+        reason: 'Modificación parcial de compás (PATCH) por usuario autorizado',
       });
     });
+
+    return mergedResult!;
   }
 
   public async recordAudit(
-    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    entry: CreateOmrAuditEntryInput,
     requestingUser: AuthenticatedUser
   ): Promise<void> {
     assertRepoAuthenticatedUser(requestingUser);
 
-    // Prevención de falsificación de actor (R3.1-01):
-    // El actor de auditoría se deriva estrictamente del principal autenticado requestingUser.id.
-    // Si entry.userId viene especificado en tiempo de ejecución, DEBE coincidir exactamente con requestingUser.id.
-    if ((entry as any).userId !== undefined && (entry as any).userId !== null && (entry as any).userId !== requestingUser.id) {
+    // Prevención estricta de falsificación de actor (R3.2-01):
+    // El campo userId está prohibido en CreateOmrAuditEntryInput. Si un llamador
+    // lo suministra en tiempo de ejecución, se rechaza inmediatamente sin importar su valor.
+    if ('userId' in (entry as unknown as Record<string, unknown>) && (entry as any).userId !== undefined) {
       throw new ForbiddenError(
-        'Violación de seguridad: El actor de auditoría especificado en el payload no coincide con el principal autenticado.'
+        'Violación de seguridad: El campo userId está estrictamente prohibido en el DTO de auditoría. La identidad del actor se deriva exclusivamente del principal autenticado.'
       );
     }
 
     const proposal = await this.findProposalById(entry.proposalId, requestingUser);
     if (!proposal) {
       throw new NotFoundError('Propuesta OMR', entry.proposalId);
+    }
+
+    if (requestingUser.role !== 'ADMIN' && proposal.userId !== requestingUser.id) {
+      throw new ForbiddenError(
+        'No tiene autorización para registrar auditoría en una propuesta de otro usuario.'
+      );
     }
 
     await this.db.insert(omrAuditHistory).values({

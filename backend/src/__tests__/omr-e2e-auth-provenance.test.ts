@@ -606,5 +606,280 @@ describe('R3.1-05: Trazabilidad y Procedencia End-to-End de Autenticación OMR',
     assert.ok(Array.isArray(body.data));
     assert.ok(body.data.length > 0);
   });
+
+  // --------------------------------------------------------------------------
+  // 7. SEMÁNTICA PATCH SEGURA EN EDICIÓN DE COMPÁS (R3.2-04)
+  // --------------------------------------------------------------------------
+
+  it('E2E 7.1: should preserve notes, chords and lyrics when PATCH contains only measureNumber', async () => {
+    const sampleBuffer = Buffer.from('%PDF-1.4 Patch Partial Preservation');
+    const uploadRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'patch_preservation.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: sampleBuffer.toString('base64'),
+      },
+    });
+    const { proposalId } = JSON.parse(uploadRes.payload).data;
+    createdProposalIds.add(proposalId);
+
+    // Inicializar compás con datos completos
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/omr/proposals/${proposalId}/measures/1`,
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        measure: {
+          measureNumber: 1,
+          timeSignature: '4/4',
+          chordsDetected: [{ chord: 'C', beat: 1, confidence: 0.9 }],
+          notesDetected: [{ step: 'C', octave: 4, duration: 'whole', confidence: 0.9 }],
+          lyricsDetected: [{ text: 'Aleluya', confidence: 0.9, beat: 1 }],
+          measureConfidence: 0.85,
+          flags: ['ORIGINAL'],
+        },
+      },
+    });
+
+    // PATCH con solo measureNumber y timeSignature
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/omr/proposals/${proposalId}/measures/1`,
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        measure: {
+          measureNumber: 1,
+          timeSignature: '3/4',
+        },
+      },
+    });
+
+    assert.equal(patchRes.statusCode, 200);
+    const body = JSON.parse(patchRes.payload);
+    const updated = body.data.measure;
+
+    assert.equal(updated.timeSignature, '3/4');
+    // Chords, notes y lyrics deben preservarse intactos
+    assert.equal(updated.chordsDetected.length, 1);
+    assert.equal(updated.chordsDetected[0].chord, 'C');
+    assert.equal(updated.notesDetected.length, 1);
+    assert.equal(updated.notesDetected[0].step, 'C');
+    assert.equal(updated.lyricsDetected.length, 1);
+    assert.equal(updated.lyricsDetected[0].text, 'Aleluya');
+    // Confianza previa (0.85) debe preservarse y NO inflarse a 1
+    assert.equal(updated.measureConfidence, 0.85);
+    assert.deepEqual(updated.flags, ['ORIGINAL']);
+  });
+
+  it('E2E 7.2: should preserve chords and lyrics when PATCH modifies only notes', async () => {
+    const sampleBuffer = Buffer.from('%PDF-1.4 Patch Notes Only');
+    const uploadRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'patch_notes.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: sampleBuffer.toString('base64'),
+      },
+    });
+    const { proposalId } = JSON.parse(uploadRes.payload).data;
+    createdProposalIds.add(proposalId);
+
+    // Inicializar compás
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/omr/proposals/${proposalId}/measures/1`,
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        measure: {
+          measureNumber: 1,
+          chordsDetected: [{ chord: 'Dm', beat: 1, confidence: 0.95 }],
+          notesDetected: [{ step: 'D', octave: 4, duration: 'whole', confidence: 0.8 }],
+          lyricsDetected: [{ text: 'Señor', confidence: 0.9, beat: 1 }],
+          measureConfidence: 0.8,
+        },
+      },
+    });
+
+    // Modificar SOLO notas
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/omr/proposals/${proposalId}/measures/1`,
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        measure: {
+          measureNumber: 1,
+          notesDetected: [{ step: 'F', octave: 4, duration: 'whole', confidence: 0.99 }],
+        },
+      },
+    });
+
+    assert.equal(patchRes.statusCode, 200);
+    const body = JSON.parse(patchRes.payload);
+    const updated = body.data.measure;
+
+    assert.equal(updated.notesDetected.length, 1);
+    assert.equal(updated.notesDetected[0].step, 'F');
+    // Chords y lyrics preservados
+    assert.equal(updated.chordsDetected.length, 1);
+    assert.equal(updated.chordsDetected[0].chord, 'Dm');
+    assert.equal(updated.lyricsDetected.length, 1);
+    assert.equal(updated.lyricsDetected[0].text, 'Señor');
+    assert.equal(updated.measureConfidence, 0.8);
+  });
+
+  it('E2E 7.3: should reject PATCH containing invalid note step (prefix CXYZ) with 400 Bad Request', async () => {
+    const sampleBuffer = Buffer.from('%PDF-1.4 Patch Invalid Note Step');
+    const uploadRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'patch_invalid.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: sampleBuffer.toString('base64'),
+      },
+    });
+    const { proposalId } = JSON.parse(uploadRes.payload).data;
+    createdProposalIds.add(proposalId);
+
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/omr/proposals/${proposalId}/measures/1`,
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        measure: {
+          measureNumber: 1,
+          notesDetected: [{ step: 'CXYZ', octave: 4, duration: 'whole', confidence: 0.9 }],
+        },
+      },
+    });
+
+    assert.equal(patchRes.statusCode, 400);
+  });
+
+  // --------------------------------------------------------------------------
+  // 8. POLÍTICA COHERENTE DE TAMAÑO DE ARCHIVO Y LÍMITES HTTP (R3.2-05)
+  // --------------------------------------------------------------------------
+
+  it('E2E 8.1: should accept valid PNG image and return 201 Created', async () => {
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'valid_sheet.png',
+        mimeType: 'image/png',
+        dataBase64: pngHeader.toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 201);
+    const { proposalId } = JSON.parse(res.payload).data;
+    createdProposalIds.add(proposalId);
+  });
+
+  it('E2E 8.2: should accept valid TIFF image and return 201 Created', async () => {
+    // TIFF Little Endian header: 49 49 2A 00
+    const tiffHeader = Buffer.from([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'valid_sheet.tiff',
+        mimeType: 'image/tiff',
+        dataBase64: tiffHeader.toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 201);
+    const { proposalId } = JSON.parse(res.payload).data;
+    createdProposalIds.add(proposalId);
+  });
+
+  it('E2E 8.3: should reject malformed Base64 string with 400 Bad Request', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'malformed.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: '%%%not-a-valid-base64-string$$$',
+      },
+    });
+
+    assert.equal(res.statusCode, 400);
+  });
+
+  it('E2E 8.4: should reject MIME type mismatch (declared PNG, content PDF) with 400 Bad Request', async () => {
+    const pdfBuffer = Buffer.from('%PDF-1.4 Spoofed PNG Content');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'spoofed.png',
+        mimeType: 'image/png', // Declara PNG pero es PDF
+        dataBase64: pdfBuffer.toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 400);
+    const body = JSON.parse(res.payload);
+    const msg = body.error?.message ?? body.message;
+    assert.ok(msg.includes('Firma mágica inválida'));
+  });
+
+  it('E2E 8.5: should accept PDF exactly at maximum 15 MiB limit', async () => {
+    // Crear buffer sintético de exactamente 15 MiB (15,728,640 bytes)
+    const exact15MiBBuffer = Buffer.alloc(15 * 1024 * 1024);
+    // Escribir cabecera PDF válida
+    exact15MiBBuffer.write('%PDF-1.4 Synthetic 15MiB Test PDF', 0, 'ascii');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'exact_15mib.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: exact15MiBBuffer.toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 201);
+    const { proposalId } = JSON.parse(res.payload).data;
+    createdProposalIds.add(proposalId);
+  });
+
+  it('E2E 8.6: should reject PDF exceeding 15 MiB by 1 byte with 400 Bad Request', async () => {
+    // Crear buffer sintético de 15 MiB + 1 byte
+    const oversizedBuffer = Buffer.alloc(15 * 1024 * 1024 + 1);
+    oversizedBuffer.write('%PDF-1.4 Oversized 15MiB+1B Test PDF', 0, 'ascii');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/omr/upload',
+      headers: { authorization: `Bearer ${worshipLeaderToken}` },
+      payload: {
+        filename: 'oversized.pdf',
+        mimeType: 'application/pdf',
+        dataBase64: oversizedBuffer.toString('base64'),
+      },
+    });
+
+    assert.equal(res.statusCode, 400);
+    const body = JSON.parse(res.payload);
+    const detailsMsg = (body.error?.details as any[])?.[0]?.message ?? '';
+    const mainMsg = body.error?.message ?? '';
+    assert.ok(mainMsg.includes('esquema requerido') || detailsMsg.includes('excede'));
+  });
 });
 

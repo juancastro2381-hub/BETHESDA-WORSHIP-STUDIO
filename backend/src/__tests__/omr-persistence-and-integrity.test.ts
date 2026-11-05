@@ -27,7 +27,7 @@ import {
 import { DrizzleBackgroundJobRepository } from '../repositories/background-job-repository.ts';
 import { DrizzleSongRepository } from '../repositories/song-repository.ts';
 import { DrizzleUserRepository } from '../repositories/user-repository.ts';
-import { OmrService } from '../application/omr-service.ts';
+import { OmrService, validateAndParseNoteStep } from '../application/omr-service.ts';
 import type { IOmrProvider } from '../domain/omr/omr-provider.ts';
 import {
   type OmrProposal,
@@ -234,7 +234,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       },
       findProposalById: async () => null,
       updateProposalStatusAndAudit: async () => {},
-      updateMeasure: async () => {},
+      updateMeasure: async () => ({} as any),
       recordAudit: async () => {},
       getAuditHistory: async () => [],
       commitProposalTransaction: async () => {
@@ -303,7 +303,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       updateProposalStatusAndAudit: async () => {
         throw new Error('Postgres connection severed during review transaction');
       },
-      updateMeasure: async () => {},
+      updateMeasure: async () => ({} as any),
       recordAudit: async () => {},
       getAuditHistory: async () => [],
       commitProposalTransaction: async () => {
@@ -409,7 +409,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
           chordsDetected: [{ chord: 'D', beat: 1, confidence: 0.95 }],
           notesDetected: [
             { step: 'D', octave: 4, duration: 'quarter', confidence: 0.95 },
-            { step: 'F#', octave: 4, duration: 'quarter', confidence: 0.95 },
+            { step: 'F', alter: 1, octave: 4, duration: 'quarter', confidence: 0.95 },
             { step: 'A', octave: 4, duration: 'quarter', confidence: 0.95 },
           ],
           lyricsDetected: [{ text: 'Dios', confidence: 0.92, beat: 1 }],
@@ -676,8 +676,8 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
           measureConfidence: 0.95,
           chordsDetected: [{ chord: 'Eb', beat: 1, confidence: 0.95 }],
           notesDetected: [
-            { step: 'Eb', octave: 4, duration: 'half', confidence: 0.95 },
-            { step: 'Bb', octave: 4, duration: 'half', confidence: 0.95 },
+            { step: 'E', alter: -1, octave: 4, duration: 'half', confidence: 0.95 },
+            { step: 'B', alter: -1, octave: 4, duration: 'half', confidence: 0.95 },
           ],
           lyricsDetected: [],
           flags: [],
@@ -2149,7 +2149,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     );
   });
 
-  it('17.2: should reject recordAudit when entry.userId attempts to spoof a different actor (R3.1-01)', async () => {
+  it('17.2: should reject recordAudit when caller supplies any userId in DTO (R3.1-01 & R3.2-01)', async () => {
     const dummyBuffer = Buffer.from('%PDF-1.4 audit actor spoof test');
     const proposal = await omrService.processUpload(
       {
@@ -2162,6 +2162,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     );
     createdProposalIds.push(proposal.proposalId);
 
+    // 1. Rechazar userId forjado (diferente al principal)
     const forgedActorId = crypto.randomUUID();
     await assert.rejects(
       async () => {
@@ -2177,7 +2178,25 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       },
       (err: any) =>
         err.name === 'ForbiddenError' &&
-        err.message.includes('El actor de auditoría especificado en el payload no coincide')
+        err.message.includes('El campo userId está estrictamente prohibido')
+    );
+
+    // 2. Rechazar userId incluso cuando coincide con el principal (prohibición estricta de propiedad en DTO)
+    await assert.rejects(
+      async () => {
+        await omrRepo.recordAudit(
+          {
+            proposalId: proposal.proposalId,
+            userId: leaderPrincipal.id as any,
+            actionType: 'FLAG_MEASURE',
+            reason: 'Intento de suministrar userId redundante',
+          },
+          leaderPrincipal
+        );
+      },
+      (err: any) =>
+        err.name === 'ForbiddenError' &&
+        err.message.includes('El campo userId está estrictamente prohibido')
     );
   });
 
@@ -2473,10 +2492,52 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     );
   });
 
+  it('19.5: should accept all valid note letters A through G and their lowercases (R3.2-03)', () => {
+    const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    for (const letter of letters) {
+      assert.equal(validateAndParseNoteStep(letter), letter);
+      assert.equal(validateAndParseNoteStep(letter.toLowerCase()), letter);
+    }
+  });
+
+  it('19.6: should strictly reject partial prefixes and suffixes (CXYZ, F-invalid, A123, X) (R3.2-03)', () => {
+    const invalidStepStrings = ['CXYZ', 'F-invalid', 'A123', 'X', 'Z', 'F#', 'Eb', 'B_flat', 'C0'];
+    for (const invalid of invalidStepStrings) {
+      assert.throws(
+        () => validateAndParseNoteStep(invalid),
+        (err: any) =>
+          err.name === 'ValidationError' &&
+          err.message.includes('Letras base permitidas exclusivamente: A, B, C, D, E, F, G')
+      );
+    }
+  });
+
+  it('19.7: should strictly reject empty, whitespace, null, undefined, numeric and invalid unicode values (R3.2-03)', () => {
+    const malformedInputs = ['', '   ', '\t', '\n', null, undefined, 123, 0, {}, [], '\uD834\uDD1E'];
+    for (const input of malformedInputs) {
+      assert.throws(
+        () => validateAndParseNoteStep(input),
+        (err: any) => err.name === 'ValidationError'
+      );
+    }
+  });
+
+  it('19.8: should preserve valid notes with explicit alterations and reject notes with invalid steps (R3.2-03)', async () => {
+    // Nota válida con alteración explícita (F# = step F, alter 1)
+    const validStep = validateAndParseNoteStep('F');
+    assert.equal(validStep, 'F');
+
+    // Nota inválida con alteración explícita (F-invalid con alter 1 debe ser rechazada por completo)
+    assert.throws(
+      () => validateAndParseNoteStep('F-invalid'),
+      (err: any) => err.name === 'ValidationError'
+    );
+  });
+
   // ==========================================================================
-  // 20. SEPARACIÓN DE ROLES EN POSTGRESQL Y PRUEBAS ADVERSARIALES (R3.1-04)
+  // 20. SEPARACIÓN DE ROLES EN POSTGRESQL Y PRUEBAS ADVERSARIALES (R3.1-04 & R3.2-02)
   // ==========================================================================
-  it('20.1 to 20.9: should verify that application runtime role cannot UPDATE, DELETE, TRUNCATE, or disable audit trigger (R3.1-04)', async () => {
+  it('20.1 to 20.12: should verify that application runtime role cannot UPDATE, DELETE, TRUNCATE, or alter audit table and trigger (R3.2-02)', async () => {
     // 1. Aprovisionar rol no privilegiado en bethesda_worship_test usando credenciales DBA (postgres)
     await db.execute(sql`
       DO $$
@@ -2490,17 +2551,37 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       $$;
     `);
 
+    // 2. Otorgar permisos DML explícitos tabla por tabla según provision_app_runtime_role.sql
     await db.execute(sql`
       GRANT CONNECT ON DATABASE bethesda_worship_test TO bethesda_app_test_runtime;
       GRANT USAGE ON SCHEMA public TO bethesda_app_test_runtime;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bethesda_app_test_runtime;
-      REVOKE ALL ON "omr_audit_history" FROM bethesda_app_test_runtime;
-      GRANT SELECT, INSERT ON "omr_audit_history" TO bethesda_app_test_runtime;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE users, songs, song_versions, audio_assets, multitrack_sessions, multitrack_tracks, omr_proposals, omr_proposal_measures, background_jobs TO bethesda_app_test_runtime;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bethesda_app_test_runtime;
+      REVOKE ALL ON TABLE omr_audit_history FROM bethesda_app_test_runtime;
+      REVOKE ALL ON TABLE omr_audit_history FROM PUBLIC;
+      GRANT SELECT, INSERT ON TABLE omr_audit_history TO bethesda_app_test_runtime;
+      REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM PUBLIC;
       REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM bethesda_app_test_runtime;
       GRANT EXECUTE ON FUNCTION trg_prevent_omr_audit_modification() TO bethesda_app_test_runtime;
     `);
 
-    // 2. Conectar mediante el rol de ejecución en tiempo de ejecución (bethesda_app_test_runtime)
+    // 3. Inspección del catálogo de PostgreSQL para verificar privilegios efectivos
+    const [privRow] = (await db.execute(sql`
+      SELECT 
+        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'SELECT') as can_select,
+        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'INSERT') as can_insert,
+        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'UPDATE') as can_update,
+        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'DELETE') as can_delete,
+        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'TRUNCATE') as can_truncate
+    `)).rows as any[];
+
+    assert.equal(privRow.can_select, true);
+    assert.equal(privRow.can_insert, true);
+    assert.equal(privRow.can_update, false);
+    assert.equal(privRow.can_delete, false);
+    assert.equal(privRow.can_truncate, false);
+
+    // 4. Conectar mediante el rol de ejecución en tiempo de ejecución (bethesda_app_test_runtime)
     const runtimePool = new pg.Pool({
       connectionString: 'postgresql://bethesda_app_test_runtime:TestAppPassword2026!@localhost:5432/bethesda_worship_test',
     });
@@ -2538,7 +2619,23 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
         (err: any) => err.code === '42501'
       );
 
-      // 20.5: Modificación de la función de trigger denegada (requiere ser dueño de la función)
+      // 20.5: ALTER TABLE ADD COLUMN denegado (requiere ser dueño de la tabla)
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('ALTER TABLE omr_audit_history ADD COLUMN hacked_field text');
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.6: DROP TABLE denegado (requiere ser dueño de la tabla)
+      await assert.rejects(
+        async () => {
+          await runtimePool.query('DROP TABLE omr_audit_history');
+        },
+        (err: any) => err.code === '42501'
+      );
+
+      // 20.7: Modificación de la función de trigger denegada (requiere ser dueño de la función)
       await assert.rejects(
         async () => {
           await runtimePool.query(`
@@ -2549,7 +2646,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
         (err: any) => err.code === '42501'
       );
 
-      // 20.6: DROP TRIGGER denegado (requiere ser dueño de la tabla)
+      // 20.8: DROP TRIGGER denegado (requiere ser dueño de la tabla)
       await assert.rejects(
         async () => {
           await runtimePool.query('DROP TRIGGER IF EXISTS trg_omr_audit_immutability ON omr_audit_history');
@@ -2557,7 +2654,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
         (err: any) => err.code === '42501'
       );
 
-      // 20.7: Bypass mediante variable de sesión fallido
+      // 20.9: Bypass mediante variable de sesión fallido
       await runtimePool.query("SET app.allow_audit_cleanup = 'true'");
       await assert.rejects(
         async () => {
@@ -2566,7 +2663,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
         (err: any) => err.code === '42501' || err.code === '55000'
       );
 
-      // 20.8: INSERT legítimo de auditoría por el rol runtime permitido
+      // 20.10: INSERT legítimo de auditoría por el rol runtime permitido
       const dummyPropId = crypto.randomUUID();
       await db.insert(omrProposals).values({
         id: dummyPropId,
@@ -2585,7 +2682,7 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       `);
       assert.ok(insertRes.rows[0]?.id);
 
-      // 20.9: SELECT de auditoría por el rol runtime permitido
+      // 20.11: SELECT de auditoría por el rol runtime permitido
       const selectRes = await runtimePool.query(`
         SELECT * FROM omr_audit_history WHERE proposal_id = '${dummyPropId}'
       `);
@@ -2593,5 +2690,227 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     } finally {
       await runtimePool.end();
     }
+  });
+
+  // ==========================================================================
+  // 21. SEMÁNTICA PATCH SEGURA Y PRESERVACIÓN DE CONTENIDO MUSICAL (R3.2-04)
+  // ==========================================================================
+  it('21.1: should preserve existing notes, chords and lyrics when PATCH contains only measureNumber (R3.2-04)', async () => {
+    // 1. Crear propuesta con compás inicial completo
+    const dummyBuffer = Buffer.from('%PDF-1.4 patch preservation test 1');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'patch_preservation_1.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Compás inicial
+    await omrRepo.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        timeSignature: '4/4',
+        keySignature: 'G',
+        chordsDetected: [{ chord: 'G', beat: 1, confidence: 0.9 }],
+        notesDetected: [{ step: 'G', octave: 4, duration: 'whole', confidence: 0.9 }],
+        lyricsDetected: [{ text: 'Gloria', confidence: 0.9, beat: 1 }],
+        measureConfidence: 0.88,
+        flags: ['FLAG_ORIGINAL'],
+      },
+      leaderPrincipal
+    );
+
+    // 2. Ejecutar PATCH con solo measureNumber
+    const patched = await omrService.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+      },
+      leaderPrincipal
+    );
+
+    // 3. Verificar que todo el contenido previo se conserva
+    assert.equal(patched.timeSignature, '4/4');
+    assert.equal(patched.keySignature, 'G');
+    assert.equal(patched.chordsDetected.length, 1);
+    assert.equal(patched.chordsDetected[0]?.chord, 'G');
+    assert.equal(patched.notesDetected.length, 1);
+    assert.equal(patched.notesDetected[0]?.step, 'G');
+    assert.equal(patched.lyricsDetected.length, 1);
+    assert.equal(patched.lyricsDetected[0]?.text, 'Gloria');
+    assert.equal(patched.measureConfidence, 0.88);
+    assert.deepEqual(patched.flags, ['FLAG_ORIGINAL']);
+  });
+
+  it('21.2: should preserve chords and lyrics when PATCH updates only notes (R3.2-04)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 patch preservation test 2');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'patch_preservation_2.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Configurar compás con notas, acordes y letra
+    await omrRepo.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        timeSignature: '4/4',
+        chordsDetected: [{ chord: 'Em', beat: 1, confidence: 0.95 }],
+        notesDetected: [{ step: 'E', octave: 4, duration: 'whole', confidence: 0.8 }],
+        lyricsDetected: [{ text: 'Santo', confidence: 0.95, beat: 1 }],
+        measureConfidence: 0.8,
+      },
+      leaderPrincipal
+    );
+
+    // Modificar SOLO las notas
+    const patched = await omrService.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        notesDetected: [
+          { step: 'E', octave: 4, duration: 'half', confidence: 0.99 },
+          { step: 'B', octave: 4, duration: 'half', confidence: 0.99 },
+        ],
+      },
+      leaderPrincipal
+    );
+
+    // Notas modificadas
+    assert.equal(patched.notesDetected.length, 2);
+    assert.equal(patched.notesDetected[1]?.step, 'B');
+    // Acordes y letra preservados intactos
+    assert.equal(patched.chordsDetected.length, 1);
+    assert.equal(patched.chordsDetected[0]?.chord, 'Em');
+    assert.equal(patched.lyricsDetected.length, 1);
+    assert.equal(patched.lyricsDetected[0]?.text, 'Santo');
+    // Confianza previa preservada
+    assert.equal(patched.measureConfidence, 0.8);
+  });
+
+  it('21.3: should preserve previous confidence and not artificially inflate to 1 (R3.2-04)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 patch confidence test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'patch_confidence.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await omrRepo.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        measureConfidence: 0.65,
+        flags: ['LOW_CONFIDENCE'],
+      },
+      leaderPrincipal
+    );
+
+    // Actualizar clave sin proveer confianza
+    const patched = await omrService.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        keySignature: 'F',
+      },
+      leaderPrincipal
+    );
+
+    assert.equal(patched.keySignature, 'F');
+    // La confianza DEBE permanecer 0.65, no inflarse a 1
+    assert.equal(patched.measureConfidence, 0.65);
+    assert.deepEqual(patched.flags, ['LOW_CONFIDENCE']);
+  });
+
+  it('21.4: should record detailed previousValue and newValue in omr_audit_history on PATCH (R3.2-04)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 patch audit test');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'patch_audit.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    // Medida inicial
+    await omrRepo.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        timeSignature: '4/4',
+        keySignature: 'C',
+        chordsDetected: [{ chord: 'C', beat: 1, confidence: 0.9 }],
+        notesDetected: [{ step: 'C', octave: 4, duration: 'whole', confidence: 0.9 }],
+        lyricsDetected: [],
+        measureConfidence: 0.9,
+      },
+      leaderPrincipal
+    );
+
+    // Aplicar PATCH
+    await omrService.updateMeasure(
+      proposal.proposalId,
+      {
+        measureNumber: 1,
+        keySignature: 'Am',
+      },
+      leaderPrincipal
+    );
+
+    // Consultar auditoría (ordenada descendentemente: el más reciente es el índice 0)
+    const history = await omrService.getAuditHistory(proposal.proposalId, leaderPrincipal);
+    const lastUpdate = history.filter((h) => h.actionType === 'UPDATE_MEASURE')[0];
+
+    assert.ok(lastUpdate);
+    assert.equal(lastUpdate.userId, leaderPrincipal.id);
+    assert.equal((lastUpdate.previousValue as any)?.keySignature, 'C');
+    assert.equal((lastUpdate.newValue as any)?.keySignature, 'Am');
+  });
+
+  it('21.5: should throw NotFoundError when updating non-existent measure number (R3.2-04)', async () => {
+    const dummyBuffer = Buffer.from('%PDF-1.4 non existent measure patch');
+    const proposal = await omrService.processUpload(
+      {
+        buffer: dummyBuffer,
+        filename: 'non_existent_measure.pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: dummyBuffer.length,
+      },
+      leaderPrincipal
+    );
+    createdProposalIds.push(proposal.proposalId);
+
+    await assert.rejects(
+      async () => {
+        await omrService.updateMeasure(
+          proposal.proposalId,
+          {
+            measureNumber: 999, // Compás que no existe
+            timeSignature: '3/4',
+          },
+          leaderPrincipal
+        );
+      },
+      { name: 'NotFoundError' }
+    );
   });
 });

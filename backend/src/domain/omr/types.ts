@@ -7,7 +7,9 @@
  * obligatoria antes de persistirse como canción canónica.
  */
 
-export const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB límite técnico coherente
+export const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MiB (15,728,640 bytes) límite binario
+export const MAX_OMR_BASE64_LENGTH = Math.ceil(MAX_OMR_FILE_SIZE_BYTES / 3) * 4; // 20,971,520 caracteres Base64
+export const MAX_OMR_HTTP_BODY_LIMIT_BYTES = 25 * 1024 * 1024; // 25 MiB: margen seguro para JSON + Base64
 
 export interface AuthenticatedUser {
   id: string;
@@ -115,11 +117,18 @@ export interface OmrAuditEntry {
 }
 
 /**
- * Payload de entrada para registrar auditoría (R3.1-01).
- * `userId` está estrictamente prohibido como entrada del cliente o llamador
- * para prevenir la falsificación del actor de auditoría.
- * El actor se deriva exclusivamente del principal autenticado validado.
+ * DTO exclusivo de creación para registrar auditoría (R3.2-01).
+ * `userId` está estrictamente prohibido a nivel de tipo (userId?: never)
+ * y en tiempo de ejecución para prevenir la falsificación del actor de auditoría.
+ * El actor se deriva exclusivamente del principal autenticado validado (requestingUser.id).
  */
-export type CreateOmrAuditEntryInput = Omit<OmrAuditEntry, 'id' | 'userId' | 'createdAt'> & {
+export interface CreateOmrAuditEntryInput {
+  proposalId: string;
+  actionType: OmrActionType;
   userId?: never;
-};
+  targetMeasure?: number;
+  targetTick?: number;
+  previousValue?: any;
+  newValue?: any;
+  reason?: string;
+}

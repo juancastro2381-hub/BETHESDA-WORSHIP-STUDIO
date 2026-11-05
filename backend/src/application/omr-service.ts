@@ -98,8 +98,10 @@ function assertAuthenticatedUser(user: unknown): asserts user is AuthenticatedUs
 const VALID_NOTE_LETTERS: ReadonlySet<string> = new Set(['C', 'D', 'E', 'F', 'G', 'A', 'B']);
 
 /**
- * Valida de forma estricta la letra base del paso de nota (step) sin ningún fallback silencioso a C (R3.1-03).
- * Acepta únicamente letras A, B, C, D, E, F, G y rechaza vacíos, nulos o caracteres desconocidos.
+ * Valida de forma estricta la letra base del paso de nota (step) sin ningún fallback silencioso a C (R3.1-03 & R3.2-03).
+ * Acepta única y exclusivamente un único carácter de nota válido de 'A' a 'G' tras normalización (regex ^[A-G]$).
+ * Rechaza cadenas vacías, espacios en blanco, números, sufijos no válidos (CXYZ, F-invalid, A123, F#, Eb),
+ * caracteres Unicode inesperados o prefijos parciales.
  */
 export function validateAndParseNoteStep(step: unknown): BaseNoteLetter {
   if (typeof step !== 'string') {
@@ -107,15 +109,14 @@ export function validateAndParseNoteStep(step: unknown): BaseNoteLetter {
   }
   const trimmed = step.trim().toUpperCase();
   if (!trimmed) {
-    throw new ValidationError('El paso de nota musical (step) no puede ser una cadena vacía.');
+    throw new ValidationError('El paso de nota musical (step) no puede ser una cadena vacía ni contener solo espacios.');
   }
-  const firstChar = trimmed[0];
-  if (!firstChar || !VALID_NOTE_LETTERS.has(firstChar)) {
+  if (!/^[A-G]$/.test(trimmed)) {
     throw new ValidationError(
-      `Paso de nota musical inválido: "${step}". Letras base permitidas: A, B, C, D, E, F, G. Se prohíbe la fabricación de notas.`
+      `Paso de nota musical inválido: "${step}". Letras base permitidas exclusivamente: A, B, C, D, E, F, G. Se prohíbe la coincidencia por prefijo parcial (e.g. CXYZ, F-invalid, A123) y la fabricación de notas.`
     );
   }
-  return firstChar as BaseNoteLetter;
+  return trimmed as BaseNoteLetter;
 }
 
 export class OmrService {
@@ -506,16 +507,18 @@ export class OmrService {
   }
 
   /**
-   * Modifica un compás de la propuesta OMR con auditoría (R3.1-01 / R3.1-05).
+   * Modifica un compás de la propuesta OMR aplicando semántica PATCH segura (R3.2-04).
+   * Preserva el contenido existente no provisto y audita atómicamente el cambio.
    */
   public async updateMeasure(
     proposalId: string,
-    measure: OmrMeasureProposal,
+    measure: Partial<OmrMeasureProposal> & { measureNumber: number },
     requestingUser: AuthenticatedUser
-  ): Promise<void> {
+  ): Promise<OmrMeasureProposal> {
     assertAuthenticatedUser(requestingUser);
-    await this.omrRepo.updateMeasure(proposalId, measure, requestingUser);
+    const updated = await this.omrRepo.updateMeasure(proposalId, measure, requestingUser);
     this.proposals.delete(proposalId);
+    return updated;
   }
 
   /**
@@ -530,10 +533,11 @@ export class OmrService {
   }
 
   /**
-   * Registra un evento de auditoría obligatorio vinculado al principal autenticado (R3.1-01).
+   * Registra un evento de auditoría obligatorio vinculado al principal autenticado (R3.1-01 & R3.2-01).
+   * Se prohíbe terminantemente la especificación de userId en el DTO de entrada.
    */
   public async recordAudit(
-    entry: CreateOmrAuditEntryInput | OmrAuditEntry,
+    entry: CreateOmrAuditEntryInput,
     requestingUser: AuthenticatedUser
   ): Promise<void> {
     assertAuthenticatedUser(requestingUser);

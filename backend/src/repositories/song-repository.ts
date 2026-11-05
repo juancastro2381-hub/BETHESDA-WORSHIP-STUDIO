@@ -161,9 +161,9 @@ export class DrizzleSongRepository implements ISongRepository {
             title: dto.title.trim(),
             artist: dto.artist ? dto.artist.trim() : null,
             ccliNumber: dto.ccliNumber ? dto.ccliNumber.trim() : null,
-            defaultKey: dto.defaultKey.trim(),
-            defaultBpm: dto.defaultBpm ?? 120,
-            timeSignature: dto.timeSignature ?? '4/4',
+            defaultKey: dto.defaultKey ? dto.defaultKey.trim() : null,
+            defaultBpm: dto.defaultBpm ?? null,
+            timeSignature: dto.timeSignature ? dto.timeSignature.trim() : null,
             status: dto.status ?? 'DRAFT',
           })
           .returning();
@@ -206,8 +206,14 @@ export class DrizzleSongRepository implements ISongRepository {
           await tx.insert(songSources).values({
             songId: newSong.id,
             versionId: newVersion.id,
-            sourceType: dto.sourceFormat === 'CHORD_PRO' ? 'CHORD_PRO' : 'MUSIC_XML',
+            userId: dto.sourceRecord.userId ?? null,
+            sourceType: dto.sourceRecord.sourceType ?? (dto.sourceFormat === 'CHORD_PRO' ? 'CHORD_PRO' : dto.sourceFormat === 'MIDI' ? 'MIDI' : dto.sourceFormat === 'INTERNAL' ? 'INTERNAL' : 'MUSIC_XML'),
             filename: dto.sourceRecord.filename ?? null,
+            storagePath: dto.sourceRecord.storagePath ?? null,
+            mimeType: dto.sourceRecord.mimeType ?? null,
+            fileSizeBytes: dto.sourceRecord.fileSizeBytes ?? null,
+            checksumSha256: dto.sourceRecord.checksumSha256 ?? null,
+            jobId: dto.sourceRecord.jobId ?? null,
             rawContent: dto.sourceRecord.rawContent ?? null,
             importerName: dto.sourceRecord.importerName,
             importerVersion: dto.sourceRecord.importerVersion,

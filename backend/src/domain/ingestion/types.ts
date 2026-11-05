@@ -19,9 +19,13 @@ export type IngestionSourceType =
 export type IngestionStatus =
   | 'IMPORTED'
   | 'PARSED'
+  | 'SOURCE_PRESERVED'
+  | 'REGISTERED'
   | 'RECOGNITION_PENDING'
   | 'RECOGNITION_UNAVAILABLE'
+  | 'PARTIALLY_CONVERTED'
   | 'MANUAL_REVIEW_REQUIRED'
+  | 'PENDING_REVIEW'
   | 'CONVERTED'
   | 'FAILED';
 
@@ -103,18 +107,19 @@ export interface IngestionOutput {
   status: IngestionStatus;
   sourceType: IngestionSourceType;
   sourceHash: string;
+  sourceId?: string;
   filename?: string;
   storageKey?: string;
   title: string;
   artist: string | null;
-  defaultKey: string;
-  defaultBpm: number;
-  timeSignature: string;
-  canonicalPayload?: CanonicalMusicPayloadJSON;
+  defaultKey: string | null;
+  defaultBpm: number | null;
+  timeSignature: string | null;
+  canonicalPayload?: CanonicalMusicPayloadJSON | null;
   diagnostics: IngestionDiagnostic[];
   recognitionStatusMessage?: string;
-  songId?: string;
-  versionId?: string;
+  songId?: string | null;
+  versionId?: string | null;
 }
 
 export interface IIngestionAdapter {
@@ -122,5 +127,6 @@ export interface IIngestionAdapter {
   readonly name: string;
   readonly version: string;
   canHandle(input: IngestionInput): boolean;
+  detectMimeType?(buffer: Buffer): string | undefined;
   ingest(input: IngestionInput, user: AuthenticatedUser): Promise<IngestionOutput>;
 }

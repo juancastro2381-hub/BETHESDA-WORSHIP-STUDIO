@@ -421,8 +421,8 @@ describe('Worship Studio — Phase 1B Universal Music Ingestion Test Suite', () 
       assert.equal(parsed.trackCount, 1);
       assert.equal(parsed.division, 480);
       assert.equal(parsed.defaultBpm, 128);
-      assert.equal(parsed.defaultTimeSignature.numerator, 3);
-      assert.equal(parsed.defaultTimeSignature.denominator, 4);
+      assert.equal(parsed.defaultTimeSignature?.numerator, 3);
+      assert.equal(parsed.defaultTimeSignature?.denominator, 4);
       assert.equal(parsed.tracks[0].notes.length, 3);
       assert.equal(parsed.tracks[0].notes[0].pitch, 60);
       assert.equal(parsed.tracks[0].notes[0].durationTicksCanonical, 480);
@@ -485,10 +485,11 @@ describe('Worship Studio — Phase 1B Universal Music Ingestion Test Suite', () 
 
       assert.equal(res.statusCode, 201);
       const body = res.json();
-      assert.equal(body.status, 'CONVERTED');
+      assert.ok(body.status === 'CONVERTED' || body.status === 'PARTIALLY_CONVERTED');
       assert.equal(body.sourceType, 'MIDI');
       assert.equal(body.defaultBpm, 110);
       assert.equal(body.timeSignature, '4/4');
+      assert.equal(body.defaultKey, null);
       assert.ok(body.songId);
       assert.ok(body.canonicalPayload);
       assert.equal(body.canonicalPayload.instrumentTracks.length, 2);
@@ -722,8 +723,8 @@ describe('Worship Studio — Phase 1B Universal Music Ingestion Test Suite', () 
       assert.ok(body.sourceHash);
       assert.ok(body.storageKey);
       assert.ok(body.recognitionStatusMessage.includes('no configurado'));
-      // CERO notas inventadas:
-      assert.equal(body.canonicalPayload.measures.length, 0);
+      // CERO notas inventadas (sin partitura canónica ficticia):
+      assert.equal(body.canonicalPayload, null);
     });
 
     it('C1.2: should inspect legitimate PNG image score and preserve original file', async () => {
@@ -812,7 +813,7 @@ describe('Worship Studio — Phase 1B Universal Music Ingestion Test Suite', () 
       assert.equal(body.sourceType, 'AUDIO');
       assert.equal(body.status, 'RECOGNITION_UNAVAILABLE');
       assert.ok(body.storageKey);
-      assert.equal(body.canonicalPayload.measures.length, 0, 'Cero notas inventadas desde audio sin transcriptor real');
+      assert.equal(body.canonicalPayload, null, 'Cero notas inventadas desde audio sin transcriptor real');
     });
 
     it('D1.2: should accept authorized YouTube URL and register video reference', async () => {
@@ -831,9 +832,9 @@ describe('Worship Studio — Phase 1B Universal Music Ingestion Test Suite', () 
       assert.equal(res.statusCode, 201);
       const body = res.json();
       assert.equal(body.sourceType, 'VIDEO_URL');
-      assert.equal(body.status, 'CONVERTED');
-      assert.equal(body.canonicalPayload.metadata.platform, 'YOUTUBE');
-      assert.equal(body.canonicalPayload.metadata.videoId, 'dQw4w9WgXcQ');
+      assert.equal(body.status, 'REGISTERED');
+      assert.equal(body.canonicalPayload, null);
+      assert.ok(body.diagnostics.some((d: any) => d.code === 'VIDEO_URL_REGISTERED'));
     });
 
     it('D1.3: should strictly block SSRF attempt to localhost (127.0.0.1)', async () => {

@@ -22,9 +22,9 @@ export interface SongEntity {
   title: string;
   artist: string | null;
   ccliNumber: string | null;
-  defaultKey: string;
-  defaultBpm: number;
-  timeSignature: string;
+  defaultKey: string | null;
+  defaultBpm: number | null;
+  timeSignature: string | null;
   status: SongReviewStatus;
   currentVersionId: string | null;
   createdAt: Date;
@@ -48,10 +48,16 @@ export interface SongVersionEntity {
 
 export interface SongSourceEntity {
   id: string;
-  songId: string;
+  songId: string | null;
   versionId: string | null;
+  userId: string | null;
   sourceType: SongSourceFormat;
   filename: string | null;
+  storagePath: string | null;
+  mimeType: string | null;
+  fileSizeBytes: number | null;
+  checksumSha256: string | null;
+  jobId: string | null;
   rawContent: string | null;
   importerName: string;
   importerVersion: string;
@@ -72,16 +78,23 @@ export interface CreateSongDTO {
   title: string;
   artist?: string | null | undefined;
   ccliNumber?: string | null | undefined;
-  defaultKey: string;
-  defaultBpm?: number | undefined;
-  timeSignature?: string | undefined;
+  defaultKey?: string | null | undefined;
+  defaultBpm?: number | null | undefined;
+  timeSignature?: string | null | undefined;
   status?: SongReviewStatus | undefined;
   versionName?: string | undefined;
   versionDescription?: string | undefined;
   sourceFormat: SongSourceFormat;
   canonicalPayload: CanonicalMusicPayloadJSON;
   sourceRecord?: {
+    userId?: string | undefined;
+    sourceType?: SongSourceFormat | undefined;
     filename?: string | undefined;
+    storagePath?: string | undefined;
+    mimeType?: string | undefined;
+    fileSizeBytes?: number | undefined;
+    checksumSha256?: string | undefined;
+    jobId?: string | undefined;
     rawContent?: string | undefined;
     importerName: string;
     importerVersion: string;

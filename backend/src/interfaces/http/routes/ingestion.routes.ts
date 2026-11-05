@@ -105,6 +105,10 @@ const JobIdParamSchema = z.object({
   jobId: z.string().uuid('El ID de tarea debe ser un UUID válido'),
 });
 
+const SourceIdParamSchema = z.object({
+  sourceId: z.string().uuid('El ID de fuente debe ser un UUID válido'),
+});
+
 function extractAuthenticatedPrincipal(request: any): AuthenticatedUser {
   if (!request.user || !request.user.sub) {
     throw new UnauthorizedError('Autenticación requerida.');
@@ -288,6 +292,71 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
         startedAt: job.startedAt,
         completedAt: job.completedAt,
       });
+    }
+  );
+
+  /**
+   * GET /api/v1/ingestion/sources/:sourceId
+   * Consulta los metadatos de una fuente preservada verificando autorización multi-inquilino.
+   */
+  fastify.get(
+    '/sources/:sourceId',
+    {
+      preHandler: [authGuard.requireAuth],
+    },
+    async (request, reply) => {
+      const user = extractAuthenticatedPrincipal(request);
+      const paramResult = SourceIdParamSchema.safeParse(request.params);
+      if (!paramResult.success) {
+        throw new ValidationError('ID de fuente inválido', paramResult.error.errors);
+      }
+
+      const source = await ingestionService.getSource(paramResult.data.sourceId, user);
+      return reply.send({
+        id: source.id,
+        songId: source.songId,
+        versionId: source.versionId,
+        userId: source.userId,
+        sourceType: source.sourceType,
+        filename: source.filename,
+        storagePath: source.storagePath,
+        mimeType: source.mimeType,
+        fileSizeBytes: source.fileSizeBytes,
+        checksumSha256: source.checksumSha256,
+        jobId: source.jobId,
+        importerName: source.importerName,
+        importerVersion: source.importerVersion,
+        importedAt: source.importedAt,
+      });
+    }
+  );
+
+  /**
+   * GET /api/v1/ingestion/sources/:sourceId/file
+   * Descarga el flujo binario original de una fuente preservada verificando autorización multi-inquilino.
+   */
+  fastify.get(
+    '/sources/:sourceId/file',
+    {
+      preHandler: [authGuard.requireAuth],
+    },
+    async (request, reply) => {
+      const user = extractAuthenticatedPrincipal(request);
+      const paramResult = SourceIdParamSchema.safeParse(request.params);
+      if (!paramResult.success) {
+        throw new ValidationError('ID de fuente inválido', paramResult.error.errors);
+      }
+
+      const { source, buffer } = await ingestionService.getSourceFile(paramResult.data.sourceId, user);
+      const filename = source.filename || 'source.bin';
+      const mimeType = source.mimeType || 'application/octet-stream';
+
+      return reply
+        .header('Content-Type', mimeType)
+        .header('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`)
+        .header('X-Checksum-SHA256', source.checksumSha256 || '')
+        .header('Content-Length', buffer.length)
+        .send(buffer);
     }
   );
 };

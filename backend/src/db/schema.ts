@@ -257,9 +257,9 @@ export const songs = pgTable(
     title: varchar('title', { length: 255 }).notNull(),
     artist: varchar('artist', { length: 255 }),
     ccliNumber: varchar('ccli_number', { length: 64 }),
-    defaultKey: varchar('default_key', { length: 16 }).notNull(),
-    defaultBpm: integer('default_bpm').notNull().default(120),
-    timeSignature: varchar('time_signature', { length: 16 }).notNull().default('4/4'),
+    defaultKey: varchar('default_key', { length: 16 }),
+    defaultBpm: integer('default_bpm'),
+    timeSignature: varchar('time_signature', { length: 16 }),
     status: varchar('status', { length: 32 }).notNull().default('DRAFT'), // 'DRAFT' | 'APPROVED' | 'ARCHIVED'
     currentVersionId: uuid('current_version_id'),
     createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
@@ -315,12 +315,16 @@ export const songSources = pgTable(
   'song_sources',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    songId: uuid('song_id')
-      .notNull()
-      .references(() => songs.id, { onDelete: 'cascade' }),
+    songId: uuid('song_id').references(() => songs.id, { onDelete: 'cascade' }),
     versionId: uuid('version_id').references(() => songVersions.id, { onDelete: 'set null' }),
-    sourceType: varchar('source_type', { length: 32 }).notNull(), // 'MUSIC_XML' | 'CHORD_PRO'
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    sourceType: varchar('source_type', { length: 32 }).notNull(), // 'MUSIC_XML' | 'CHORD_PRO' | 'MIDI' | 'WRITTEN_NOTES' | 'VISUAL_SCORE' | 'AUDIO' | 'VIDEO_URL'
     filename: varchar('filename', { length: 255 }),
+    storagePath: text('storage_path'),
+    mimeType: varchar('mime_type', { length: 100 }),
+    fileSizeBytes: integer('file_size_bytes'),
+    checksumSha256: varchar('checksum_sha256', { length: 64 }),
+    jobId: uuid('job_id').references(() => backgroundJobs.id, { onDelete: 'set null' }),
     rawContent: text('raw_content'),
     importerName: varchar('importer_name', { length: 64 }).notNull(),
     importerVersion: varchar('importer_version', { length: 32 }).notNull(),
@@ -329,6 +333,9 @@ export const songSources = pgTable(
   (table) => [
     index('idx_song_sources_song_id').on(table.songId),
     index('idx_song_sources_version_id').on(table.versionId),
+    index('idx_song_sources_user_id').on(table.userId),
+    index('idx_song_sources_checksum').on(table.checksumSha256),
+    index('idx_song_sources_job_id').on(table.jobId),
   ]
 );
 
@@ -593,6 +600,14 @@ export const songSourcesRelations = relations(songSources, ({ one }) => ({
   version: one(songVersions, {
     fields: [songSources.versionId],
     references: [songVersions.id],
+  }),
+  user: one(users, {
+    fields: [songSources.userId],
+    references: [users.id],
+  }),
+  job: one(backgroundJobs, {
+    fields: [songSources.jobId],
+    references: [backgroundJobs.id],
   }),
 }));
 

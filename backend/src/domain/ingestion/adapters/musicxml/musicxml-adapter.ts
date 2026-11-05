@@ -45,6 +45,10 @@ export class MusicXmlIngestionAdapter implements IIngestionAdapter {
     return false;
   }
 
+  public detectMimeType(_buffer: Buffer): string {
+    return 'application/vnd.recordare.musicxml+xml';
+  }
+
   public async ingest(input: IngestionInput, _user: AuthenticatedUser): Promise<IngestionOutput> {
     const rawContent = input.rawText || (input.buffer ? input.buffer.toString('utf8') : '');
     if (!rawContent || rawContent.trim().length === 0) {
@@ -76,15 +80,53 @@ export class MusicXmlIngestionAdapter implements IIngestionAdapter {
     const payload = result.payload;
     const firstMeasure = payload.measures[0];
 
-    const defaultKey = firstMeasure
-      ? firstMeasure.keySignature.toMusicalKey().toString()
-      : 'C Major';
+    const hasExplicitKey = /<key\b[^>]*>/i.test(rawContent);
+    let defaultKey: string | null = null;
+    if (hasExplicitKey && firstMeasure?.keySignature) {
+      try {
+        defaultKey = firstMeasure.keySignature.toMusicalKey().toString();
+      } catch {
+        defaultKey = null;
+      }
+    }
+    if (!defaultKey) {
+      diagnostics.push({
+        code: 'MISSING_KEY_SIGNATURE',
+        severity: 'INFO',
+        message: 'La partitura MusicXML no declara tonalidad explícita; el campo permanece no resuelto (null) para revisión humana.',
+      });
+    }
 
-    const timeSignature = firstMeasure
-      ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
-      : '4/4';
+    const hasExplicitTime = /<time\b[^>]*>/i.test(rawContent);
+    let timeSignature: string | null = null;
+    if (hasExplicitTime && firstMeasure?.timeSignature) {
+      timeSignature = `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`;
+    } else {
+      diagnostics.push({
+        code: 'MISSING_TIME_SIGNATURE',
+        severity: 'INFO',
+        message: 'La partitura MusicXML no declara métrica de compás explícita; el campo permanece no resuelto (null) para revisión humana.',
+      });
+    }
 
-    const defaultBpm = payload.timeline.tempoMap.events[0]?.bpm ?? 120;
+    const hasExplicitTempo =
+      /<sound\b[^>]*tempo=/i.test(rawContent) ||
+      /<per-minute/i.test(rawContent) ||
+      /<metronome/i.test(rawContent);
+
+    const defaultBpm: number | null = hasExplicitTempo
+      ? payload.timeline.tempoMap.events[0]?.bpm ?? null
+      : null;
+    if (defaultBpm === null) {
+      diagnostics.push({
+        code: 'MISSING_TEMPO',
+        severity: 'INFO',
+        message: 'La partitura MusicXML no declara marca de tempo BPM; el campo permanece no resuelto (null) para revisión humana.',
+      });
+    }
+
+    const isFullyResolved = defaultKey !== null && timeSignature !== null && defaultBpm !== null;
+    const status = isFullyResolved ? 'CONVERTED' : 'PARTIALLY_CONVERTED';
 
     for (const d of (result.diagnostics as IngestionDiagnostic[])) {
       diagnostics.push({
@@ -97,7 +139,7 @@ export class MusicXmlIngestionAdapter implements IIngestionAdapter {
     }
 
     return {
-      status: 'PARSED',
+      status,
       sourceType: 'MUSICXML',
       sourceHash,
       filename: input.filename,

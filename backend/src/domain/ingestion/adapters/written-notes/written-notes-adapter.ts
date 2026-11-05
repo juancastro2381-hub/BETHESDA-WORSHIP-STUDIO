@@ -1,7 +1,12 @@
 /**
  * @file written-notes-adapter.ts
- * @description Adaptador universal para ingreso estructurado manual de notas, compases, acordes y letras (Fase 1B).
- * Proporciona un canal accesible para músicos que desean ingresar información musical de forma directa.
+ * @description Adaptador universal para ingesta de notas musicales introducidas manualmente (Fase 1B-R).
+ *
+ * Principios:
+ * 1. Validación estricta de paso tonal ^[A-G]$ y octava 0..9.
+ * 2. CERO asunción de notas redondas, blancas o negras si la duración es inválida.
+ * 3. CERO tonalidad 'C', métrica '4/4' o tempo 120 BPM inventados si no fueron suministrados.
+ * 4. Mapeo correlativo estricto de compases y voces con alineación exacta de ticks.
  */
 
 import crypto from 'node:crypto';
@@ -45,17 +50,22 @@ const DURATION_TICKS_MAP: Record<string, number> = {
 
 export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
   public readonly sourceType = 'WRITTEN_NOTES' as const;
-  public readonly name = 'Bethesda Written Notes Manual Importer';
-  public readonly version = '1.0.0';
+  public readonly name = 'Bethesda Manual Written Notes Importer';
+  public readonly version = '1.1.0';
 
   public canHandle(input: IngestionInput): boolean {
-    return input.sourceType === 'WRITTEN_NOTES' || input.writtenNotes !== undefined;
+    return input.sourceType === 'WRITTEN_NOTES' || Boolean(input.writtenNotes);
+  }
+
+  public detectMimeType(_buffer: Buffer): string {
+    return 'application/json';
   }
 
   public async ingest(input: IngestionInput, _user: AuthenticatedUser): Promise<IngestionOutput> {
     const payload: WrittenNotesPayload | undefined = input.writtenNotes;
-    if (!payload) {
-      throw new ValidationError('El payload de notas escritas no fue suministrado en la solicitud.');
+
+    if (!payload || typeof payload !== 'object') {
+      throw new ValidationError('Payload de notas escritas no suministrado o inválido.');
     }
 
     if (!payload.title || typeof payload.title !== 'string' || payload.title.trim().length === 0) {
@@ -68,22 +78,61 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
 
     const title = payload.title.trim();
     const artist = payload.artist?.trim() || null;
-    const defaultBpm = payload.tempoBpm ?? 120;
-    const rawKeyStr = payload.keySignature || 'C';
+    const diagnostics: IngestionDiagnostic[] = [];
 
-    let musicalKey: MusicalKey;
-    try {
-      musicalKey = MusicalKey.parse(rawKeyStr);
-    } catch {
-      musicalKey = MusicalKey.C_MAJOR;
+    // Tonalidad: No asumir C si no se especifica
+    let defaultKey: string | null = null;
+    let defaultKeyRef: KeySignatureReference;
+
+    if (payload.keySignature) {
+      try {
+        const parsedKey = MusicalKey.parse(payload.keySignature);
+        defaultKeyRef = KeySignatureReference.fromMusicalKey(parsedKey);
+        defaultKey = parsedKey.toString();
+      } catch {
+        throw new ValidationError(
+          `Tonalidad inválida en notas escritas: '${payload.keySignature}'. Use un formato válido (ej. 'C', 'G', 'F#', 'Eb', 'Am').`
+        );
+      }
+    } else {
+      defaultKeyRef = KeySignatureReference.fromMusicalKey(MusicalKey.C_MAJOR);
+      defaultKey = null;
+      diagnostics.push({
+        code: 'MISSING_KEY_SIGNATURE',
+        severity: 'INFO',
+        message: 'No se declaró tonalidad en las notas escritas; el campo permanece no resuelto (null).',
+      });
     }
-    const defaultKeyRef = KeySignatureReference.fromMusicalKey(musicalKey);
 
-    const timeSigData = payload.timeSignature || { numerator: 4, denominator: 4 };
-    const defaultTimeSig = new TimeSignature(timeSigData.numerator, timeSigData.denominator);
+    // Métrica: No asumir 4/4 si no se especifica
+    let defaultTimeSignatureStr: string | null = null;
+    let defaultTimeSig: TimeSignature;
+
+    if (payload.timeSignature) {
+      defaultTimeSig = new TimeSignature(payload.timeSignature.numerator, payload.timeSignature.denominator);
+      defaultTimeSignatureStr = `${payload.timeSignature.numerator}/${payload.timeSignature.denominator}`;
+    } else {
+      defaultTimeSig = new TimeSignature(4, 4);
+      defaultTimeSignatureStr = null;
+      diagnostics.push({
+        code: 'MISSING_TIME_SIGNATURE',
+        severity: 'INFO',
+        message: 'No se declaró métrica en las notas escritas; el campo permanece no resuelto (null).',
+      });
+    }
+
     const measureDurationTicks = defaultTimeSig.calculateMeasureDurationTicks();
 
-    const diagnostics: IngestionDiagnostic[] = [];
+    // Tempo BPM: No asumir 120 si no se especifica
+    const defaultBpm: number | null = payload.tempoBpm ?? null;
+    if (defaultBpm === null) {
+      diagnostics.push({
+        code: 'MISSING_TEMPO',
+        severity: 'INFO',
+        message: 'No se declaró tempo BPM en las notas escritas; el campo permanece no resuelto (null).',
+      });
+    }
+
     const rawHashInput = JSON.stringify(payload);
     const sourceHash = crypto.createHash('sha256').update(rawHashInput).digest('hex');
 
@@ -103,7 +152,7 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
 
     for (let i = 0; i < payload.measures.length; i++) {
       const mInput = payload.measures[i];
-      const mNum = i + 1; // Correlativo estricto 1, 2, ...
+      const mNum = i + 1;
       const mStartTick = currentTick;
       const mEndTick = mStartTick + measureDurationTicks;
 
@@ -113,7 +162,6 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
       for (let noteIdx = 0; noteIdx < (mInput.notes || []).length; noteIdx++) {
         const n = mInput.notes[noteIdx];
 
-        // Validación estricta del nombre de nota ^[A-G]$
         if (!/^[A-G]$/i.test(n.step)) {
           throw new ValidationError(
             `Nota inválida en compás ${mNum}: el paso tonal '${n.step}' no es válido (debe ser una letra de A a G).`
@@ -126,14 +174,20 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
           );
         }
 
-        const durationTicks = DURATION_TICKS_MAP[n.duration] ?? 480;
+        const durationTicks = DURATION_TICKS_MAP[n.duration];
+        if (!durationTicks) {
+          throw new ValidationError(
+            `Duración de nota inválida en compás ${mNum}: '${n.duration}'. Opciones válidas: whole, half, quarter, eighth, 16th, 32nd.`
+          );
+        }
+
         const noteStartTick = nextVoiceTick;
 
         if (noteStartTick >= mEndTick) {
           diagnostics.push({
             code: 'NOTE_TRUNCATED_MEASURE_OVERFLOW',
             severity: 'WARNING',
-            message: `La nota ${n.step}${n.octave} excede los ticks del compás ${mNum} y fue recortada.`,
+            message: `La nota ${n.step}${n.octave} excede los ticks del compás ${mNum} y fue omitida.`,
             location: { measureNumber: mNum },
           });
           break;
@@ -152,7 +206,6 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
             })
           );
         } else {
-          // Construir Pitch con alteración si existe
           const baseStep = n.step.toUpperCase();
           const alterStr = n.alter === 1 ? '#' : n.alter === -1 ? 'b' : '';
           const noteName = NoteName.parse(`${baseStep}${alterStr}`);
@@ -174,7 +227,7 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
         nextVoiceTick += effectiveDuration;
       }
 
-      // Si la voz no llenó el compás o no tenía notas, rellenar con silencio hasta el final del compás
+      // Si la voz no llenó el compás, rellenar con silencio hasta el final del compás
       if (nextVoiceTick < mEndTick) {
         voiceEvents.push(
           new Rest({
@@ -252,7 +305,7 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
     }
 
     // 3. Crear Timeline
-    const tempoMap = new TempoMap([new TempoEvent(0, defaultBpm)]);
+    const tempoMap = new TempoMap([new TempoEvent(0, defaultBpm ?? 120)]);
     const timeline = new Timeline({
       tpqn: CANONICAL_TPQN,
       tempoMap,
@@ -267,27 +320,27 @@ export class WrittenNotesIngestionAdapter implements IIngestionAdapter {
       sections: [],
       instrumentTracks,
       metadata: {
-        sourceFormat: 'INTERNAL',
+        sourceFormat: 'WRITTEN_NOTES',
         importer: this.name,
         sourceHash,
+        hasUnresolvedKey: defaultKey === null,
+        hasUnresolvedMeter: defaultTimeSignatureStr === null,
+        hasUnresolvedTempo: defaultBpm === null,
       },
     });
 
-    diagnostics.push({
-      code: 'WRITTEN_NOTES_SUCCESS',
-      severity: 'INFO',
-      message: `Notas escritas procesadas exitosamente: ${measures.length} compases, ${defaultBpm} BPM, tonalidad ${rawKeyStr}.`,
-    });
+    const isFullyResolved = defaultKey !== null && defaultTimeSignatureStr !== null && defaultBpm !== null;
+    const status = isFullyResolved ? 'CONVERTED' : 'PARTIALLY_CONVERTED';
 
     return {
-      status: 'PARSED',
+      status,
       sourceType: 'WRITTEN_NOTES',
       sourceHash,
       title,
       artist,
-      defaultKey: rawKeyStr,
+      defaultKey,
       defaultBpm,
-      timeSignature: `${defaultTimeSig.numerator}/${defaultTimeSig.denominator}`,
+      timeSignature: defaultTimeSignatureStr,
       canonicalPayload: canonicalPayload.toJSON(),
       diagnostics,
     };

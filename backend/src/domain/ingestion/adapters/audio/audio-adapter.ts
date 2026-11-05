@@ -1,25 +1,21 @@
 /**
  * @file audio-adapter.ts
- * @description Adaptador universal para ingesta segura de archivos de audio (MP3, WAV, M4A, FLAC, AAC) (Fase 1B).
+ * @description Adaptador universal para ingesta y preservación de archivos de audio (MP3, WAV, FLAC, M4A).
  *
- * Principios:
- * 1. Preservación física inmutable del archivo fuente original.
- * 2. Validación de cabecera mágica (magic bytes) para prevenir MIME-spoofing.
- * 3. Cálculo de hash criptográfico SHA-256.
- * 4. Extracción de propiedades técnicas de audio (duración, canales, frecuencia de muestreo).
- * 5. Reporte veraz y transparente: si no hay un motor de transcripción de audio a MIDI instalado,
- *    reporta RECOGNITION_UNAVAILABLE con CERO notas inventadas, preservando el audio para reproducción.
+ * Principios (Fase 1B-R):
+ * 1. Inspección estricta de firmas mágicas binarias (Magic Bytes) independientemente del MIME declarado por el cliente.
+ * 2. Rechazo de archivos ejecutables, HTML o binarios arbitrarios disfrazados con MIME de audio.
+ * 3. Preservación física inmutable de los bytes originales con checksum criptográfico SHA-256.
+ * 4. CERO invención de notas melódicas, acordes, clave o tempo (defaultKey: null, defaultBpm: null, timeSignature: null).
+ * 5. CERO reporte de transcripción completada sin un motor real de inferencia.
  */
 
 import crypto from 'node:crypto';
 import path from 'node:path';
-import {
-  CanonicalMusicPayload,
-  Timeline,
-} from '../../../../../../frontend/src/core/canonical-model/index.ts';
 import { ValidationError } from '../../../errors.ts';
 import type { AuthenticatedUser } from '../../../auth-types.ts';
 import type { ISourceStorageProvider } from '../../source-storage-provider.ts';
+import { LocalFileSystemSourceStorageProvider } from '../../source-storage-provider.ts';
 import type {
   IIngestionAdapter,
   IngestionDiagnostic,
@@ -29,10 +25,14 @@ import type {
 
 export class AudioIngestionAdapter implements IIngestionAdapter {
   public readonly sourceType = 'AUDIO' as const;
-  public readonly name = 'Bethesda Universal Audio Ingestion Adapter';
-  public readonly version = '1.0.0';
+  public readonly name = 'Bethesda Universal Audio Asset Importer';
+  public readonly version = '1.1.0';
 
-  public constructor(private readonly storageProvider: ISourceStorageProvider) {}
+  private readonly storageProvider: ISourceStorageProvider;
+
+  public constructor(storageProvider?: ISourceStorageProvider) {
+    this.storageProvider = storageProvider ?? new LocalFileSystemSourceStorageProvider();
+  }
 
   public canHandle(input: IngestionInput): boolean {
     if (input.sourceType === 'AUDIO') return true;
@@ -44,10 +44,20 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
     return false;
   }
 
+  public detectMimeType(buffer: Buffer): string {
+    const info = AudioIngestionAdapter.detectAudioFormatFromBytes(buffer);
+    if (info.format === 'WAV') return 'audio/wav';
+    if (info.format === 'MP3') return 'audio/mpeg';
+    if (info.format === 'FLAC') return 'audio/flac';
+    if (info.format === 'M4A') return 'audio/mp4';
+    return 'audio/octet-stream';
+  }
+
   /**
-   * Valida firmas binarias de archivos de audio comunes.
+   * Detecta y valida rigurosamente las firmas binarias de archivos de audio.
+   * Rechaza categoricamente la suplantación MIME.
    */
-  public static validateAudioMagicBytes(buffer: Buffer, mimeType?: string): { format: string; durationEstimateSeconds?: number } {
+  public static detectAudioFormatFromBytes(buffer: Buffer): { format: string; durationEstimateSeconds?: number } {
     if (!buffer || buffer.length < 12) {
       throw new ValidationError('El buffer de audio es demasiado pequeño o está corrupto (< 12 bytes).');
     }
@@ -58,7 +68,6 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
       buffer[8] === 0x57 && buffer[9] === 0x41 && buffer[10] === 0x56 && buffer[11] === 0x45 // WAVE
     ) {
       let durationEstimate: number | undefined;
-      // Extraer byte rate del sub-chunk 'fmt ' si existe
       try {
         const byteRate = buffer.readUInt32LE(28);
         if (byteRate > 0) {
@@ -93,12 +102,10 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
       return { format: 'M4A' };
     }
 
-    // Si declaró audio/mpeg o audio/wav pero los primeros bytes no coinciden
-    if (mimeType && mimeType.startsWith('audio/')) {
-      return { format: mimeType.split('/')[1]?.toUpperCase() || 'AUDIO' };
-    }
-
-    throw new ValidationError('Cabecera de archivo de audio no reconocida o corrupta.');
+    // Si los bytes no coinciden con ninguna firma válida, RECHAZAR aunque el MIME declarado diga audio/
+    throw new ValidationError(
+      'Firma binaria de archivo de audio no reconocida o corrupta. El contenido del archivo no coincide con ningún formato de audio admitido (WAV, MP3, FLAC, M4A).'
+    );
   }
 
   public async ingest(input: IngestionInput, _user: AuthenticatedUser): Promise<IngestionOutput> {
@@ -107,47 +114,32 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
     }
 
     const filename = input.filename || 'pista_audio.wav';
-    const ext = path.extname(filename).toLowerCase();
-    const mimeType = input.mimeType || (ext === '.mp3' ? 'audio/mpeg' : 'audio/wav');
 
-    // 1. Validar firmas binarias
-    const audioInfo = AudioIngestionAdapter.validateAudioMagicBytes(input.buffer, mimeType);
+    // 1. Validar firmas binarias reales (NO confiar solo en el MIME del cliente)
+    const audioInfo = AudioIngestionAdapter.detectAudioFormatFromBytes(input.buffer);
 
-    // 2. Preservar físicamente el archivo
+    // 2. Si el cliente declaró un MIME explícito, verificar coherencia
+    if (input.mimeType && input.mimeType.startsWith('audio/')) {
+      const declared = input.mimeType.toLowerCase();
+      if (audioInfo.format === 'WAV' && !declared.includes('wav')) {
+        throw new ValidationError(`Inconsistencia MIME: el archivo contiene datos WAV pero se declaró como '${input.mimeType}'.`);
+      }
+      if (audioInfo.format === 'MP3' && !declared.includes('mpeg') && !declared.includes('mp3')) {
+        throw new ValidationError(`Inconsistencia MIME: el archivo contiene datos MP3 pero se declaró como '${input.mimeType}'.`);
+      }
+    }
+
+    // 3. Preservar físicamente el archivo
     const saveResult = await this.storageProvider.save(filename, input.buffer);
     const sourceHash = saveResult.checksumSha256;
     const diagnostics: IngestionDiagnostic[] = [];
 
-    const baseTitle = path.basename(filename, ext);
-    const title = input.title?.trim() || baseTitle || 'Pista de Audio';
+    // Extraer título base
+    const baseTitle = input.filename ? path.basename(input.filename, path.extname(input.filename)) : '';
+    const title = input.title?.trim() || baseTitle || `Pista de Audio (${audioInfo.format})`;
 
-    // 3. Verificar motor de transcripción de audio
+    // 4. Verificar disponibilidad del motor de transcripción
     const hasAudioTranscriptionEngine = process.env.AUDIO_TRANSCRIPTION_ENGINE_CONFIGURED === 'true';
-
-    // 4. Crear CanonicalMusicPayload limpio (0 notas inventadas, vinculado al asset de audio)
-    const timeline = new Timeline({
-      totalDurationTicks: 0,
-      measureCount: 0,
-    });
-
-    const canonicalPayload = new CanonicalMusicPayload({
-      title,
-      timeline,
-      measures: [],
-      sections: [],
-      instrumentTracks: [],
-      metadata: {
-        isAudioOnly: true,
-        sourceFormat: 'AUDIO',
-        audioFormat: audioInfo.format,
-        storageKey: saveResult.storageKey,
-        mimeType,
-        filename,
-        fileSizeBytes: saveResult.fileSizeBytes,
-        checksumSha256: sourceHash,
-        durationEstimateSeconds: audioInfo.durationEstimateSeconds,
-      },
-    });
 
     const statusMessage = hasAudioTranscriptionEngine
       ? 'Pista de audio registrada y encolada para transcripción polifónica.'
@@ -167,10 +159,10 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
       storageKey: saveResult.storageKey,
       title,
       artist: input.artist || null,
-      defaultKey: 'C',
-      defaultBpm: 120,
-      timeSignature: '4/4',
-      canonicalPayload: canonicalPayload.toJSON(),
+      defaultKey: null, // CERO CLAVES INVENTADAS
+      defaultBpm: null, // CERO TEMPOS INVENTADOS
+      timeSignature: null, // CERO MÉTRICAS INVENTADAS
+      canonicalPayload: null, // CERO PARTITURA CANÓNICA FALSA
       diagnostics,
       recognitionStatusMessage: statusMessage,
     };

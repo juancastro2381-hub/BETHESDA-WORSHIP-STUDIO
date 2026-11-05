@@ -1,6 +1,6 @@
 /**
  * @file video-url-adapter.ts
- * @description Adaptador universal para ingesta segura de URLs de video autorizadas con prevención estricta de SSRF (Fase 1B).
+ * @description Adaptador universal para ingesta segura de URLs de video autorizadas con prevención estricta de SSRF (Fase 1B-R).
  *
  * Principios:
  * 1. Validación de esquemas permitidos (únicamente https: y http: en dominios autorizados).
@@ -8,16 +8,13 @@
  *    - Bloqueo de localhost, 127.0.0.1, 0.0.0.0, [::1].
  *    - Bloqueo de rangos CIDR privados (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16).
  *    - Bloqueo de dominios de metadatos cloud (169.254.169.254).
- * 3. Whitelist de plataformas autorizadas (YouTube, Vimeo).
- * 4. Respeto estricto a términos de servicio, DRM y protecciones de plataforma (CERO scraping ilícito).
- * 5. Reporte transparente: registra la referencia del video y reporta RECOGNITION_UNAVAILABLE para transcripción.
+ * 3. Whitelist estricta de plataformas autorizadas (YouTube, Vimeo).
+ * 4. Respeto absoluto a términos de servicio y DRM: CERO scraping ilícito.
+ * 5. CERO invención musical: no se genera una partitura canónica ficticia ni se asumen tonos o métricas por defecto.
+ * 6. Reporte transparente: registra la referencia del video y reporta VIDEO_URL_REGISTERED.
  */
 
 import crypto from 'node:crypto';
-import {
-  CanonicalMusicPayload,
-  Timeline,
-} from '../../../../../../frontend/src/core/canonical-model/index.ts';
 import { ValidationError } from '../../../errors.ts';
 import type { AuthenticatedUser } from '../../../auth-types.ts';
 import type {
@@ -40,7 +37,7 @@ const ALLOWED_VIDEO_HOSTS = new Set([
 export class VideoUrlIngestionAdapter implements IIngestionAdapter {
   public readonly sourceType = 'VIDEO_URL' as const;
   public readonly name = 'Bethesda Authorized Video URL Adapter';
-  public readonly version = '1.0.0';
+  public readonly version = '1.1.0';
 
   public canHandle(input: IngestionInput): boolean {
     if (input.sourceType === 'VIDEO_URL') return true;
@@ -140,30 +137,8 @@ export class VideoUrlIngestionAdapter implements IIngestionAdapter {
 
     const title = input.title?.trim() || `Referencia de Video (${validated.platform})`;
 
-    // 2. CanonicalMusicPayload en modo multimedia / enlace externo
-    const timeline = new Timeline({
-      totalDurationTicks: 0,
-      measureCount: 0,
-    });
-
-    const canonicalPayload = new CanonicalMusicPayload({
-      title,
-      timeline,
-      measures: [],
-      sections: [],
-      instrumentTracks: [],
-      metadata: {
-        isVideoReference: true,
-        sourceFormat: 'VIDEO_URL',
-        videoUrl: validated.url.toString(),
-        platform: validated.platform,
-        videoId: validated.videoId,
-        sourceHash,
-      },
-    });
-
     const statusMessage =
-      'Referencia de video autorizada y registrada. La extracción de audio y transcripción automática requieren el archivo fuente directo para respetar los términos de servicio de la plataforma.';
+      'Referencia de video autorizada y registrada. No se genera partitura canónica ficticia; la transcripción musical requerirá carga directa del archivo de audio/video o anotación manual.';
 
     diagnostics.push({
       code: 'VIDEO_URL_REGISTERED',
@@ -171,16 +146,17 @@ export class VideoUrlIngestionAdapter implements IIngestionAdapter {
       message: statusMessage,
     });
 
+    // En Fase 1B-R: CERO invención musical. No se crea una partitura vacía con C, 120, 4/4.
     return {
-      status: 'CONVERTED',
+      status: 'REGISTERED',
       sourceType: 'VIDEO_URL',
       sourceHash,
       title,
       artist: input.artist || null,
-      defaultKey: 'C',
-      defaultBpm: 120,
-      timeSignature: '4/4',
-      canonicalPayload: canonicalPayload.toJSON(),
+      defaultKey: null,
+      defaultBpm: null,
+      timeSignature: null,
+      canonicalPayload: null,
       diagnostics,
       recognitionStatusMessage: statusMessage,
     };

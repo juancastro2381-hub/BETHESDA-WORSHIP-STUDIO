@@ -1,18 +1,21 @@
 /**
  * @file midi-parser.ts
- * @description Parser determinista y seguro de Standard MIDI Files (SMF Formatos 0 y 1) en TypeScript puro (Fase 1B).
+ * @description Parser determinista y seguro de Standard MIDI Files (SMF Formatos 0 y 1) en TypeScript puro.
  *
- * Características:
- * 1. Validación de cabecera mágica 'MThd' y chunks de pista 'MTrk'.
- * 2. Decodificación de tiempos delta en cantidad de longitud variable (VLQ) protegida contra overflow.
- * 3. Soporte de Running Status estándar MIDI.
- * 4. Extracción de eventos de canal: Note-On, Note-Off, Program Change, Control Change, Pitch Bend.
- * 5. Extracción de meta-eventos: Set Tempo (0x51), Time Signature (0x58), Key Signature (0x59), Track Name (0x03).
- * 6. Normalización temporal exacta a 480 TPQN (CANONICAL_TPQN).
- * 7. CERO dependencias externas ni librerías nativas propensas a vulnerabilidades.
+ * Características (Fase 1B-R):
+ * 1. Validación estricta de cabecera 'MThd' y chunks de pista 'MTrk'.
+ * 2. Decodificación segura de tiempos delta y longitudes VLQ (máximo 4 bytes / 28 bits) con protección contra overflow.
+ * 3. Soporte estricto de Running Status: solo mensajes de canal voz (0x80..0xEF) actualizan el status; meta-eventos y SysEx lo resetean.
+ * 4. Extracción de eventos de canal: Note-On, Note-Off, Note-On vel=0 como Note-Off, Program Change.
+ * 5. CERO invención de duración de negra para notas sin Note-Off (se extienden al final de la pista y se registran como UNMATCHED_NOTE_ON).
+ * 6. CERO umbral arbitrario de 15 ticks (se preserva la duración exacta >= 1 tick).
+ * 7. Normalización matemática exacta a 480 TPQN (CANONICAL_TPQN) sin inversión de orden ni duraciones cero.
+ * 8. Extracción completa de meta-eventos de tempo (0x51), métrica (0x58), armadura (0x59) y nombre de pista (0x03).
+ * 9. Metadatos desconocidos se reportan estrictamente como null (sin falsos C, 4/4 o 120 BPM).
  */
 
 import { ValidationError } from '../../../errors.ts';
+import type { IngestionDiagnostic } from '../../types.ts';
 
 export interface MidiParsedNote {
   pitch: number; // 0..127
@@ -22,6 +25,7 @@ export interface MidiParsedNote {
   durationTicksMidi: number;
   startTickCanonical: number;
   durationTicksCanonical: number;
+  unmatchedNoteOn?: boolean;
 }
 
 export interface MidiTempoEvent {
@@ -64,10 +68,11 @@ export interface MidiParsedData {
   tempoEvents: MidiTempoEvent[];
   timeSignatures: MidiTimeSignatureEvent[];
   keySignatures: MidiKeySignatureEvent[];
-  defaultBpm: number;
-  defaultTimeSignature: { numerator: number; denominator: number };
-  defaultKey: string;
+  defaultBpm: number | null;
+  defaultTimeSignature: { numerator: number; denominator: number } | null;
+  defaultKey: string | null;
   totalDurationTicksCanonical: number;
+  diagnostics: IngestionDiagnostic[];
 }
 
 const CANONICAL_TPQN = 480;
@@ -87,6 +92,39 @@ export class MidiParser {
   }
 
   /**
+   * Lee un valor de cantidad de longitud variable (VLQ) con protección estricta contra overflow.
+   */
+  private static readVlq(
+    buffer: Buffer,
+    startOffset: number,
+    maxOffset: number
+  ): { value: number; nextOffset: number } {
+    let value = 0;
+    let bytesRead = 0;
+    let offset = startOffset;
+
+    while (offset < maxOffset) {
+      const b = buffer[offset++];
+      bytesRead++;
+      value = (value << 7) | (b & 0x7f);
+
+      if (bytesRead > 4) {
+        throw new ValidationError(
+          `Secuencia VLQ MIDI malformada o inválida (excede el límite estándar de 4 bytes / 28 bits) en offset ${offset}.`
+        );
+      }
+
+      if ((b & 0x80) === 0) {
+        return { value, nextOffset: offset };
+      }
+    }
+
+    throw new ValidationError(
+      `Secuencia VLQ MIDI truncada antes de completarse en offset ${startOffset}.`
+    );
+  }
+
+  /**
    * Parsea un buffer SMF completo hacia una estructura de datos estructurada y validada.
    */
   public static parse(buffer: Buffer): MidiParsedData {
@@ -95,6 +133,7 @@ export class MidiParser {
     }
 
     let offset = 0;
+    const diagnostics: IngestionDiagnostic[] = [];
 
     // 1. Cabecera MThd
     const headerId = buffer.toString('ascii', offset, offset + 4);
@@ -103,7 +142,7 @@ export class MidiParser {
     offset += 4;
 
     if (headerId !== 'MThd' || headerLength < 6) {
-      throw new ValidationError(`Cabecera MIDI corrupta: longitud esperada >= 6, recibida ${headerLength}.`);
+      throw new ValidationError(`Cabecera MThd corrupta o longitud insuficiente (${headerLength} bytes).`);
     }
 
     const format = buffer.readUInt16BE(offset);
@@ -129,8 +168,9 @@ export class MidiParser {
     const timeSignatures: MidiTimeSignatureEvent[] = [];
     const keySignatures: MidiKeySignatureEvent[] = [];
 
-    // Función auxiliar para convertir ticks MIDI a ticks canónicos (480 TPQN)
+    // Conversión matemática exacta a 480 TPQN
     const toCanonicalTicks = (midiTicks: number): number => {
+      if (division === CANONICAL_TPQN) return midiTicks;
       return Math.round((midiTicks * CANONICAL_TPQN) / division);
     };
 
@@ -156,24 +196,16 @@ export class MidiParser {
       let detectedProgram: number | undefined;
       let detectedChannel: number | undefined;
 
-      // Estructura temporal para emparejar Note-On con Note-Off
-      // key: channel_pitch -> array de { startTick, velocity }
+      // Estructura para emparejar Note-On con Note-Off
+      // key: channel_pitch -> array FIFO de { startTick, velocity }
       const activeNotes = new Map<string, Array<{ startTick: number; velocity: number }>>();
       const completedNotes: MidiParsedNote[] = [];
 
       while (offset < trackEnd) {
-        // Leer delta-time VLQ
-        let deltaTime = 0;
-        let vlqBytes = 0;
-        while (offset < trackEnd) {
-          const b = buffer[offset++];
-          deltaTime = (deltaTime << 7) | (b & 0x7f);
-          vlqBytes++;
-          if (vlqBytes > 4) {
-            throw new ValidationError('Overflow en decodificación VLQ de delta-time MIDI (más de 4 bytes).');
-          }
-          if ((b & 0x80) === 0) break;
-        }
+        // Leer delta-time VLQ con control de límites
+        const deltaResult = this.readVlq(buffer, offset, trackEnd);
+        const deltaTime = deltaResult.value;
+        offset = deltaResult.nextOffset;
 
         trackCurrentTick += deltaTime;
 
@@ -182,9 +214,14 @@ export class MidiParser {
         let statusByte = buffer[offset];
 
         if (statusByte >= 0x80) {
-          // Nuevo status byte
           offset++;
-          lastStatusByte = statusByte;
+          // Solo mensajes de canal voz (0x80..0xEF) actualizan el running status
+          if (statusByte < 0xf0) {
+            lastStatusByte = statusByte;
+          } else {
+            // Meta-eventos (0xFF) y SysEx (0xF0, 0xF7) resetean running status
+            lastStatusByte = 0;
+          }
         } else {
           // Running status
           if (lastStatusByte === 0) {
@@ -193,18 +230,14 @@ export class MidiParser {
           statusByte = lastStatusByte;
         }
 
-        // Meta Event
+        // Meta Event (0xFF)
         if (statusByte === 0xff) {
           if (offset >= trackEnd) break;
           const metaType = buffer[offset++];
           
-          // Leer longitud del meta evento (VLQ)
-          let metaLength = 0;
-          while (offset < trackEnd) {
-            const b = buffer[offset++];
-            metaLength = (metaLength << 7) | (b & 0x7f);
-            if ((b & 0x80) === 0) break;
-          }
+          const lenResult = this.readVlq(buffer, offset, trackEnd);
+          let metaLength = lenResult.value;
+          offset = lenResult.nextOffset;
 
           if (offset + metaLength > trackEnd) {
             metaLength = trackEnd - offset;
@@ -215,10 +248,11 @@ export class MidiParser {
 
           // 0x03: Track Name
           if (metaType === 0x03) {
-            trackName = metaData.toString('utf8').trim() || trackName;
+            const rawName = metaData.toString('utf8').trim();
+            if (rawName) trackName = rawName;
           }
 
-          // 0x51: Set Tempo (3 bytes microseconds per quarter note)
+          // 0x51: Set Tempo (3 bytes: microsegundos por negra)
           if (metaType === 0x51 && metaLength >= 3) {
             const mpqn = (metaData[0] << 16) | (metaData[1] << 8) | metaData[2];
             if (mpqn > 0) {
@@ -246,7 +280,7 @@ export class MidiParser {
 
           // 0x59: Key Signature (sf: -7..7, mi: 0=major, 1=minor)
           if (metaType === 0x59 && metaLength >= 2) {
-            let sf = metaData.readInt8(0);
+            const sf = metaData.readInt8(0);
             const isMinor = metaData[1] === 1;
             const keyName = MidiParser.keySignatureToString(sf, isMinor);
             keySignatures.push({
@@ -267,13 +301,8 @@ export class MidiParser {
 
         // SysEx Events (0xF0 o 0xF7)
         if (statusByte === 0xf0 || statusByte === 0xf7) {
-          let sysexLen = 0;
-          while (offset < trackEnd) {
-            const b = buffer[offset++];
-            sysexLen = (sysexLen << 7) | (b & 0x7f);
-            if ((b & 0x80) === 0) break;
-          }
-          offset += sysexLen;
+          const sysexLenResult = this.readVlq(buffer, offset, trackEnd);
+          offset = sysexLenResult.nextOffset + sysexLenResult.value;
           continue;
         }
 
@@ -285,14 +314,16 @@ export class MidiParser {
         }
 
         // Note Off (0x80) o Note On con velocity 0 (0x90)
-        if (messageType === 0x80) {
+        if (messageType === 0x80 || (messageType === 0x90 && offset + 1 < trackEnd && buffer[offset + 1] === 0)) {
           const pitch = buffer[offset++];
-          const _vel = buffer[offset++];
+          const vel = buffer[offset++];
           const noteKey = `${channel}_${pitch}`;
           const queue = activeNotes.get(noteKey);
+
           if (queue && queue.length > 0) {
             const onEvent = queue.shift()!;
             const durationMidi = Math.max(1, trackCurrentTick - onEvent.startTick);
+            const durationCanonical = Math.max(1, toCanonicalTicks(durationMidi));
             completedNotes.push({
               pitch,
               velocity: onEvent.velocity,
@@ -300,40 +331,30 @@ export class MidiParser {
               startTickMidi: onEvent.startTick,
               durationTicksMidi: durationMidi,
               startTickCanonical: toCanonicalTicks(onEvent.startTick),
-              durationTicksCanonical: Math.max(15, toCanonicalTicks(durationMidi)),
+              durationTicksCanonical: durationCanonical,
+            });
+          } else {
+            // Note-Off sin Note-On previo
+            diagnostics.push({
+              code: 'UNMATCHED_NOTE_OFF',
+              severity: 'INFO',
+              message: `Evento Note-Off en tick ${trackCurrentTick} (canal ${channel}, pitch ${pitch}) no tiene un Note-On activo previo; ignorado de forma segura.`,
+              location: { trackIndex: trackIdx + 1 },
             });
           }
         } else if (messageType === 0x90) {
+          // Note On con vel > 0
           const pitch = buffer[offset++];
           const vel = buffer[offset++];
           const noteKey = `${channel}_${pitch}`;
 
-          if (vel === 0) {
-            // Note On con vel=0 equivale a Note Off
-            const queue = activeNotes.get(noteKey);
-            if (queue && queue.length > 0) {
-              const onEvent = queue.shift()!;
-              const durationMidi = Math.max(1, trackCurrentTick - onEvent.startTick);
-              completedNotes.push({
-                pitch,
-                velocity: onEvent.velocity,
-                channel,
-                startTickMidi: onEvent.startTick,
-                durationTicksMidi: durationMidi,
-                startTickCanonical: toCanonicalTicks(onEvent.startTick),
-                durationTicksCanonical: Math.max(15, toCanonicalTicks(durationMidi)),
-              });
-            }
-          } else {
-            // Note On real
-            if (!activeNotes.has(noteKey)) {
-              activeNotes.set(noteKey, []);
-            }
-            activeNotes.get(noteKey)!.push({
-              startTick: trackCurrentTick,
-              velocity: vel,
-            });
+          if (!activeNotes.has(noteKey)) {
+            activeNotes.set(noteKey, []);
           }
+          activeNotes.get(noteKey)!.push({
+            startTick: trackCurrentTick,
+            velocity: vel,
+          });
         } else if (messageType === 0xc0) {
           // Program Change (1 data byte)
           detectedProgram = buffer[offset++];
@@ -350,19 +371,32 @@ export class MidiParser {
         }
       }
 
-      // Si quedaron notas sin Note-Off al final del track, cerrarlas con duración de 1 negra
+      // Si quedaron notas sin Note-Off al final del track:
+      // PRESERVAR su duración real hasta el final del track (NO inventar 1 negra)
       for (const [noteKey, queue] of activeNotes.entries()) {
-        const pitch = parseInt(noteKey.split('_')[1], 10);
+        const parts = noteKey.split('_');
+        const channel = parseInt(parts[0], 10);
+        const pitch = parseInt(parts[1], 10);
+
         for (const onEvent of queue) {
-          const defaultDurationMidi = division; // 1 negra
+          const durationMidi = Math.max(1, trackCurrentTick - onEvent.startTick);
+          const durationCanonical = Math.max(1, toCanonicalTicks(durationMidi));
           completedNotes.push({
             pitch,
             velocity: onEvent.velocity,
-            channel: detectedChannel ?? 0,
+            channel: channel ?? detectedChannel ?? 0,
             startTickMidi: onEvent.startTick,
-            durationTicksMidi: defaultDurationMidi,
+            durationTicksMidi: durationMidi,
             startTickCanonical: toCanonicalTicks(onEvent.startTick),
-            durationTicksCanonical: toCanonicalTicks(defaultDurationMidi),
+            durationTicksCanonical: durationCanonical,
+            unmatchedNoteOn: true,
+          });
+
+          diagnostics.push({
+            code: 'UNMATCHED_NOTE_ON',
+            severity: 'WARNING',
+            message: `Nota sin Note-Off al final de la pista: pitch ${pitch} en tick ${onEvent.startTick}. Se preservó su duración hasta el fin del track (${durationMidi} ticks MIDI) sin inventar duración por defecto.`,
+            location: { trackIndex: trackIdx + 1 },
           });
         }
       }
@@ -383,12 +417,17 @@ export class MidiParser {
       offset = trackEnd;
     }
 
-    // Calcular valores por defecto
-    const defaultBpm = tempoEvents[0]?.bpm ?? 120;
-    const defaultTimeSignature = timeSignatures[0]
+    // Ordenar eventos de tempo y armadura temporalmente
+    tempoEvents.sort((a, b) => a.tickCanonical - b.tickCanonical);
+    timeSignatures.sort((a, b) => a.tickCanonical - b.tickCanonical);
+    keySignatures.sort((a, b) => a.tickCanonical - b.tickCanonical);
+
+    // CERO VALORES INVENTADOS: Si no existen eventos explícitos, reportar null
+    const defaultBpm = tempoEvents.length > 0 ? tempoEvents[0].bpm : null;
+    const defaultTimeSignature = timeSignatures.length > 0
       ? { numerator: timeSignatures[0].numerator, denominator: timeSignatures[0].denominator }
-      : { numerator: 4, denominator: 4 };
-    const defaultKey = keySignatures[0]?.keyName ?? 'C';
+      : null;
+    const defaultKey = keySignatures.length > 0 ? keySignatures[0].keyName : null;
 
     const maxTrackTicks = tracks.reduce((max, t) => Math.max(max, t.totalTicksCanonical), 0);
 
@@ -404,11 +443,12 @@ export class MidiParser {
       defaultTimeSignature,
       defaultKey,
       totalDurationTicksCanonical: maxTrackTicks,
+      diagnostics,
     };
   }
 
   /**
-   * Mapea un conteo de sostenidos/bemoles (-7 a 7) y modo a una tonalidad musical legible.
+   * Convierte un valor de armadura MIDI (sf y mi) a una cadena de clave tonal formal.
    */
   public static keySignatureToString(sharpsFlats: number, isMinor: boolean): string {
     const majorKeys: Record<number, string> = {
@@ -485,4 +525,3 @@ export class MidiParser {
     };
   }
 }
-

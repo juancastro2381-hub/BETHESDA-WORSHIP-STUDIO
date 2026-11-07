@@ -44,6 +44,7 @@ import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
 import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 import { VisualDocumentStand } from './VisualDocumentStand.tsx';
+import { ConversionCenterWorkspace } from '../conversion/ConversionCenterWorkspace.tsx';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -61,6 +62,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const [showUploader, setShowUploader] = useState<boolean>(false);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [showSetlistsModal, setShowSetlistsModal] = useState<boolean>(false);
+  const [showConversionCenter, setShowConversionCenter] = useState<boolean>(false);
 
   // Hook del Espacio de Trabajo Musical (Fase 1G)
   const {
@@ -396,6 +398,21 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
 
         <button
           type="button"
+          className={`btn-toggle-conversion-center ${showConversionCenter ? 'active' : ''}`}
+          onClick={() => {
+            setShowConversionCenter((prev) => !prev);
+            setShowUploader(false);
+            setShowDbModal(false);
+            setShowSetlistsModal(false);
+          }}
+          id="btn-toggle-conversion-center"
+          aria-expanded={showConversionCenter}
+        >
+          {showConversionCenter ? '✕ Volver al Atril' : '🔄 Centro de Conversión'}
+        </button>
+
+        <button
+          type="button"
           className={`btn-toggle-uploader ${showUploader ? 'active' : ''}`}
           onClick={() => {
             setShowUploader((prev) => !prev);
@@ -456,8 +473,17 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         />
       )}
 
-      {/* 3. Discriminación Litúrgica: SONG vs SERVICE_MOMENT */}
-      {setlistExecution.loadedSetlist &&
+      {/* 3. Discriminación de Vista: Centro de Conversión vs Momento Litúrgico vs Partitura */}
+      {showConversionCenter ? (
+        <ConversionCenterWorkspace
+          onClose={() => setShowConversionCenter(false)}
+          onOpenInMusicStand={(payload, meta) => {
+            importSong(payload, { format: 'CHORD_PRO', sourceName: meta?.title });
+            setShowConversionCenter(false);
+          }}
+          apiClient={client}
+        />
+      ) : setlistExecution.loadedSetlist &&
       setlistExecution.isServiceMoment &&
       setlistExecution.currentItem?.itemType === 'SERVICE_MOMENT' &&
       !setlistExecution.isOffSetlistSongActive ? (

@@ -83,11 +83,13 @@ export const jobTypeEnum = pgEnum('job_type', [
   'IMPORT_COMMIT',
   'AUDIO_TRANSCRIPTION',
   'STEM_SEPARATION',
+  'CONVERSION',
 ]);
 
 export const jobStatusEnum = pgEnum('job_status', [
   'PENDING',
   'PROCESSING',
+  'REVIEW_REQUIRED',
   'COMPLETED',
   'FAILED',
   'CANCELLED',

@@ -29,6 +29,7 @@ import { CanonicalModelValidator } from '../../canonical-model/validator.ts';
 import { CANONICAL_TPQN } from '../../canonical-model/types.ts';
 import { Chord } from '../../music-theory/chord.ts';
 import { Pitch } from '../../music-theory/pitch.ts';
+import { NoteName } from '../../music-theory/note-name.ts';
 import { LeadSheetDomAdapter } from '../../rendering/adapters/leadsheet-dom-adapter.ts';
 import { ProjectionService } from '../../projection/projection-service.ts';
 import { InstrumentRegistry } from '../../projection/instrument-profile.ts';
@@ -713,7 +714,7 @@ describe('Phase 1B-R3.2 — Workstream C: Canonical Model & Rendering Integrity'
     const projection = ProjectionService.project(ingestion.payload, vocal, pref);
     const view = projection.view!;
     const renderer = new LeadSheetDomAdapter();
-    const renderResult = renderer.render(view, { width: 800, height: 600 });
+    const renderResult = renderer.render(view);
 
     assert.strictEqual(renderResult.success, true);
     assert.ok(renderResult.data);
@@ -800,7 +801,7 @@ describe('Phase 1B-R3.2 — Workstream C: Canonical Model & Rendering Integrity'
     const projection = ProjectionService.project(ingestion.payload, vocal, pref);
     const view = projection.view!;
     const renderer = new LeadSheetDomAdapter();
-    const result = renderer.render(view, { width: 800, height: 600 });
+    const result = renderer.render(view);
 
     assert.ok(result.data);
     const m1 = result.data.sections[0]!.measures[0]!;
@@ -834,7 +835,7 @@ describe('Phase 1B-R3.2 — Workstream D: MIDI Ingestion Regression', () => {
             new Voice(1, [
               new Note({
                 id: 'n1',
-                pitch: new Pitch('C', 4),
+                pitch: new Pitch(NoteName.C, 4),
                 startTick: 0,
                 durationTicks: 480,
                 voice: 1,
@@ -933,7 +934,7 @@ describe('Phase 1B-R3.2 — Workstream D: MIDI Ingestion Regression', () => {
             new Voice(1, [
               new Note({
                 id: 'n-v1',
-                pitch: new Pitch('C', 5),
+                pitch: new Pitch(NoteName.C, 5),
                 startTick: 0,
                 durationTicks: 960,
                 voice: 1,
@@ -947,7 +948,7 @@ describe('Phase 1B-R3.2 — Workstream D: MIDI Ingestion Regression', () => {
             new Voice(2, [
               new Note({
                 id: 'n-v2',
-                pitch: new Pitch('C', 2),
+                pitch: new Pitch(NoteName.C, 2),
                 startTick: 0,
                 durationTicks: 1920,
                 voice: 2,

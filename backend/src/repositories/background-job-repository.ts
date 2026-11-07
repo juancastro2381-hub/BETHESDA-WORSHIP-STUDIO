@@ -14,10 +14,11 @@ import {
 export interface IBackgroundJobRepository {
   createJob(data: NewBackgroundJobRow): Promise<BackgroundJobRow>;
   findJobById(id: string): Promise<BackgroundJobRow | null>;
+  findJobsByUserId(userId: string, limit?: number): Promise<BackgroundJobRow[]>;
   updateJobProgress(
     id: string,
     progress: number,
-    status?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+    status?: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   ): Promise<void>;
   completeJob(id: string, outputRef?: string): Promise<void>;
   failJob(id: string, errorCode: string, details?: any): Promise<void>;
@@ -44,10 +45,19 @@ export class DrizzleBackgroundJobRepository implements IBackgroundJobRepository 
     return found ?? null;
   }
 
+  public async findJobsByUserId(userId: string, limit: number = 50): Promise<BackgroundJobRow[]> {
+    return await this.db
+      .select()
+      .from(backgroundJobs)
+      .where(eq(backgroundJobs.userId, userId))
+      .orderBy(desc(backgroundJobs.createdAt))
+      .limit(Math.min(100, Math.max(1, limit)));
+  }
+
   public async updateJobProgress(
     id: string,
     progress: number,
-    status?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+    status?: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   ): Promise<void> {
     const updates: Partial<NewBackgroundJobRow> = {
       progress: Math.min(100, Math.max(0, progress)),

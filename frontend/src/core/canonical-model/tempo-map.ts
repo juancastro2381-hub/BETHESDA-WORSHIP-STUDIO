@@ -13,6 +13,7 @@ export interface TempoEventJSON {
 
 export interface TempoMapJSON {
   events: TempoEventJSON[];
+  isUnresolved?: boolean;
 }
 
 export class TempoEvent {
@@ -45,20 +46,23 @@ export class TempoEvent {
 
 export class TempoMap {
   public readonly events: readonly TempoEvent[];
+  public readonly isUnresolved: boolean;
 
-  public constructor(events: TempoEvent[]) {
+  public constructor(events?: TempoEvent[]) {
     if (!events || events.length === 0) {
-      // Default: 120 BPM en tick 0
-      this.events = Object.freeze([new TempoEvent(0, 120)]);
+      // CERO FABRICACIÓN: Un mapa sin eventos permanece explícitamente no resuelto (sin fabricar 120 BPM)
+      this.events = Object.freeze([]);
+      this.isUnresolved = true;
       return;
     }
 
+    this.isUnresolved = false;
     // Clonar y ordenar estrictamente por tick ascendente
     const sorted = [...events].sort((a, b) => a.tick - b.tick);
 
-    // Asegurar que exista un evento en tick 0
-    if (sorted[0]?.tick !== 0) {
-      sorted.unshift(new TempoEvent(0, sorted[0]?.bpm ?? 120));
+    // Asegurar que exista un evento en tick 0 si hay eventos declarados
+    if (sorted[0] && sorted[0].tick !== 0) {
+      sorted.unshift(new TempoEvent(0, sorted[0].bpm));
     }
 
     // Validar duplicados en el mismo tick
@@ -81,14 +85,26 @@ export class TempoMap {
   }
 
   /**
-   * Obtiene el tempo en BPM activo en un tick determinado.
+   * Crea un mapa de tempo vacío / no resuelto (sin fabricar 120 BPM).
    */
-  public getTempoAtTick(tick: number): number {
-    if (tick < 0) {
-      return this.events[0]?.bpm ?? 120;
+  public static unresolved(): TempoMap {
+    return new TempoMap([]);
+  }
+
+  /**
+   * Obtiene el tempo en BPM activo en un tick determinado.
+   * Retorna null si el tempo no está resuelto.
+   */
+  public getTempoAtTick(tick: number): number | null {
+    if (this.events.length === 0) {
+      return null;
     }
 
-    let activeBpm = this.events[0]?.bpm ?? 120;
+    if (tick < 0) {
+      return this.events[0]?.bpm ?? null;
+    }
+
+    let activeBpm: number | null = this.events[0]?.bpm ?? null;
     for (const ev of this.events) {
       if (ev.tick <= tick) {
         activeBpm = ev.bpm;
@@ -100,15 +116,33 @@ export class TempoMap {
   }
 
   /**
+   * Obtiene el tempo en BPM activo para propósitos de visualización o renderizado
+   * con un valor de fallback explícito (por defecto 120 BPM).
+   * Este valor NUNCA se persiste como metadato canónico.
+   */
+  public getTempoAtTickWithFallback(tick: number, fallbackBpm: number = 120): number {
+    return this.getTempoAtTick(tick) ?? fallbackBpm;
+  }
+
+  /**
    * Convierte una posición en ticks a tiempo físico transcurrido en segundos,
    * integrando de forma continua todos los cambios de tempo previos.
    *
    * Fórmula:
    *  deltaSegundos = (deltaTicks * 60) / (CANONICAL_TPQN * bpm)
    */
-  public tickToSeconds(targetTick: number): number {
+  public tickToSeconds(targetTick: number, fallbackBpm?: number): number {
     if (targetTick <= 0) {
       return 0;
+    }
+
+    if (this.events.length === 0) {
+      if (fallbackBpm && fallbackBpm > 0) {
+        return (targetTick * 60) / (CANONICAL_TPQN * fallbackBpm);
+      }
+      throw new Error(
+        'No se puede calcular tiempo físico (segundos) en un TempoMap no resuelto sin un tempo BPM o fallback explícito.'
+      );
     }
 
     let elapsedSeconds = 0;
@@ -139,9 +173,19 @@ export class TempoMap {
   /**
    * Convierte tiempo físico en segundos a la posición en ticks canónicos más cercana.
    */
-  public secondsToTick(targetSeconds: number): number {
+  public secondsToTick(targetSeconds: number, fallbackBpm?: number): number {
     if (targetSeconds <= 0) {
       return 0;
+    }
+
+    if (this.events.length === 0) {
+      if (fallbackBpm && fallbackBpm > 0) {
+        const deltaTicks = (targetSeconds * CANONICAL_TPQN * fallbackBpm) / 60;
+        return Math.round(deltaTicks);
+      }
+      throw new Error(
+        'No se puede calcular ticks desde tiempo físico en un TempoMap no resuelto sin un tempo BPM o fallback explícito.'
+      );
     }
 
     let remainingSeconds = targetSeconds;
@@ -171,12 +215,19 @@ export class TempoMap {
   }
 
   public toJSON(): TempoMapJSON {
-    return {
+    const json: TempoMapJSON = {
       events: this.events.map((e) => e.toJSON()),
     };
+    if (this.isUnresolved) {
+      json.isUnresolved = true;
+    }
+    return json;
   }
 
   public static fromJSON(json: TempoMapJSON): TempoMap {
+    if (!json || !json.events || json.events.length === 0) {
+      return new TempoMap([]);
+    }
     const events = (json.events || []).map((e) => TempoEvent.fromJSON(e));
     return new TempoMap(events);
   }

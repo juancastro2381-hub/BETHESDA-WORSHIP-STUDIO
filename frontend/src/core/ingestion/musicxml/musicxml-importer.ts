@@ -150,8 +150,8 @@ export class MusicXmlImporter implements MusicImporter {
       }
 
       let activeDivisions = 1;
-      let activeTimeSignature = TimeSignature.FOUR_FOUR;
-      let activeKeySigRef = new KeySignatureReference(NoteName.C, 'MAJOR', new KeySignature(0));
+      let activeTimeSignature: TimeSignature | null = null;
+      let activeKeySigRef: KeySignatureReference | null = null;
       const tempoEvents: TempoEvent[] = [];
       const sections: Section[] = [];
       const canonicalMeasures: Measure[] = [];
@@ -236,14 +236,16 @@ export class MusicXmlImporter implements MusicImporter {
                 startMeasure: measureNum,
                 measureCount: 1, // Se actualizará al final
                 startTick: currentMeasureStartTick,
-                durationTicks: activeTimeSignature.calculateMeasureDurationTicks(),
+                durationTicks: activeTimeSignature ? activeTimeSignature.calculateMeasureDurationTicks() : 1920,
               })
             );
           }
         }
 
         // Calcular duración canónica del compás
-        const measureDurationTicks = activeTimeSignature.calculateMeasureDurationTicks();
+        const measureDurationTicks = activeTimeSignature
+          ? activeTimeSignature.calculateMeasureDurationTicks()
+          : (activeDivisions > 0 ? Math.round((activeDivisions * 4 * CANONICAL_TPQN) / activeDivisions) : 1920);
 
         // Procesar Voces, Notas, Silencios, Acordes y Lírica
         const voiceEventsMap = new Map<number, (Note | Rest)[]>();
@@ -434,8 +436,8 @@ export class MusicXmlImporter implements MusicImporter {
 
         const measureInit: {
           number: number;
-          timeSignature: TimeSignature;
-          keySignature: KeySignatureReference;
+          timeSignature: TimeSignature | null;
+          keySignature: KeySignatureReference | null;
           startTick: number;
           durationTicks: number;
           voices: Voice[];
@@ -471,7 +473,14 @@ export class MusicXmlImporter implements MusicImporter {
         tpqn: CANONICAL_TPQN,
         totalDurationTicks: totalTicks,
         measureCount: canonicalMeasures.length,
-        tempoMap: new TempoMap(tempoEvents.length > 0 ? tempoEvents : [new TempoEvent(0, options?.defaultBpm ?? 120)]),
+        tempoMap: new TempoMap(
+          tempoEvents.length > 0
+            ? tempoEvents
+            : options?.defaultBpm
+            ? [new TempoEvent(0, options.defaultBpm)]
+            : []
+        ),
+        isUnmetered: activeTimeSignature === null,
       });
 
       const payload = new CanonicalMusicPayload({

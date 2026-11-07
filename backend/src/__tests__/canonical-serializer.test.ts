@@ -45,8 +45,8 @@ describe('Phase 2A — Canonical Serializer & Deserializer Tests', () => {
     const m1Original = original.measures[0]!;
     const m1Hydrated = hydrated.measures[0]!;
     assert.strictEqual(m1Hydrated.number, m1Original.number);
-    assert.strictEqual(m1Hydrated.timeSignature.numerator, m1Original.timeSignature.numerator);
-    assert.strictEqual(m1Hydrated.keySignature.toMusicalKey().toString(), m1Original.keySignature.toMusicalKey().toString());
+    assert.strictEqual(m1Hydrated.timeSignature?.numerator, m1Original.timeSignature?.numerator);
+    assert.strictEqual(m1Hydrated.keySignature?.toMusicalKey().toString(), m1Original.keySignature?.toMusicalKey().toString());
     assert.strictEqual(m1Hydrated.getAllNotes().length, m1Original.getAllNotes().length);
     assert.strictEqual(m1Hydrated.chords.length, m1Original.chords.length);
   });

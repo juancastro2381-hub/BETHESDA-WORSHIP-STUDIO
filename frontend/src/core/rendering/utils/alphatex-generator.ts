@@ -40,7 +40,7 @@ export class AlphaTexGenerator {
   private static generateMeasure(measure: DerivedMeasure, isFirst: boolean): string {
     const tokens: string[] = [];
 
-    if (isFirst) {
+    if (isFirst && measure.timeSignature) {
       tokens.push(`\\ts (${measure.timeSignature.numerator} ${measure.timeSignature.denominator})`);
     }
 

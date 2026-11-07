@@ -129,8 +129,8 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     setSuccessMsg(null);
     try {
       const firstMeasure = activeSong.measures[0];
-      const defaultKey = firstMeasure ? firstMeasure.keySignature.toMusicalKey().toString() : 'C Major';
-      const timeSignature = firstMeasure
+      const defaultKey = firstMeasure?.keySignature ? firstMeasure.keySignature.toMusicalKey().toString() : 'C Major';
+      const timeSignature = firstMeasure?.timeSignature
         ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
         : '4/4';
       const defaultBpm = activeSong.timeline.tempoMap.events[0]?.bpm ?? 120;

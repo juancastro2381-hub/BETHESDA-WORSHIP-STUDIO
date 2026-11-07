@@ -143,9 +143,9 @@ export class DerivedLyric {
 
 export interface DerivedMeasureInit {
   measureNumber: number;
-  timeSignature: TimeSignature;
-  concertKeySignature: KeySignatureReference;
-  writtenKeySignature: KeySignatureReference;
+  timeSignature: TimeSignature | null;
+  concertKeySignature: KeySignatureReference | null;
+  writtenKeySignature: KeySignatureReference | null;
   startTick: number;
   durationTicks: number;
   notes?: DerivedNote[] | undefined;
@@ -161,9 +161,9 @@ export interface DerivedMeasureInit {
 
 export class DerivedMeasure {
   public readonly measureNumber: number;
-  public readonly timeSignature: TimeSignature;
-  public readonly concertKeySignature: KeySignatureReference;
-  public readonly writtenKeySignature: KeySignatureReference;
+  public readonly timeSignature: TimeSignature | null;
+  public readonly concertKeySignature: KeySignatureReference | null;
+  public readonly writtenKeySignature: KeySignatureReference | null;
   public readonly startTick: number;
   public readonly durationTicks: number;
   public readonly notes: readonly DerivedNote[];

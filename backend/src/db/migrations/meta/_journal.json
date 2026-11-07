@@ -99,6 +99,13 @@
       "when": 1793889000000,
       "tag": "0013_source_retention_and_referential_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793895600000,
+      "tag": "0014_source_retention_version_integrity",
+      "breakpoints": true
     }
   ]
 }

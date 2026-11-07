@@ -79,7 +79,7 @@ export class ProjectionService {
 
     // 2. Determinar tonalidades y desplazamientos interválicos
     const firstMeasure = canonicalMusic.measures[0];
-    const canonicalKey = firstMeasure?.keySignature.toMusicalKey() ?? MusicalKey.C_MAJOR;
+    const canonicalKey = firstMeasure?.keySignature?.toMusicalKey() ?? MusicalKey.C_MAJOR;
 
     // Desplazamiento sonante (transposición musical solicitada por el músico/director)
     const musicianSemitones = viewPreference.transpositionSemitones;
@@ -115,7 +115,7 @@ export class ProjectionService {
     for (const measure of canonicalMusic.measures) {
       // Clave de armadura de compás
       const concertKeySig = measure.keySignature;
-      const writtenKeySig = totalWrittenOffset !== 0
+      const writtenKeySig = totalWrittenOffset !== 0 && concertKeySig !== null
         ? KeySignatureReference.fromMusicalKey(writtenKey)
         : concertKeySig;
 

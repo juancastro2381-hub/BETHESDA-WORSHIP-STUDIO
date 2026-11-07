@@ -75,18 +75,20 @@ export class CanonicalModelValidator {
         });
       }
 
-      // 2.3 Coherencia métrica de duración del compás
-      const expectedDuration = measure.timeSignature.calculateMeasureDurationTicks();
-      if (measure.durationTicks !== expectedDuration) {
-        errors.push({
-          code: 'MEASURE_DURATION_MISMATCH',
-          message: `Compás ${measure.number} tiene duración ${measure.durationTicks} ticks; métrica ${measure.timeSignature} exige ${expectedDuration} ticks.`,
-          context: {
-            measureNumber: measure.number,
-            durationTicks: measure.durationTicks,
-            expectedDuration,
-          },
-        });
+      // 2.3 Coherencia métrica de duración del compás (si la métrica está declarada)
+      if (measure.timeSignature) {
+        const expectedDuration = measure.timeSignature.calculateMeasureDurationTicks();
+        if (measure.durationTicks !== expectedDuration) {
+          errors.push({
+            code: 'MEASURE_DURATION_MISMATCH',
+            message: `Compás ${measure.number} tiene duración ${measure.durationTicks} ticks; métrica ${measure.timeSignature} exige ${expectedDuration} ticks.`,
+            context: {
+              measureNumber: measure.number,
+              durationTicks: measure.durationTicks,
+              expectedDuration,
+            },
+          });
+        }
       }
 
       expectedTick = measure.startTick + measure.durationTicks;

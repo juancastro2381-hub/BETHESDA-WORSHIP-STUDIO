@@ -53,8 +53,8 @@ describe('ChordProImporter Tests (ChordPro -> CanonicalMusicPayload)', () => {
 
     // La tonalidad canónica de concierto NO se altera; sigue siendo Sol Mayor (G)
     const m1 = result.payload.measures[0]!;
-    assert.strictEqual(m1.keySignature.tonic.toString(), 'G');
-    assert.strictEqual(m1.keySignature.mode, 'MAJOR');
+    assert.strictEqual(m1.keySignature?.tonic.toString(), 'G');
+    assert.strictEqual(m1.keySignature?.mode, 'MAJOR');
 
     // El primer acorde sonante canónico sigue siendo G
     const chords = result.payload.getAllChords();

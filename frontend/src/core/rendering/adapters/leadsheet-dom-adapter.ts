@@ -116,7 +116,9 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
     }
 
     const measuresData: LeadSheetMeasureData[] = view.measures.map((measure) => {
-      const timeSigStr = `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`;
+      const timeSigStr = measure.timeSignature
+        ? `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`
+        : '—';
 
       const chordsData = measure.chords.map((c) => ({
         startTick: c.startTick,

@@ -48,7 +48,7 @@ export interface ImportStatistics {
   sectionCount: number;
   trackCount: number;
   durationTicks: number;
-  durationSeconds: number;
+  durationSeconds: number | null;
 }
 
 export interface ImportOptions {

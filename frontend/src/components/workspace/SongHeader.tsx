@@ -32,9 +32,9 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
 }) => {
   const tempoBpm = song.timeline.tempoMap.events[0]?.bpm ?? 120;
   const firstMeasure = song.measures[0];
-  const timeSig = firstMeasure
+  const timeSig = firstMeasure?.timeSignature
     ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
-    : '4/4';
+    : '—';
   const totalMeasures = song.measures.length;
   const totalSections = song.sections.length;
   const totalChords = song.measures.reduce((acc, m) => acc + m.chords.length, 0);

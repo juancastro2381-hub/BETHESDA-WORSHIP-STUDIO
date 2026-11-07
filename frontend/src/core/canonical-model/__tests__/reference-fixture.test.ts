@@ -25,7 +25,7 @@ describe('Realistic Reference Song Fixture Tests ("En Tu Presencia" - G Major, 4
     assert.strictEqual(fixture.timeline.tempoMap.getTempoAtTick(61440), 74);
 
     // Duración total en segundos: (61440 * 60) / (480 * 74) = 103.78378... s
-    assert.ok(Math.abs(fixture.timeline.totalDurationSeconds - 103.78378) < 0.01);
+    assert.ok(fixture.timeline.totalDurationSeconds !== null && Math.abs(fixture.timeline.totalDurationSeconds - 103.78378) < 0.01);
 
     // Validación formal de dominio
     const validation = CanonicalModelValidator.validate(fixture);

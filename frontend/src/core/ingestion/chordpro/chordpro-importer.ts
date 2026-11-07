@@ -53,9 +53,9 @@ export class ChordProImporter implements MusicImporter {
     let capoFret: number | undefined = undefined;
 
     let title = options?.sourceName?.replace(/\.[^.]+$/, '') ?? 'Canción sin Título';
-    let rawKey = options?.defaultKey ?? 'C';
-    let rawTimeSig = options?.defaultTimeSignature ?? '4/4';
-    let bpm = options?.defaultBpm ?? 120;
+    let rawKey: string | null = options?.defaultKey ?? null;
+    let rawTimeSig: string | null = options?.defaultTimeSignature ?? null;
+    let bpm: number | null = options?.defaultBpm ?? null;
 
     const lines = source.split(/\r?\n/);
 
@@ -178,16 +178,18 @@ export class ChordProImporter implements MusicImporter {
     }
 
     // 2. Establecer Métrica y Armadura Inicial
-    let timeSignature: TimeSignature;
-    try {
-      timeSignature = TimeSignature.parse(rawTimeSig);
-    } catch {
-      diagnostics.addWarning('DEFAULTING_TIME_SIGNATURE', `Métrica no válida: "${rawTimeSig}". Usando 4/4.`);
-      timeSignature = TimeSignature.FOUR_FOUR;
+    let timeSignature: TimeSignature | null = null;
+    if (rawTimeSig) {
+      try {
+        timeSignature = TimeSignature.parse(rawTimeSig);
+      } catch {
+        diagnostics.addWarning('INVALID_TIME_SIGNATURE', `Métrica no válida: "${rawTimeSig}".`);
+        timeSignature = null;
+      }
     }
 
-    const keySigRef = this.resolveKeySignatureRef(rawKey, diagnostics);
-    const measureDuration = timeSignature.calculateMeasureDurationTicks();
+    const keySigRef: KeySignatureReference | null = rawKey ? this.resolveKeySignatureRef(rawKey, diagnostics) : null;
+    const measureDuration = timeSignature ? timeSignature.calculateMeasureDurationTicks() : 1920;
 
     // 3. Generar Compases y Secciones
     const canonicalMeasures: Measure[] = [];
@@ -206,7 +208,7 @@ export class ChordProImporter implements MusicImporter {
         const chords = line.chordTokens;
         const lyrics = line.lyricTokens;
 
-        const chordsPerMeasure = timeSignature.isCompound ? 2 : 2;
+        const chordsPerMeasure = timeSignature?.isCompound ? 2 : 2;
         const measuresNeeded = Math.max(1, Math.ceil(Math.max(chords.length / chordsPerMeasure, 1)));
 
         for (let mOffset = 0; mOffset < measuresNeeded; mOffset++) {
@@ -335,7 +337,8 @@ export class ChordProImporter implements MusicImporter {
       tpqn: CANONICAL_TPQN,
       totalDurationTicks: currentStartTick,
       measureCount: canonicalMeasures.length,
-      tempoMap: new TempoMap([new TempoEvent(0, bpm)]),
+      tempoMap: bpm ? new TempoMap([new TempoEvent(0, bpm)]) : new TempoMap([]),
+      isUnmetered: timeSignature === null,
     });
 
     const payload = new CanonicalMusicPayload({

@@ -12,6 +12,7 @@ export interface TimelineJSON {
   totalDurationTicks: number;
   measureCount: number;
   tempoMap: TempoMapJSON;
+  isUnmetered?: boolean;
 }
 
 export class Timeline {
@@ -19,12 +20,14 @@ export class Timeline {
   public readonly totalDurationTicks: number;
   public readonly measureCount: number;
   public readonly tempoMap: TempoMap;
+  public readonly isUnmetered: boolean;
 
   public constructor(init: {
     totalDurationTicks: number;
     measureCount: number;
-    tempoMap?: TempoMap;
-    tpqn?: number;
+    tempoMap?: TempoMap | undefined;
+    tpqn?: number | undefined;
+    isUnmetered?: boolean | undefined;
   }) {
     if (init.tpqn !== undefined && init.tpqn !== CANONICAL_TPQN) {
       throw new Error(`Resolución TPQN no canónica: ${init.tpqn}. Bethesda Worship Studio exige exactamente ${CANONICAL_TPQN} TPQN.`);
@@ -38,28 +41,36 @@ export class Timeline {
 
     this.totalDurationTicks = init.totalDurationTicks;
     this.measureCount = init.measureCount;
-    this.tempoMap = init.tempoMap ?? TempoMap.constant(120);
+    this.tempoMap = init.tempoMap ?? new TempoMap([]);
+    this.isUnmetered = Boolean(init.isUnmetered);
   }
 
-  public get totalDurationSeconds(): number {
+  public get totalDurationSeconds(): number | null {
+    if (this.tempoMap.isUnresolved) {
+      return null;
+    }
     return this.tempoMap.tickToSeconds(this.totalDurationTicks);
   }
 
-  public tickToSeconds(tick: number): number {
-    return this.tempoMap.tickToSeconds(tick);
+  public tickToSeconds(tick: number, fallbackBpm?: number): number {
+    return this.tempoMap.tickToSeconds(tick, fallbackBpm);
   }
 
-  public secondsToTick(seconds: number): number {
-    return this.tempoMap.secondsToTick(seconds);
+  public secondsToTick(seconds: number, fallbackBpm?: number): number {
+    return this.tempoMap.secondsToTick(seconds, fallbackBpm);
   }
 
   public toJSON(): TimelineJSON {
-    return {
+    const json: TimelineJSON = {
       tpqn: this.tpqn,
       totalDurationTicks: this.totalDurationTicks,
       measureCount: this.measureCount,
       tempoMap: this.tempoMap.toJSON(),
     };
+    if (this.isUnmetered) {
+      json.isUnmetered = true;
+    }
+    return json;
   }
 
   public static fromJSON(json: TimelineJSON): Timeline {
@@ -69,6 +80,7 @@ export class Timeline {
       totalDurationTicks: json.totalDurationTicks,
       measureCount: json.measureCount,
       tempoMap,
+      isUnmetered: json.isUnmetered,
     });
   }
 }

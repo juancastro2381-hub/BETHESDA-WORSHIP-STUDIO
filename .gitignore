@@ -23,3 +23,13 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# Runtime Storage Artifacts (Generated during tests and ingestion)
+backend/storage/sources/*
+!backend/storage/sources/.gitkeep
+backend/storage/audio/*
+!backend/storage/audio/.gitkeep
+backend/storage/documents/*
+!backend/storage/documents/.gitkeep
+storage/
+
+

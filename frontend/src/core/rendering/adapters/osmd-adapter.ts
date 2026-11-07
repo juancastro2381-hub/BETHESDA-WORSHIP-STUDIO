@@ -143,8 +143,8 @@ export class OsmdAdapter extends BaseMusicRenderer<OsmdScoreData> {
       : [view.measures[0]?.clefs[0] ?? view.instrumentProfile.clef];
 
     const osmdMeasures: OsmdMeasureData[] = view.measures.map((measure) => {
-      const beats = measure.timeSignature.numerator;
-      const beatType = measure.timeSignature.denominator;
+      const beats = measure.timeSignature?.numerator ?? 4;
+      const beatType = measure.timeSignature?.denominator ?? 4;
 
       const staves: OsmdStaffData[] = [];
 

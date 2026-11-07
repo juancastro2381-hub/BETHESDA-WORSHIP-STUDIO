@@ -168,7 +168,7 @@ describe('Phase 1G — Production Musical Workspace & View Orchestration Tests',
     // Sounding key shifted to A Major
     assert.strictEqual(result.derivedView.concertKey.tonic.toString(), 'A');
     // Canonical concert key in payload remains immutable
-    assert.strictEqual(song.measures[0]?.keySignature.toMusicalKey().tonic.toString(), 'G');
+    assert.strictEqual(song.measures[0]?.keySignature?.toMusicalKey().tonic.toString(), 'G');
     assert.strictEqual(JSON.stringify(song), initialSongJson);
   });
 

@@ -58,10 +58,12 @@ ${partsXml}
       xml += `          <fifths>${fifths}</fifths>\n`;
       xml += `          <mode>${mode}</mode>\n`;
       xml += `        </key>\n`;
-      xml += `        <time>\n`;
-      xml += `          <beats>${measure.timeSignature.numerator}</beats>\n`;
-      xml += `          <beat-type>${measure.timeSignature.denominator}</beat-type>\n`;
-      xml += `        </time>\n`;
+      if (measure.timeSignature) {
+        xml += `        <time>\n`;
+        xml += `          <beats>${measure.timeSignature.numerator}</beats>\n`;
+        xml += `          <beat-type>${measure.timeSignature.denominator}</beat-type>\n`;
+        xml += `        </time>\n`;
+      }
 
       if (isGrandStaff) {
         xml += `        <staves>2</staves>\n`;

@@ -90,7 +90,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
 
     // 3. Manejo de Tonalidad, Métrica y Tempo (CERO INVENCIÓN SILENCIOSA)
     const rawKey = parsedData.defaultKey;
-    let keyRef: KeySignatureReference;
+    let keyRef: KeySignatureReference | null = null;
     let defaultKey: string | null = null;
 
     if (rawKey) {
@@ -99,7 +99,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         keyRef = KeySignatureReference.fromMusicalKey(parsedKey);
         defaultKey = parsedKey.toString();
       } catch {
-        keyRef = KeySignatureReference.fromMusicalKey(MusicalKey.C_MAJOR);
+        keyRef = null;
         defaultKey = null;
         diagnostics.push({
           code: 'UNPARSEABLE_KEY_SIGNATURE',
@@ -108,7 +108,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         });
       }
     } else {
-      keyRef = KeySignatureReference.fromMusicalKey(MusicalKey.C_MAJOR);
+      keyRef = null;
       defaultKey = null;
       diagnostics.push({
         code: 'MISSING_KEY_SIGNATURE',
@@ -138,14 +138,12 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       });
     }
 
-    // 4. Configurar TempoMap en el Timeline
+    // 4. Configurar TempoMap en el Timeline (CERO FABRICACIÓN DE 120 BPM)
     const tempoEvents: TempoEvent[] = [];
     if (parsedData.tempoEvents.length > 0) {
       for (const t of parsedData.tempoEvents) {
         tempoEvents.push(new TempoEvent(t.tickCanonical, t.bpm));
       }
-    } else {
-      tempoEvents.push(new TempoEvent(0, 120)); // Base temporal de fallback para el contenedor
     }
     const tempoMap = new TempoMap(tempoEvents);
 
@@ -181,27 +179,25 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       mNum: number;
       startTick: number;
       durationTicks: number;
-      timeSignature: TimeSignature;
+      timeSignature: TimeSignature | null;
     }
 
     const measureBoundaries: MeasureBoundary[] = [];
 
     if (!hasDeclaredMeter) {
-      // CERO FABRICACIÓN MÉTRICA: Si el archivo MIDI no declara métrica, no construir compases artificiales de 4/4
+      // CERO FABRICACIÓN MÉTRICA: Si el archivo MIDI no declara métrica, no construir compases artificiales ni métricas fabricadas
       diagnostics.push({
         code: 'UNMETERED_TIMELINE',
         severity: 'INFO',
-        message: 'La secuencia MIDI no declara eventos de métrica (Time Signature); la línea temporal se preserva sin compases artificiales de 4/4.',
+        message: 'La secuencia MIDI no declara eventos de métrica (Time Signature); la línea temporal se preserva como no medida (unmetered) sin numerador o denominador artificial.',
       });
 
       if (rawTotalTicks > 0) {
-        const quarterCount = Math.max(1, Math.ceil(rawTotalTicks / 480));
-        const unmeteredDuration = quarterCount * 480;
         measureBoundaries.push({
           mNum: 1,
           startTick: 0,
-          durationTicks: unmeteredDuration,
-          timeSignature: new TimeSignature(quarterCount, 4),
+          durationTicks: rawTotalTicks,
+          timeSignature: null,
         });
       }
     } else {
@@ -361,6 +357,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
       totalDurationTicks,
       tempoMap,
       measureCount: measures.length,
+      isUnmetered: !hasDeclaredMeter,
     });
 
     const canonicalPayload = new CanonicalMusicPayload({

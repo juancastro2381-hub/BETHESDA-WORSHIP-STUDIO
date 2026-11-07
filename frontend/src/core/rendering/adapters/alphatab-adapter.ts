@@ -154,8 +154,12 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
     const staffClef = view.measures[0]?.clefs[0] ?? view.instrumentProfile.clef;
 
     const bars: AlphaTabBarData[] = view.measures.map((measure) => {
-      const timeSigStr = `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`;
-      const keyAccidentals = measure.writtenKeySignature.keySignature.accidentalCount;
+      const timeSigStr = measure.timeSignature
+        ? `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`
+        : '4/4';
+      const keyAccidentals = measure.writtenKeySignature
+        ? measure.writtenKeySignature.keySignature.accidentalCount
+        : 0;
 
       const voiceBeatsMap = new Map<number, AlphaTabBeatData[]>();
 

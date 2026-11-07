@@ -177,19 +177,38 @@ export class ChordProImporter implements MusicImporter {
       sectionsData.push(currentSection);
     }
 
-    // 2. Establecer Métrica y Armadura Inicial
+    // 2. Establecer Métrica y Armadura Inicial (CERO FABRICACIÓN SILENCIOSA)
     let timeSignature: TimeSignature | null = null;
     if (rawTimeSig) {
       try {
         timeSignature = TimeSignature.parse(rawTimeSig);
       } catch {
-        diagnostics.addWarning('INVALID_TIME_SIGNATURE', `Métrica no válida: "${rawTimeSig}".`);
+        diagnostics.addWarning('INVALID_TIME_SIGNATURE', `Métrica no válida: "${rawTimeSig}". La estructura métrica se preserva como no medida.`);
         timeSignature = null;
       }
+    } else {
+      diagnostics.addInfo(
+        'UNRESOLVED_TIME_SIGNATURE',
+        'El archivo ChordPro no declara directiva {time}. La estructura métrica se preserva como no medida (unmetered) sin asumir 4/4.'
+      );
     }
 
-    const keySigRef: KeySignatureReference | null = rawKey ? this.resolveKeySignatureRef(rawKey, diagnostics) : null;
-    const measureDuration = timeSignature ? timeSignature.calculateMeasureDurationTicks() : 1920;
+    let keySigRef: KeySignatureReference | null = null;
+    if (rawKey) {
+      keySigRef = this.resolveKeySignatureRef(rawKey, diagnostics);
+    } else {
+      diagnostics.addInfo(
+        'UNRESOLVED_KEY_SIGNATURE',
+        'El archivo ChordPro no declara directiva {key}. La tonalidad permanece no resuelta (null).'
+      );
+    }
+
+    if (bpm === null) {
+      diagnostics.addInfo(
+        'UNRESOLVED_TEMPO',
+        'El archivo ChordPro no declara directiva {tempo}. El mapa de tempo se preserva como no resuelto (null) sin asumir 120 BPM.'
+      );
+    }
 
     // 3. Generar Compases y Secciones
     const canonicalMeasures: Measure[] = [];
@@ -203,85 +222,155 @@ export class ChordProImporter implements MusicImporter {
       const sectionStartTick = currentStartTick;
 
       for (const line of secData.lines) {
-        // Asignamos los acordes y lírica a compases
-        // Si hay más de 2 acordes en la línea, se reparten entre compases (ej. 2 acordes por compás)
         const chords = line.chordTokens;
         const lyrics = line.lyricTokens;
 
-        const chordsPerMeasure = timeSignature?.isCompound ? 2 : 2;
-        const measuresNeeded = Math.max(1, Math.ceil(Math.max(chords.length / chordsPerMeasure, 1)));
+        if (timeSignature !== null) {
+          // Métrica explícitamente declarada: distribuir acordes y lírica en compases regulares
+          const measureDuration = timeSignature.calculateMeasureDurationTicks();
+          const chordsPerMeasure = timeSignature.isCompound ? 2 : 2;
+          const measuresNeeded = Math.max(1, Math.ceil(Math.max(chords.length / chordsPerMeasure, 1)));
 
-        for (let mOffset = 0; mOffset < measuresNeeded; mOffset++) {
+          for (let mOffset = 0; mOffset < measuresNeeded; mOffset++) {
+            const mNum = currentMeasureNum++;
+            const mTick = currentStartTick;
+            const measureChords: ChordEvent[] = [];
+            const measureLyrics: LyricSyllable[] = [];
+
+            // Acordes de este compás
+            const chordSlice = chords.slice(mOffset * chordsPerMeasure, (mOffset + 1) * chordsPerMeasure);
+            if (chordSlice.length > 0) {
+              const slotDuration = Math.floor(measureDuration / chordSlice.length);
+              for (let cIdx = 0; cIdx < chordSlice.length; cIdx++) {
+                const ch = chordSlice[cIdx]!;
+                measureChords.push(
+                  new ChordEvent({
+                    id: `ch_m${mNum}_${cIdx + 1}`,
+                    chord: ch.chord,
+                    startTick: mTick + cIdx * slotDuration,
+                    durationTicks: slotDuration,
+                    measureNumber: mNum,
+                  })
+                );
+              }
+            }
+
+            // Sílabas líricas de este compás (repartidas si aplica)
+            if (mOffset === 0 && lyrics.length > 0) {
+              const lyricText = lyrics.join(' ').trim();
+              if (lyricText) {
+                const words = lyricText.split(/\s+/);
+                const slotTicks = Math.floor(measureDuration / Math.max(1, words.length));
+
+                for (let wIdx = 0; wIdx < words.length; wIdx++) {
+                  const word = words[wIdx]!;
+                  const firstChord = measureChords[0]?.chord ?? null;
+
+                  measureLyrics.push(
+                    new LyricSyllable({
+                      id: `syl_m${mNum}_${wIdx + 1}`,
+                      text: word,
+                      isHyphenated: word.endsWith('-'),
+                      boundNoteId: null, // ¡Invariante: Sin nota melódica inventada!
+                      measureNumber: mNum,
+                      tickOffset: Math.min(measureDuration - 1, wIdx * slotTicks),
+                      sequenceNumber: syllableSequence++,
+                      chordAbove: wIdx === 0 ? firstChord : null,
+                    })
+                  );
+                }
+              }
+            }
+
+            canonicalMeasures.push(
+              new Measure({
+                number: mNum,
+                timeSignature,
+                keySignature: keySigRef,
+                startTick: mTick,
+                durationTicks: measureDuration,
+                voices: [], // ¡Invariante: Sin notas inventadas para ChordPro!
+                chords: measureChords,
+                lyrics: measureLyrics,
+              })
+            );
+
+            currentStartTick += measureDuration;
+          }
+        } else {
+          // CERO FABRICACIÓN: Estructura no medida (Unmetered). Cada línea representa un contenedor unmetered único sin 4/4 artificial
           const mNum = currentMeasureNum++;
           const mTick = currentStartTick;
           const measureChords: ChordEvent[] = [];
           const measureLyrics: LyricSyllable[] = [];
 
-          // Acordes de este compás
-          const chordSlice = chords.slice(mOffset * chordsPerMeasure, (mOffset + 1) * chordsPerMeasure);
-          if (chordSlice.length > 0) {
-            const slotDuration = Math.floor(measureDuration / chordSlice.length);
-            for (let cIdx = 0; cIdx < chordSlice.length; cIdx++) {
-              const ch = chordSlice[cIdx]!;
+          // Duración proporcional a los eventos de la línea (sin asumir 1920 ni compás 4/4)
+          const chordSlotTicks = CANONICAL_TPQN;
+          const lyricText = lyrics.join(' ').trim();
+          const words = lyricText ? lyricText.split(/\s+/) : [];
+
+          const containerDuration = Math.max(
+            chords.length > 0 ? chords.length * chordSlotTicks : CANONICAL_TPQN,
+            words.length > 0 ? words.length * Math.floor(CANONICAL_TPQN / 2) : CANONICAL_TPQN
+          );
+
+          if (chords.length > 0) {
+            const chordSlot = Math.floor(containerDuration / chords.length);
+            for (let cIdx = 0; cIdx < chords.length; cIdx++) {
+              const ch = chords[cIdx]!;
               measureChords.push(
                 new ChordEvent({
                   id: `ch_m${mNum}_${cIdx + 1}`,
                   chord: ch.chord,
-                  startTick: mTick + cIdx * slotDuration,
-                  durationTicks: slotDuration,
+                  startTick: mTick + cIdx * chordSlot,
+                  durationTicks: chordSlot,
                   measureNumber: mNum,
                 })
               );
             }
           }
 
-          // Sílabas líricas de este compás (repartidas si aplica)
-          if (mOffset === 0 && lyrics.length > 0) {
-            const lyricText = lyrics.join(' ').trim();
-            if (lyricText) {
-              // Dividir en palabras / sílabas estructuradas
-              const words = lyricText.split(/\s+/);
-              const slotTicks = Math.floor(measureDuration / Math.max(1, words.length));
+          if (words.length > 0) {
+            const lyricSlot = Math.floor(containerDuration / words.length);
+            for (let wIdx = 0; wIdx < words.length; wIdx++) {
+              const word = words[wIdx]!;
+              const firstChord = measureChords[0]?.chord ?? null;
 
-              for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                const word = words[wIdx]!;
-                const firstChord = measureChords[0]?.chord ?? null;
-
-                measureLyrics.push(
-                  new LyricSyllable({
-                    id: `syl_m${mNum}_${wIdx + 1}`,
-                    text: word,
-                    isHyphenated: word.endsWith('-'),
-                    boundNoteId: null, // ¡Invariante: Sin nota melódica inventada!
-                    measureNumber: mNum,
-                    tickOffset: Math.min(measureDuration - 1, wIdx * slotTicks),
-                    sequenceNumber: syllableSequence++,
-                    chordAbove: wIdx === 0 ? firstChord : null,
-                  })
-                );
-              }
+              measureLyrics.push(
+                new LyricSyllable({
+                  id: `syl_m${mNum}_${wIdx + 1}`,
+                  text: word,
+                  isHyphenated: word.endsWith('-'),
+                  boundNoteId: null,
+                  measureNumber: mNum,
+                  tickOffset: Math.min(containerDuration - 1, wIdx * lyricSlot),
+                  sequenceNumber: syllableSequence++,
+                  chordAbove: wIdx === 0 ? firstChord : null,
+                })
+              );
             }
           }
 
           canonicalMeasures.push(
             new Measure({
               number: mNum,
-              timeSignature,
+              timeSignature: null,
               keySignature: keySigRef,
               startTick: mTick,
-              durationTicks: measureDuration,
-              voices: [], // ¡Invariante: Sin notas inventadas para ChordPro!
+              durationTicks: containerDuration,
+              voices: [],
               chords: measureChords,
               lyrics: measureLyrics,
             })
           );
 
-          currentStartTick += measureDuration;
+          currentStartTick += containerDuration;
         }
       }
 
       const sectionMeasureCount = currentMeasureNum - sectionStartMeasure;
       if (sectionMeasureCount > 0) {
+        const sectionDuration = currentStartTick - sectionStartTick;
         canonicalSections.push(
           new Section({
             id: `sec_${sectionStartMeasure}_${secData.type.toLowerCase()}`,
@@ -290,7 +379,7 @@ export class ChordProImporter implements MusicImporter {
             startMeasure: sectionStartMeasure,
             measureCount: sectionMeasureCount,
             startTick: sectionStartTick,
-            durationTicks: sectionMeasureCount * measureDuration,
+            durationTicks: sectionDuration,
           })
         );
       }
@@ -298,13 +387,14 @@ export class ChordProImporter implements MusicImporter {
 
     // Si no se generaron compases (ej. entrada vacía), crear al menos un compás vacío
     if (canonicalMeasures.length === 0) {
+      const emptyDuration = timeSignature ? timeSignature.calculateMeasureDurationTicks() : CANONICAL_TPQN;
       canonicalMeasures.push(
         new Measure({
           number: 1,
           timeSignature,
           keySignature: keySigRef,
           startTick: 0,
-          durationTicks: measureDuration,
+          durationTicks: emptyDuration,
         })
       );
       canonicalSections.push(
@@ -315,10 +405,10 @@ export class ChordProImporter implements MusicImporter {
           startMeasure: 1,
           measureCount: 1,
           startTick: 0,
-          durationTicks: measureDuration,
+          durationTicks: emptyDuration,
         })
       );
-      currentStartTick = measureDuration;
+      currentStartTick = emptyDuration;
     }
 
     // Pista instrumental estándar para Lead Sheet / Cifrado

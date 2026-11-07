@@ -351,7 +351,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
     }
 
     // 9. Construir agregación canónica coherente con las fronteras de compases
-    const totalDurationTicks = measures.reduce((acc, m) => acc + m.durationTicks, 0);
+    const totalDurationTicks = measures.reduce((acc, m) => acc + (m.durationTicks ?? 0), 0);
 
     const timeline = new Timeline({
       totalDurationTicks,

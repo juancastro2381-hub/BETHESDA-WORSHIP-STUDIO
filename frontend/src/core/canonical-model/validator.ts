@@ -34,7 +34,7 @@ export class CanonicalModelValidator {
     }
 
     // 2. Verificación de Compases
-    let expectedTick = 0;
+    let expectedTick: number | null = 0;
     const seenMeasureNumbers = new Set<number>();
     const seenIds = new Set<string>();
     const allNoteIds = new Set<string>();
@@ -62,21 +62,23 @@ export class CanonicalModelValidator {
       }
       seenMeasureNumbers.add(measure.number);
 
-      // 2.2 Continuidad temporal de ticks
-      if (measure.startTick !== expectedTick) {
-        errors.push({
-          code: 'MEASURE_TICK_DISCONTINUITY',
-          message: `Compás ${measure.number} inicia en tick ${measure.startTick}; se esperaba ${expectedTick}.`,
-          context: {
-            measureNumber: measure.number,
-            startTick: measure.startTick,
-            expectedTick,
-          },
-        });
+      // 2.2 Continuidad temporal de ticks (solo para compases con timing resuelto)
+      if (measure.startTick !== null && expectedTick !== null) {
+        if (measure.startTick !== expectedTick) {
+          errors.push({
+            code: 'MEASURE_TICK_DISCONTINUITY',
+            message: `Compás ${measure.number} inicia en tick ${measure.startTick}; se esperaba ${expectedTick}.`,
+            context: {
+              measureNumber: measure.number,
+              startTick: measure.startTick,
+              expectedTick,
+            },
+          });
+        }
       }
 
-      // 2.3 Coherencia métrica de duración del compás (si la métrica está declarada)
-      if (measure.timeSignature) {
+      // 2.3 Coherencia métrica de duración del compás (si la métrica está declarada y duración resuelta)
+      if (measure.timeSignature && measure.durationTicks !== null) {
         const expectedDuration = measure.timeSignature.calculateMeasureDurationTicks();
         if (measure.durationTicks !== expectedDuration) {
           errors.push({
@@ -91,7 +93,11 @@ export class CanonicalModelValidator {
         }
       }
 
-      expectedTick = measure.startTick + measure.durationTicks;
+      if (measure.startTick !== null && measure.durationTicks !== null) {
+        expectedTick = measure.startTick + measure.durationTicks;
+      } else {
+        expectedTick = null;
+      }
 
       // 2.4 Validación de Eventos de Voces
       for (const voice of measure.voices) {
@@ -110,18 +116,20 @@ export class CanonicalModelValidator {
             allNoteIds.add(ev.id);
           }
 
-          // Límite de compás
-          if (ev.startTick < measure.startTick || ev.startTick >= measure.endTick) {
-            errors.push({
-              code: 'EVENT_OUT_OF_MEASURE_BOUNDS',
-              message: `Evento ${ev.id} inicia en tick ${ev.startTick}, fuera del compás ${measure.number} [${measure.startTick}, ${measure.endTick}).`,
-              context: {
-                eventId: ev.id,
-                startTick: ev.startTick,
-                measureStart: measure.startTick,
-                measureEnd: measure.endTick,
-              },
-            });
+          // Límite de compás (solo si timing de compás y evento está resuelto)
+          if (measure.startTick !== null && measure.endTick !== null) {
+            if (ev.startTick < measure.startTick || ev.startTick >= measure.endTick) {
+              errors.push({
+                code: 'EVENT_OUT_OF_MEASURE_BOUNDS',
+                message: `Evento ${ev.id} inicia en tick ${ev.startTick}, fuera del compás ${measure.number} [${measure.startTick}, ${measure.endTick}).`,
+                context: {
+                  eventId: ev.id,
+                  startTick: ev.startTick,
+                  measureStart: measure.startTick,
+                  measureEnd: measure.endTick,
+                },
+              });
+            }
           }
 
           // Consistencia de voz
@@ -158,17 +166,19 @@ export class CanonicalModelValidator {
           });
         }
 
-        if (chord.startTick < measure.startTick || chord.startTick >= measure.endTick) {
-          errors.push({
-            code: 'CHORD_OUT_OF_MEASURE_BOUNDS',
-            message: `Acorde ${chord.id} inicia en tick ${chord.startTick}, fuera del compás ${measure.number}.`,
-            context: {
-              chordId: chord.id,
-              startTick: chord.startTick,
-              measureStart: measure.startTick,
-              measureEnd: measure.endTick,
-            },
-          });
+        if (chord.startTick !== null && measure.startTick !== null && measure.endTick !== null) {
+          if (chord.startTick < measure.startTick || chord.startTick >= measure.endTick) {
+            errors.push({
+              code: 'CHORD_OUT_OF_MEASURE_BOUNDS',
+              message: `Acorde ${chord.id} inicia en tick ${chord.startTick}, fuera del compás ${measure.number}.`,
+              context: {
+                chordId: chord.id,
+                startTick: chord.startTick,
+                measureStart: measure.startTick,
+                measureEnd: measure.endTick,
+              },
+            });
+          }
         }
       }
 
@@ -195,16 +205,18 @@ export class CanonicalModelValidator {
           });
         }
 
-        if (lyric.tickOffset < 0 || lyric.tickOffset >= measure.durationTicks) {
-          errors.push({
-            code: 'LYRIC_TICK_OFFSET_OUT_OF_BOUNDS',
-            message: `Sílaba ${lyric.id} tiene offset ${lyric.tickOffset} ticks, fuera de la duración del compás ${measure.durationTicks}.`,
-            context: {
-              lyricId: lyric.id,
-              tickOffset: lyric.tickOffset,
-              measureDuration: measure.durationTicks,
-            },
-          });
+        if (lyric.tickOffset !== null && measure.durationTicks !== null) {
+          if (lyric.tickOffset < 0 || lyric.tickOffset >= measure.durationTicks) {
+            errors.push({
+              code: 'LYRIC_TICK_OFFSET_OUT_OF_BOUNDS',
+              message: `Sílaba ${lyric.id} tiene offset ${lyric.tickOffset} ticks, fuera de la duración del compás ${measure.durationTicks}.`,
+              context: {
+                lyricId: lyric.id,
+                tickOffset: lyric.tickOffset,
+                measureDuration: measure.durationTicks,
+              },
+            });
+          }
         }
       }
     }
@@ -221,15 +233,17 @@ export class CanonicalModelValidator {
     }
 
     // 4. Coherencia Global del Timeline
-    if (payload.timeline.totalDurationTicks !== expectedTick) {
-      errors.push({
-        code: 'TIMELINE_DURATION_MISMATCH',
-        message: `Timeline totalDurationTicks es ${payload.timeline.totalDurationTicks}, pero la suma de compases es ${expectedTick}.`,
-        context: {
-          timelineDuration: payload.timeline.totalDurationTicks,
-          measuresDuration: expectedTick,
-        },
-      });
+    if (payload.timeline.totalDurationTicks !== null && expectedTick !== null) {
+      if (payload.timeline.totalDurationTicks !== expectedTick) {
+        errors.push({
+          code: 'TIMELINE_DURATION_MISMATCH',
+          message: `Timeline totalDurationTicks es ${payload.timeline.totalDurationTicks}, pero la suma de compases es ${expectedTick}.`,
+          context: {
+            timelineDuration: payload.timeline.totalDurationTicks,
+            measuresDuration: expectedTick,
+          },
+        });
+      }
     }
 
     if (payload.timeline.measureCount !== payload.measures.length) {

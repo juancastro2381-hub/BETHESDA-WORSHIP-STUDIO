@@ -59,10 +59,25 @@ export class ChordProImporter implements MusicImporter {
 
     const lines = source.split(/\r?\n/);
 
+    interface ParsedChordItem {
+      chord: Chord;
+    }
+
+    interface ParsedLyricItem {
+      text: string;
+      isHyphenated: boolean;
+      chordAbove: Chord | null;
+    }
+
+    interface ParsedLineData {
+      chordTokens: ParsedChordItem[];
+      lyricTokens: ParsedLyricItem[];
+    }
+
     interface ParsedSectionData {
       type: SectionType;
       label: string;
-      lines: { chordTokens: { chord: Chord; tickFraction: number }[]; lyricTokens: string[] }[];
+      lines: ParsedLineData[];
     }
 
     const sectionsData: ParsedSectionData[] = [];
@@ -186,10 +201,16 @@ export class ChordProImporter implements MusicImporter {
         diagnostics.addWarning('INVALID_TIME_SIGNATURE', `Métrica no válida: "${rawTimeSig}". La estructura métrica se preserva como no medida.`);
         timeSignature = null;
       }
-    } else {
+    }
+
+    if (timeSignature === null) {
       diagnostics.addInfo(
         'UNRESOLVED_TIME_SIGNATURE',
         'El archivo ChordPro no declara directiva {time}. La estructura métrica se preserva como no medida (unmetered) sin asumir 4/4.'
+      );
+      diagnostics.addInfo(
+        'UNRESOLVED_TEMPORAL_STRUCTURE',
+        'El archivo ChordPro no declara directiva {time}. Las posiciones temporales (ticks) y duraciones se preservan como no resueltas (null) sin fabricar valores sintéticos.'
       );
     }
 
@@ -257,28 +278,21 @@ export class ChordProImporter implements MusicImporter {
 
             // Sílabas líricas de este compás (repartidas si aplica)
             if (mOffset === 0 && lyrics.length > 0) {
-              const lyricText = lyrics.join(' ').trim();
-              if (lyricText) {
-                const words = lyricText.split(/\s+/);
-                const slotTicks = Math.floor(measureDuration / Math.max(1, words.length));
-
-                for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                  const word = words[wIdx]!;
-                  const firstChord = measureChords[0]?.chord ?? null;
-
-                  measureLyrics.push(
-                    new LyricSyllable({
-                      id: `syl_m${mNum}_${wIdx + 1}`,
-                      text: word,
-                      isHyphenated: word.endsWith('-'),
-                      boundNoteId: null, // ¡Invariante: Sin nota melódica inventada!
-                      measureNumber: mNum,
-                      tickOffset: Math.min(measureDuration - 1, wIdx * slotTicks),
-                      sequenceNumber: syllableSequence++,
-                      chordAbove: wIdx === 0 ? firstChord : null,
-                    })
-                  );
-                }
+              const slotTicks = Math.floor(measureDuration / Math.max(1, lyrics.length));
+              for (let wIdx = 0; wIdx < lyrics.length; wIdx++) {
+                const item = lyrics[wIdx]!;
+                measureLyrics.push(
+                  new LyricSyllable({
+                    id: `syl_m${mNum}_${wIdx + 1}`,
+                    text: item.text,
+                    isHyphenated: item.isHyphenated,
+                    boundNoteId: null, // ¡Invariante: Sin nota melódica inventada!
+                    measureNumber: mNum,
+                    tickOffset: Math.min(measureDuration - 1, wIdx * slotTicks),
+                    sequenceNumber: syllableSequence++,
+                    chordAbove: item.chordAbove ?? (wIdx === 0 ? measureChords[0]?.chord ?? null : null),
+                  })
+                );
               }
             }
 
@@ -298,57 +312,39 @@ export class ChordProImporter implements MusicImporter {
             currentStartTick += measureDuration;
           }
         } else {
-          // CERO FABRICACIÓN: Estructura no medida (Unmetered). Cada línea representa un contenedor unmetered único sin 4/4 artificial
+          // CERO FABRICACIÓN: Estructura no medida (Unmetered).
+          // Cada línea representa un contenedor unmetered único sin compás artificial ni ticks inventados.
           const mNum = currentMeasureNum++;
-          const mTick = currentStartTick;
           const measureChords: ChordEvent[] = [];
           const measureLyrics: LyricSyllable[] = [];
 
-          // Duración proporcional a los eventos de la línea (sin asumir 1920 ni compás 4/4)
-          const chordSlotTicks = CANONICAL_TPQN;
-          const lyricText = lyrics.join(' ').trim();
-          const words = lyricText ? lyricText.split(/\s+/) : [];
-
-          const containerDuration = Math.max(
-            chords.length > 0 ? chords.length * chordSlotTicks : CANONICAL_TPQN,
-            words.length > 0 ? words.length * Math.floor(CANONICAL_TPQN / 2) : CANONICAL_TPQN
-          );
-
-          if (chords.length > 0) {
-            const chordSlot = Math.floor(containerDuration / chords.length);
-            for (let cIdx = 0; cIdx < chords.length; cIdx++) {
-              const ch = chords[cIdx]!;
-              measureChords.push(
-                new ChordEvent({
-                  id: `ch_m${mNum}_${cIdx + 1}`,
-                  chord: ch.chord,
-                  startTick: mTick + cIdx * chordSlot,
-                  durationTicks: chordSlot,
-                  measureNumber: mNum,
-                })
-              );
-            }
+          for (let cIdx = 0; cIdx < chords.length; cIdx++) {
+            const ch = chords[cIdx]!;
+            measureChords.push(
+              new ChordEvent({
+                id: `ch_m${mNum}_${cIdx + 1}`,
+                chord: ch.chord,
+                startTick: null,
+                durationTicks: null,
+                measureNumber: mNum,
+              })
+            );
           }
 
-          if (words.length > 0) {
-            const lyricSlot = Math.floor(containerDuration / words.length);
-            for (let wIdx = 0; wIdx < words.length; wIdx++) {
-              const word = words[wIdx]!;
-              const firstChord = measureChords[0]?.chord ?? null;
-
-              measureLyrics.push(
-                new LyricSyllable({
-                  id: `syl_m${mNum}_${wIdx + 1}`,
-                  text: word,
-                  isHyphenated: word.endsWith('-'),
-                  boundNoteId: null,
-                  measureNumber: mNum,
-                  tickOffset: Math.min(containerDuration - 1, wIdx * lyricSlot),
-                  sequenceNumber: syllableSequence++,
-                  chordAbove: wIdx === 0 ? firstChord : null,
-                })
-              );
-            }
+          for (let wIdx = 0; wIdx < lyrics.length; wIdx++) {
+            const item = lyrics[wIdx]!;
+            measureLyrics.push(
+              new LyricSyllable({
+                id: `syl_m${mNum}_${wIdx + 1}`,
+                text: item.text,
+                isHyphenated: item.isHyphenated,
+                boundNoteId: null,
+                measureNumber: mNum,
+                tickOffset: null,
+                sequenceNumber: syllableSequence++,
+                chordAbove: item.chordAbove,
+              })
+            );
           }
 
           canonicalMeasures.push(
@@ -356,21 +352,18 @@ export class ChordProImporter implements MusicImporter {
               number: mNum,
               timeSignature: null,
               keySignature: keySigRef,
-              startTick: mTick,
-              durationTicks: containerDuration,
+              startTick: null,
+              durationTicks: null,
               voices: [],
               chords: measureChords,
               lyrics: measureLyrics,
             })
           );
-
-          currentStartTick += containerDuration;
         }
       }
 
       const sectionMeasureCount = currentMeasureNum - sectionStartMeasure;
       if (sectionMeasureCount > 0) {
-        const sectionDuration = currentStartTick - sectionStartTick;
         canonicalSections.push(
           new Section({
             id: `sec_${sectionStartMeasure}_${secData.type.toLowerCase()}`,
@@ -378,8 +371,8 @@ export class ChordProImporter implements MusicImporter {
             label: secData.label || secData.type,
             startMeasure: sectionStartMeasure,
             measureCount: sectionMeasureCount,
-            startTick: sectionStartTick,
-            durationTicks: sectionDuration,
+            startTick: timeSignature !== null ? sectionStartTick : null,
+            durationTicks: timeSignature !== null ? (currentStartTick - sectionStartTick) : null,
           })
         );
       }
@@ -387,13 +380,14 @@ export class ChordProImporter implements MusicImporter {
 
     // Si no se generaron compases (ej. entrada vacía), crear al menos un compás vacío
     if (canonicalMeasures.length === 0) {
-      const emptyDuration = timeSignature ? timeSignature.calculateMeasureDurationTicks() : CANONICAL_TPQN;
+      const emptyDuration = timeSignature ? timeSignature.calculateMeasureDurationTicks() : null;
+      const emptyStart = timeSignature ? 0 : null;
       canonicalMeasures.push(
         new Measure({
           number: 1,
           timeSignature,
           keySignature: keySigRef,
-          startTick: 0,
+          startTick: emptyStart,
           durationTicks: emptyDuration,
         })
       );
@@ -404,11 +398,13 @@ export class ChordProImporter implements MusicImporter {
           label: 'Cuerpo',
           startMeasure: 1,
           measureCount: 1,
-          startTick: 0,
+          startTick: emptyStart,
           durationTicks: emptyDuration,
         })
       );
-      currentStartTick = emptyDuration;
+      if (timeSignature !== null && emptyDuration !== null) {
+        currentStartTick = emptyDuration;
+      }
     }
 
     // Pista instrumental estándar para Lead Sheet / Cifrado
@@ -425,7 +421,7 @@ export class ChordProImporter implements MusicImporter {
 
     const timeline = new Timeline({
       tpqn: CANONICAL_TPQN,
-      totalDurationTicks: currentStartTick,
+      totalDurationTicks: timeSignature !== null ? currentStartTick : null,
       measureCount: canonicalMeasures.length,
       tempoMap: bpm ? new TempoMap([new TempoEvent(0, bpm)]) : new TempoMap([]),
       isUnmetered: timeSignature === null,
@@ -472,14 +468,17 @@ export class ChordProImporter implements MusicImporter {
     line: string,
     lineNum: number,
     diagnostics: DiagnosticCollector
-  ): { chordTokens: { chord: Chord; tickFraction: number }[]; lyricTokens: string[] } {
-    const chordTokens: { chord: Chord; tickFraction: number }[] = [];
-    const lyricTokens: string[] = [];
+  ): {
+    chordTokens: { chord: Chord }[];
+    lyricTokens: { text: string; isHyphenated: boolean; chordAbove: Chord | null }[];
+  } {
+    const chordTokens: { chord: Chord }[] = [];
+    const lyricTokens: { text: string; isHyphenated: boolean; chordAbove: Chord | null }[] = [];
 
     // Formato: [G]Sublime [C]gracia
     const regex = /\[([^\]]+)\]|([^[]+)/g;
     let match: RegExpExecArray | null;
-    let tokenIdx = 0;
+    let pendingChord: Chord | null = null;
 
     while ((match = regex.exec(line)) !== null) {
       if (match[1]) {
@@ -488,7 +487,8 @@ export class ChordProImporter implements MusicImporter {
         if (chordStr && chordStr !== '|' && chordStr !== '/') {
           try {
             const chord = Chord.parse(chordStr);
-            chordTokens.push({ chord, tickFraction: tokenIdx });
+            chordTokens.push({ chord });
+            pendingChord = chord;
           } catch {
             diagnostics.addWarning('UNRECOGNIZED_CHORD', `Acorde no reconocido en ChordPro: "[${chordStr}]"`, {
               lineNumber: lineNum,
@@ -498,12 +498,23 @@ export class ChordProImporter implements MusicImporter {
         }
       } else if (match[2]) {
         // Texto lírico
-        const text = match[2].trim();
-        if (text && text !== '|') {
-          lyricTokens.push(text);
+        const textSegment = match[2];
+        if (textSegment && textSegment !== '|') {
+          const words = textSegment.trim().split(/\s+/).filter(Boolean);
+          for (let i = 0; i < words.length; i++) {
+            const word = words[i]!;
+            const chordForWord = i === 0 ? pendingChord : null;
+            lyricTokens.push({
+              text: word,
+              isHyphenated: word.endsWith('-'),
+              chordAbove: chordForWord,
+            });
+            if (i === 0) {
+              pendingChord = null;
+            }
+          }
         }
       }
-      tokenIdx++;
     }
 
     return { chordTokens, lyricTokens };

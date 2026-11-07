@@ -27,8 +27,8 @@ export interface ChordStructuredJSON {
 export interface ChordEventJSON {
   id: string;
   chord: ChordStructuredJSON;
-  startTick: number;
-  durationTicks?: number;
+  startTick: number | null;
+  durationTicks?: number | null;
   measureNumber: number;
   voice?: number;
 }
@@ -36,16 +36,16 @@ export interface ChordEventJSON {
 export class ChordEvent {
   public readonly id: string;
   public readonly chord: Chord;
-  public readonly startTick: number;
-  public readonly durationTicks?: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks?: number | null;
   public readonly measureNumber: number;
   public readonly voice?: number;
 
   public constructor(init: {
     id: string;
     chord: Chord;
-    startTick: number;
-    durationTicks?: number;
+    startTick: number | null;
+    durationTicks?: number | null;
     measureNumber: number;
     voice?: number;
   }) {
@@ -55,11 +55,15 @@ export class ChordEvent {
     if (!init.chord || !(init.chord instanceof Chord)) {
       throw new Error(`Objeto Chord requerido en evento ${init.id}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`Tick inicial de acorde inválido: ${init.startTick}. Debe ser >= 0.`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`Tick inicial de acorde inválido: ${init.startTick}. Debe ser >= 0 o null.`);
     }
-    if (init.durationTicks !== undefined && (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)) {
-      throw new Error(`Duración en ticks de acorde inválida: ${init.durationTicks}. Debe ser >= 1.`);
+    if (
+      init.durationTicks !== undefined &&
+      init.durationTicks !== null &&
+      (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)
+    ) {
+      throw new Error(`Duración en ticks de acorde inválida: ${init.durationTicks}. Debe ser >= 1 o null.`);
     }
     if (!Number.isInteger(init.measureNumber) || init.measureNumber <= 0) {
       throw new Error(`Número de compás de acorde inválido: ${init.measureNumber}. Debe ser >= 1.`);
@@ -68,13 +72,15 @@ export class ChordEvent {
     this.id = init.id;
     this.chord = init.chord;
     this.startTick = init.startTick;
-    if (init.durationTicks !== undefined) this.durationTicks = init.durationTicks;
+    this.durationTicks = init.durationTicks ?? null;
     this.measureNumber = init.measureNumber;
     if (init.voice !== undefined) this.voice = init.voice;
   }
 
-  public get endTick(): number | undefined {
-    return this.durationTicks !== undefined ? this.startTick + this.durationTicks : undefined;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null && this.durationTicks !== undefined
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public toJSON(): ChordEventJSON {
@@ -113,14 +119,14 @@ export class ChordEvent {
     const init: {
       id: string;
       chord: Chord;
-      startTick: number;
-      durationTicks?: number;
+      startTick: number | null;
+      durationTicks?: number | null;
       measureNumber: number;
       voice?: number;
     } = {
       id: json.id,
       chord,
-      startTick: json.startTick,
+      startTick: json.startTick ?? null,
       measureNumber: json.measureNumber,
     };
     if (json.durationTicks !== undefined) init.durationTicks = json.durationTicks;

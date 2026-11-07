@@ -132,8 +132,8 @@ describe('Reading Formats & Musician View Preferences Suite (Fase 3A — WP-03 /
       const restEvents = [
         new Rest({
           id: `rest-${m.number}-1`,
-          startTick: m.startTick,
-          durationTicks: m.durationTicks,
+          startTick: m.startTick ?? 0,
+          durationTicks: m.durationTicks ?? 1920,
           voice: 1,
           staff: 1,
         }),

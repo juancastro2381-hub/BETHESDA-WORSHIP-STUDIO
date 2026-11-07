@@ -47,7 +47,7 @@ export interface ImportStatistics {
   lyricCount: number;
   sectionCount: number;
   trackCount: number;
-  durationTicks: number;
+  durationTicks: number | null;
   durationSeconds: number | null;
 }
 

@@ -200,7 +200,7 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
 
       if (measure.notes.length === 0 && measure.chords.length > 0) {
         const defaultBeats: AlphaTabBeatData[] = measure.chords.map((ch) => ({
-          startTick: ch.startTick,
+          startTick: ch.startTick ?? 0,
           durationTicks: ch.durationTicks ?? 480,
           notes: [],
           chord: {
@@ -213,7 +213,7 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
       } else {
         const v1Beats = voiceBeatsMap.get(1) ?? [];
         for (const ch of measure.chords) {
-          const beat = v1Beats.find((b) => b.startTick === ch.startTick);
+          const beat = v1Beats.find((b) => ch.startTick !== null && b.startTick === ch.startTick);
           if (beat) {
             beat.chord = {
               name: ch.displayString,

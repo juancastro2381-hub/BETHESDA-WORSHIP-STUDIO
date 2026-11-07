@@ -158,7 +158,7 @@ export class MusicXmlImporter implements MusicImporter {
       const sections: Section[] = [];
       const canonicalMeasures: Measure[] = [];
 
-      let currentMeasureStartTick = 0;
+      let currentMeasureStartTick: number | null = 0;
       let lyricSequence = 1;
 
       for (let mIdx = 0; mIdx < rawMeasures.length; mIdx++) {
@@ -214,7 +214,7 @@ export class MusicXmlImporter implements MusicImporter {
         }
 
         // Calcular duración canónica del compás (CERO ASUNCIÓN DE 1920 / 4/4 CUANDO NO HAY MÉTRICA)
-        let calculatedDurationTicks = 0;
+        let calculatedDurationTicks: number | null = null;
         if (activeTimeSignature) {
           calculatedDurationTicks = activeTimeSignature.calculateMeasureDurationTicks();
         } else {
@@ -241,7 +241,16 @@ export class MusicXmlImporter implements MusicImporter {
               curTick = Math.max(0, curTick - durTicks);
             }
           }
-          calculatedDurationTicks = maxTick > 0 ? maxTick : CANONICAL_TPQN;
+          if (maxTick > 0) {
+            calculatedDurationTicks = maxTick;
+          } else {
+            calculatedDurationTicks = null;
+            diagnostics.addWarning(
+              'UNRESOLVED_MEASURE_DURATION',
+              `Compás ${measureNum}: Compás sin métrica declarada y sin eventos temporales válidos; la duración se preserva como no resuelta (null) sin fabricar 480 ticks.`,
+              { measureNumber: measureNum }
+            );
+          }
         }
         const measureDurationTicks = calculatedDurationTicks;
 
@@ -254,7 +263,7 @@ export class MusicXmlImporter implements MusicImporter {
             if (tempoAttr) {
               const parsedBpm = parseFloat(tempoAttr);
               if (parsedBpm > 0) {
-                tempoEvents.push(new TempoEvent(currentMeasureStartTick, parsedBpm));
+                tempoEvents.push(new TempoEvent(currentMeasureStartTick ?? 0, parsedBpm));
               }
             }
           }
@@ -294,12 +303,17 @@ export class MusicXmlImporter implements MusicImporter {
             const voiceId = child.childInt('voice') ?? 1;
             const staffId = child.childInt('staff') ?? 1;
 
-            const noteStartTick = isChord ? lastNoteTick : currentMeasureStartTick + currentTickInMeasure;
+            const noteStartTick = isChord ? lastNoteTick : (currentMeasureStartTick ?? 0) + currentTickInMeasure;
 
             if (isRest) {
               const durationEl = child.child('duration');
               const durationDiv = child.childInt('duration') ?? 0;
               if (durationEl === undefined) {
+                diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Silencio carece de elemento <duration>. Se omite el evento para evitar inventar duración.`,
+                  { measureNumber: measureNum, voiceId }
+                );
                 diagnostics.addWarning(
                   'MISSING_REST_DURATION',
                   `Compás ${measureNum}, voz ${voiceId}: Silencio carece de elemento <duration>. Se omite el evento para evitar inventar duración.`,
@@ -309,6 +323,11 @@ export class MusicXmlImporter implements MusicImporter {
               }
               if (durationDiv <= 0) {
                 diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración de silencio inválida (${durationDiv}). Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                diagnostics.addWarning(
                   'INVALID_REST_DURATION',
                   `Compás ${measureNum}, voz ${voiceId}: Duración de silencio inválida (${durationDiv}). Se omite el evento.`,
                   { measureNumber: measureNum, voiceId }
@@ -317,6 +336,11 @@ export class MusicXmlImporter implements MusicImporter {
               }
               const durationTicks = Math.round((durationDiv * CANONICAL_TPQN) / activeDivisions);
               if (durationTicks <= 0) {
+                diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
                 diagnostics.addWarning(
                   'INVALID_REST_DURATION',
                   `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. Se omite el evento.`,
@@ -348,6 +372,11 @@ export class MusicXmlImporter implements MusicImporter {
             const pitchEl = child.child('pitch');
             if (!pitchEl) {
               diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <note> carece de elemento <pitch>. No se inventa altura 'C4'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
                 'MISSING_PITCH',
                 `Compás ${measureNum}, voz ${voiceId}: Elemento <note> carece de elemento <pitch>. No se inventa altura 'C4'.`,
                 { measureNumber: measureNum, voiceId }
@@ -363,6 +392,11 @@ export class MusicXmlImporter implements MusicImporter {
             const stepRaw = pitchEl.childText('step')?.trim().toUpperCase();
             if (!stepRaw) {
               diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <step>. No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
                 'MISSING_PITCH_STEP',
                 `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <step>. No se inventa altura 'C'.`,
                 { measureNumber: measureNum, voiceId }
@@ -375,6 +409,11 @@ export class MusicXmlImporter implements MusicImporter {
               continue;
             }
             if (!['A', 'B', 'C', 'D', 'E', 'F', 'G'].includes(stepRaw)) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Altura <step> inválida ('${stepRaw}'). No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
               diagnostics.addWarning(
                 'INVALID_PITCH_STEP',
                 `Compás ${measureNum}, voz ${voiceId}: Altura <step> inválida ('${stepRaw}'). No se inventa altura 'C'.`,
@@ -392,6 +431,11 @@ export class MusicXmlImporter implements MusicImporter {
             const octaveRaw = pitchEl.child('octave');
             if (!octaveRaw || octaveRaw.text.trim() === '') {
               diagnostics.addWarning(
+                'UNRESOLVED_NOTE_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <octave>. No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
                 'MISSING_PITCH_OCTAVE',
                 `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <octave>. No se inventa octava 4.`,
                 { measureNumber: measureNum, voiceId }
@@ -405,6 +449,11 @@ export class MusicXmlImporter implements MusicImporter {
             }
             const octave = pitchEl.childInt('octave');
             if (octave === undefined || isNaN(octave) || octave < 0 || octave > 9) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Octava <octave> inválida ('${octaveRaw.text}'). No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
               diagnostics.addWarning(
                 'INVALID_PITCH_OCTAVE',
                 `Compás ${measureNum}, voz ${voiceId}: Octava <octave> inválida ('${octaveRaw.text}'). No se inventa octava 4.`,
@@ -421,6 +470,11 @@ export class MusicXmlImporter implements MusicImporter {
             const durationEl = child.child('duration');
             if (!durationEl || durationEl.text.trim() === '') {
               diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Nota carece de elemento <duration>. No se inventa duración artificial de 1 tick.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
                 'MISSING_NOTE_DURATION',
                 `Compás ${measureNum}, voz ${voiceId}: Nota carece de elemento <duration>. No se inventa duración artificial de 1 tick.`,
                 { measureNumber: measureNum, voiceId }
@@ -430,6 +484,11 @@ export class MusicXmlImporter implements MusicImporter {
             const durationDiv = child.childInt('duration') ?? 0;
             if (durationDiv <= 0) {
               diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración de nota inválida (${durationDiv}). No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
                 'INVALID_NOTE_DURATION',
                 `Compás ${measureNum}, voz ${voiceId}: Duración de nota inválida (${durationDiv}). No se inventa duración artificial.`,
                 { measureNumber: measureNum, voiceId }
@@ -438,6 +497,11 @@ export class MusicXmlImporter implements MusicImporter {
             }
             const durationTicks = Math.round((durationDiv * CANONICAL_TPQN) / activeDivisions);
             if (durationTicks <= 0) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
               diagnostics.addWarning(
                 'INVALID_NOTE_DURATION',
                 `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. No se inventa duración artificial.`,
@@ -550,8 +614,8 @@ export class MusicXmlImporter implements MusicImporter {
                 new ChordEvent({
                   id: `ch_m${measureNum}_${chordEvents.length + 1}`,
                   chord,
-                  startTick: currentMeasureStartTick + currentTickInMeasure,
-                  durationTicks: measureDurationTicks - currentTickInMeasure,
+                  startTick: currentMeasureStartTick !== null ? currentMeasureStartTick + currentTickInMeasure : null,
+                  durationTicks: measureDurationTicks !== null ? measureDurationTicks - currentTickInMeasure : null,
                   measureNumber: measureNum,
                 })
               );
@@ -581,17 +645,21 @@ export class MusicXmlImporter implements MusicImporter {
         // Construir Voces
         const voices: Voice[] = [];
         if (voiceEventsMap.size === 0) {
-          // Si no hubo eventos en voces, crear voz con silencio de compás completo
-          voices.push(
-            new Voice(1, [
-              new Rest({
-                id: `r_empty_m${measureNum}`,
-                startTick: currentMeasureStartTick,
-                durationTicks: measureDurationTicks,
-                voice: 1,
-              }),
-            ])
-          );
+          if (measureDurationTicks !== null && currentMeasureStartTick !== null) {
+            // Si no hubo eventos en voces y la duración está resuelta, crear voz con silencio de compás completo
+            voices.push(
+              new Voice(1, [
+                new Rest({
+                  id: `r_empty_m${measureNum}`,
+                  startTick: currentMeasureStartTick,
+                  durationTicks: measureDurationTicks,
+                  voice: 1,
+                }),
+              ])
+            );
+          } else {
+            voices.push(new Voice(1, []));
+          }
         } else {
           for (const [voiceId, events] of voiceEventsMap.entries()) {
             voices.push(new Voice(voiceId, events));
@@ -602,8 +670,8 @@ export class MusicXmlImporter implements MusicImporter {
           number: number;
           timeSignature: TimeSignature | null;
           keySignature: KeySignatureReference | null;
-          startTick: number;
-          durationTicks: number;
+          startTick: number | null;
+          durationTicks: number | null;
           voices: Voice[];
           chords: ChordEvent[];
           lyrics: LyricSyllable[];
@@ -625,7 +693,11 @@ export class MusicXmlImporter implements MusicImporter {
         if (endingNumber !== undefined) measureInit.endingNumber = endingNumber;
 
         canonicalMeasures.push(new Measure(measureInit));
-        currentMeasureStartTick += measureDurationTicks;
+        if (currentMeasureStartTick !== null && measureDurationTicks !== null) {
+          currentMeasureStartTick += measureDurationTicks;
+        } else {
+          currentMeasureStartTick = null;
+        }
       }
 
       // Diagnósticos de metadatos no resueltos (CERO INVENCIÓN SILENCIOSA)
@@ -654,7 +726,8 @@ export class MusicXmlImporter implements MusicImporter {
       const consolidatedSections = this.consolidateSections(sections, canonicalMeasures);
 
       // Línea de tiempo
-      const totalTicks = currentMeasureStartTick;
+      const hasUnresolvedMeasure = canonicalMeasures.some((m) => m.durationTicks === null);
+      const totalTicks = hasUnresolvedMeasure ? null : currentMeasureStartTick;
       const timeline = new Timeline({
         tpqn: CANONICAL_TPQN,
         totalDurationTicks: totalTicks,
@@ -818,7 +891,11 @@ export class MusicXmlImporter implements MusicImporter {
     const totalMeasures = canonicalMeasures.length;
     if (sections.length === 0) {
       // Crear sección por defecto abarcando toda la obra
-      const totalDuration = canonicalMeasures.reduce((sum, m) => sum + m.durationTicks, 0);
+      const hasNullDuration = canonicalMeasures.some((m) => m.durationTicks === null);
+      const totalDuration = hasNullDuration
+        ? null
+        : canonicalMeasures.reduce((sum, m) => sum + (m.durationTicks ?? 0), 0);
+      const startTick = canonicalMeasures[0]?.startTick ?? null;
       return [
         new Section({
           id: 'sec_main',
@@ -826,7 +903,7 @@ export class MusicXmlImporter implements MusicImporter {
           label: 'Cuerpo Principal',
           startMeasure: 1,
           measureCount: totalMeasures,
-          startTick: 0,
+          startTick,
           durationTicks: totalDuration,
         }),
       ];
@@ -840,7 +917,10 @@ export class MusicXmlImporter implements MusicImporter {
       const measureCount = Math.max(1, endM - current.startMeasure + 1);
 
       const sectionMeasures = canonicalMeasures.slice(current.startMeasure - 1, endM);
-      const sectionDuration = sectionMeasures.reduce((sum, m) => sum + m.durationTicks, 0);
+      const hasNullDuration = sectionMeasures.some((m) => m.durationTicks === null);
+      const sectionDuration = hasNullDuration
+        ? null
+        : sectionMeasures.reduce((sum, m) => sum + (m.durationTicks ?? 0), 0);
 
       consolidated.push(
         new Section({

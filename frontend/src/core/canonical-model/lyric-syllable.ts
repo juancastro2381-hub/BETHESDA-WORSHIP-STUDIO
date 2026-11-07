@@ -14,7 +14,7 @@ export interface LyricSyllableJSON {
   isHyphenated: boolean;
   boundNoteId: string | null;
   measureNumber: number;
-  tickOffset: number;
+  tickOffset: number | null;
   sequenceNumber: number;
   chordAbove: ChordStructuredJSON | null;
 }
@@ -25,7 +25,7 @@ export class LyricSyllable {
   public readonly isHyphenated: boolean;
   public readonly boundNoteId: string | null;
   public readonly measureNumber: number;
-  public readonly tickOffset: number;
+  public readonly tickOffset: number | null;
   public readonly sequenceNumber: number;
   public readonly chordAbove: Chord | null;
 
@@ -35,7 +35,7 @@ export class LyricSyllable {
     isHyphenated?: boolean;
     boundNoteId?: string | null;
     measureNumber: number;
-    tickOffset: number;
+    tickOffset: number | null;
     sequenceNumber: number;
     chordAbove?: Chord | null;
   }) {
@@ -48,8 +48,8 @@ export class LyricSyllable {
     if (!Number.isInteger(init.measureNumber) || init.measureNumber <= 0) {
       throw new Error(`Número de compás inválido en sílaba ${init.id}: ${init.measureNumber}`);
     }
-    if (!Number.isInteger(init.tickOffset) || init.tickOffset < 0) {
-      throw new Error(`Offset de tick inválido en sílaba ${init.id}: ${init.tickOffset}`);
+    if (init.tickOffset !== null && (!Number.isInteger(init.tickOffset) || init.tickOffset < 0)) {
+      throw new Error(`Offset de tick inválido en sílaba ${init.id}: ${init.tickOffset}. Debe ser >= 0 o null.`);
     }
     if (!Number.isInteger(init.sequenceNumber) || init.sequenceNumber < 0) {
       throw new Error(`Número de secuencia inválido en sílaba ${init.id}: ${init.sequenceNumber}`);

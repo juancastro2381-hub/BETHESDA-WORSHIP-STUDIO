@@ -17,8 +17,8 @@ export interface MeasureJSON {
   number: number;
   timeSignature?: TimeSignatureJSON | null;
   keySignature?: KeySignatureReferenceJSON | null;
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
   voices: VoiceJSON[];
   chords: ChordEventJSON[];
   lyrics: LyricSyllableJSON[];
@@ -32,8 +32,8 @@ export class Measure {
   public readonly number: number;
   public readonly timeSignature: TimeSignature | null;
   public readonly keySignature: KeySignatureReference | null;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly voices: readonly Voice[];
   public readonly chords: readonly ChordEvent[];
   public readonly lyrics: readonly LyricSyllable[];
@@ -46,8 +46,8 @@ export class Measure {
     number: number;
     timeSignature?: TimeSignature | null;
     keySignature?: KeySignatureReference | null;
-    startTick: number;
-    durationTicks?: number;
+    startTick: number | null;
+    durationTicks?: number | null;
     voices?: Voice[];
     chords?: ChordEvent[];
     lyrics?: LyricSyllable[];
@@ -65,14 +65,14 @@ export class Measure {
     if (init.keySignature !== undefined && init.keySignature !== null && !(init.keySignature instanceof KeySignatureReference)) {
       throw new Error(`KeySignatureReference inválido en compás ${init.number}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`startTick inválido en compás ${init.number}: ${init.startTick}`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`startTick inválido en compás ${init.number}: ${init.startTick}. Debe ser >= 0 o null.`);
     }
 
-    const calculatedDuration = init.timeSignature ? init.timeSignature.calculateMeasureDurationTicks() : undefined;
-    const duration = init.durationTicks ?? calculatedDuration ?? 0;
-    if (!Number.isInteger(duration) || duration < 0) {
-      throw new Error(`Duración en ticks inválida en compás ${init.number}: ${duration}`);
+    const calculatedDuration = init.timeSignature ? init.timeSignature.calculateMeasureDurationTicks() : null;
+    const duration = init.durationTicks !== undefined ? init.durationTicks : calculatedDuration;
+    if (duration !== null && (!Number.isInteger(duration) || duration < 0)) {
+      throw new Error(`Duración en ticks inválida en compás ${init.number}: ${duration}. Debe ser >= 0 o null.`);
     }
 
     this.number = init.number;
@@ -90,12 +90,15 @@ export class Measure {
     if (init.endingNumber !== undefined) this.endingNumber = init.endingNumber;
   }
 
-  public get endTick(): number {
-    return this.startTick + this.durationTicks;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public containsTick(tick: number): boolean {
-    return tick >= this.startTick && tick < this.endTick;
+    if (this.startTick === null || this.durationTicks === null) return false;
+    return tick >= this.startTick && tick < this.startTick + this.durationTicks;
   }
 
   public getVoice(voiceId: number): Voice | undefined {
@@ -139,8 +142,8 @@ export class Measure {
       number: number;
       timeSignature: TimeSignature | null;
       keySignature: KeySignatureReference | null;
-      startTick: number;
-      durationTicks: number;
+      startTick: number | null;
+      durationTicks: number | null;
       voices: Voice[];
       chords: ChordEvent[];
       lyrics: LyricSyllable[];
@@ -152,8 +155,8 @@ export class Measure {
       number: json.number,
       timeSignature,
       keySignature,
-      startTick: json.startTick,
-      durationTicks: json.durationTicks,
+      startTick: json.startTick ?? null,
+      durationTicks: json.durationTicks ?? null,
       voices,
       chords,
       lyrics,

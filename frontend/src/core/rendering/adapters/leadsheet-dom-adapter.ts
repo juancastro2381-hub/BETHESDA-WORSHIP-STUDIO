@@ -20,14 +20,14 @@ export interface LeadSheetTokenData {
   chord?: string | undefined;
   syllable?: string | undefined;
   isHyphenated: boolean;
-  tickOffset: number;
+  tickOffset: number | null;
 }
 
 export interface LeadSheetMeasureData {
   measureNumber: number;
   timeSignature: string;
   chords: {
-    startTick: number;
+    startTick: number | null;
     symbol: string;
     soundingSymbol: string;
     fingeringSymbol: string;
@@ -131,9 +131,15 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
       const tokens: LeadSheetTokenData[] = [];
 
       for (const lyr of measure.lyrics) {
-        const chordAtTick = chordsData.find((c) => c.startTick === lyr.tickOffset);
+        let chordSymbol = lyr.chordAbove
+          ? lyr.chordAbove.toString(view.viewPreference.chordNotationSystem)
+          : undefined;
+        if (!chordSymbol && lyr.tickOffset !== null) {
+          const chordAtTick = chordsData.find((c) => c.startTick !== null && c.startTick === lyr.tickOffset);
+          chordSymbol = chordAtTick?.symbol;
+        }
         tokens.push({
-          chord: chordAtTick?.symbol,
+          chord: chordSymbol,
           syllable: lyr.text,
           isHyphenated: lyr.isHyphenated,
           tickOffset: lyr.tickOffset,
@@ -141,7 +147,11 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
       }
 
       for (const ch of chordsData) {
-        if (!tokens.some((t) => t.tickOffset === ch.startTick)) {
+        const alreadyInToken = tokens.some((t) =>
+          (ch.startTick !== null && t.tickOffset === ch.startTick && t.chord === ch.symbol) ||
+          (ch.startTick === null && t.chord === ch.symbol)
+        );
+        if (!alreadyInToken) {
           tokens.push({
             chord: ch.symbol,
             isHyphenated: false,
@@ -150,7 +160,12 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
         }
       }
 
-      tokens.sort((a, b) => a.tickOffset - b.tickOffset);
+      tokens.sort((a, b) => {
+        if (a.tickOffset === null && b.tickOffset === null) return 0;
+        if (a.tickOffset === null) return 1;
+        if (b.tickOffset === null) return -1;
+        return a.tickOffset - b.tickOffset;
+      });
 
       return {
         measureNumber: measure.measureNumber,

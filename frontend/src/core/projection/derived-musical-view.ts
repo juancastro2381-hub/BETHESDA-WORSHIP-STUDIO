@@ -73,8 +73,8 @@ export interface DerivedChordInit {
   fingeringChord: Chord;
   displayString: string;
   soundingDisplayString: string;
-  startTick: number;
-  durationTicks?: number | undefined;
+  startTick: number | null;
+  durationTicks?: number | null | undefined;
   measureNumber: number;
   voice?: number | undefined;
   beat?: number | undefined;
@@ -87,8 +87,8 @@ export class DerivedChord {
   public readonly fingeringChord: Chord;
   public readonly displayString: string;
   public readonly soundingDisplayString: string;
-  public readonly startTick: number;
-  public readonly durationTicks?: number | undefined;
+  public readonly startTick: number | null;
+  public readonly durationTicks?: number | null | undefined;
   public readonly measureNumber: number;
   public readonly voice?: number | undefined;
   public readonly beat: number;
@@ -112,7 +112,7 @@ export interface DerivedLyricInit {
   id: string;
   text: string;
   measureNumber: number;
-  tickOffset: number;
+  tickOffset: number | null;
   sequenceNumber: number;
   isHyphenated?: boolean | undefined;
   boundNoteId?: string | null | undefined;
@@ -123,7 +123,7 @@ export class DerivedLyric {
   public readonly id: string;
   public readonly text: string;
   public readonly measureNumber: number;
-  public readonly tickOffset: number;
+  public readonly tickOffset: number | null;
   public readonly sequenceNumber: number;
   public readonly isHyphenated: boolean;
   public readonly boundNoteId: string | null;
@@ -146,8 +146,8 @@ export interface DerivedMeasureInit {
   timeSignature: TimeSignature | null;
   concertKeySignature: KeySignatureReference | null;
   writtenKeySignature: KeySignatureReference | null;
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
   notes?: DerivedNote[] | undefined;
   chords?: DerivedChord[] | undefined;
   lyrics?: DerivedLyric[] | undefined;
@@ -164,8 +164,8 @@ export class DerivedMeasure {
   public readonly timeSignature: TimeSignature | null;
   public readonly concertKeySignature: KeySignatureReference | null;
   public readonly writtenKeySignature: KeySignatureReference | null;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly notes: readonly DerivedNote[];
   public readonly chords: readonly DerivedChord[];
   public readonly lyrics: readonly DerivedLyric[];

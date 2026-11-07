@@ -12,8 +12,8 @@ export interface SectionJSON {
   label: string;
   startMeasure: number;
   measureCount: number;
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
 }
 
 export class Section {
@@ -22,8 +22,8 @@ export class Section {
   public readonly label: string;
   public readonly startMeasure: number;
   public readonly measureCount: number;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
 
   public constructor(init: {
     id: string;
@@ -31,8 +31,8 @@ export class Section {
     label: string;
     startMeasure: number;
     measureCount: number;
-    startTick: number;
-    durationTicks: number;
+    startTick: number | null;
+    durationTicks: number | null;
   }) {
     if (!init.id || typeof init.id !== 'string') {
       throw new Error(`ID de sección requerido e inválido: ${init.id}`);
@@ -43,11 +43,11 @@ export class Section {
     if (!Number.isInteger(init.measureCount) || init.measureCount <= 0) {
       throw new Error(`Cantidad de compases de sección inválida: ${init.measureCount}. Debe ser >= 1.`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`Tick inicial de sección inválido: ${init.startTick}. Debe ser >= 0.`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`Tick inicial de sección inválido: ${init.startTick}. Debe ser >= 0 o null.`);
     }
-    if (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0) {
-      throw new Error(`Duración en ticks de sección inválida: ${init.durationTicks}. Debe ser >= 1.`);
+    if (init.durationTicks !== null && (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)) {
+      throw new Error(`Duración en ticks de sección inválida: ${init.durationTicks}. Debe ser >= 1 o null.`);
     }
 
     this.id = init.id;
@@ -63,7 +63,10 @@ export class Section {
     return this.startMeasure + this.measureCount - 1;
   }
 
-  public get endTick(): number {
+  public get endTick(): number | null {
+    if (this.startTick === null || this.durationTicks === null) {
+      return null;
+    }
     return this.startTick + this.durationTicks;
   }
 
@@ -72,6 +75,9 @@ export class Section {
   }
 
   public containsTick(tick: number): boolean {
+    if (this.startTick === null || this.endTick === null) {
+      return false;
+    }
     return tick >= this.startTick && tick < this.endTick;
   }
 
@@ -88,6 +94,10 @@ export class Section {
   }
 
   public static fromJSON(json: SectionJSON): Section {
-    return new Section(json);
+    return new Section({
+      ...json,
+      startTick: json.startTick ?? null,
+      durationTicks: json.durationTicks ?? null,
+    });
   }
 }

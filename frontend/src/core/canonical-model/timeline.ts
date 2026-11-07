@@ -9,7 +9,7 @@ import { CANONICAL_TPQN } from './types.ts';
 
 export interface TimelineJSON {
   tpqn: number;
-  totalDurationTicks: number;
+  totalDurationTicks: number | null;
   measureCount: number;
   tempoMap: TempoMapJSON;
   isUnmetered?: boolean;
@@ -17,13 +17,13 @@ export interface TimelineJSON {
 
 export class Timeline {
   public readonly tpqn: number = CANONICAL_TPQN;
-  public readonly totalDurationTicks: number;
+  public readonly totalDurationTicks: number | null;
   public readonly measureCount: number;
   public readonly tempoMap: TempoMap;
   public readonly isUnmetered: boolean;
 
   public constructor(init: {
-    totalDurationTicks: number;
+    totalDurationTicks: number | null;
     measureCount: number;
     tempoMap?: TempoMap | undefined;
     tpqn?: number | undefined;
@@ -32,8 +32,8 @@ export class Timeline {
     if (init.tpqn !== undefined && init.tpqn !== CANONICAL_TPQN) {
       throw new Error(`Resolución TPQN no canónica: ${init.tpqn}. Bethesda Worship Studio exige exactamente ${CANONICAL_TPQN} TPQN.`);
     }
-    if (!Number.isInteger(init.totalDurationTicks) || init.totalDurationTicks < 0) {
-      throw new Error(`totalDurationTicks inválido: ${init.totalDurationTicks}. Debe ser >= 0.`);
+    if (init.totalDurationTicks !== null && (!Number.isInteger(init.totalDurationTicks) || init.totalDurationTicks < 0)) {
+      throw new Error(`totalDurationTicks inválido: ${init.totalDurationTicks}. Debe ser >= 0 o null.`);
     }
     if (!Number.isInteger(init.measureCount) || init.measureCount < 0) {
       throw new Error(`measureCount inválido: ${init.measureCount}. Debe ser >= 0.`);
@@ -46,7 +46,7 @@ export class Timeline {
   }
 
   public get totalDurationSeconds(): number | null {
-    if (this.tempoMap.isUnresolved) {
+    if (this.totalDurationTicks === null || this.tempoMap.isUnresolved) {
       return null;
     }
     return this.tempoMap.tickToSeconds(this.totalDurationTicks);
@@ -77,7 +77,7 @@ export class Timeline {
     const tempoMap = TempoMap.fromJSON(json.tempoMap);
     return new Timeline({
       tpqn: json.tpqn,
-      totalDurationTicks: json.totalDurationTicks,
+      totalDurationTicks: json.totalDurationTicks ?? null,
       measureCount: json.measureCount,
       tempoMap,
       isUnmetered: json.isUnmetered,

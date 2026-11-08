@@ -858,6 +858,247 @@ export class BethesdaApiClient {
     const json = await res.json();
     return json.data;
   }
+
+  // =========================================================================
+  // CENTRO DE CONVERSIÓN MUSICAL (Fase 2A-R)
+  // =========================================================================
+
+  /**
+   * Valida compatibilidad y matriz de capacidades de formato en el servidor.
+   */
+  public async validateConversionSource(payload: {
+    filename: string;
+    rawText?: string;
+    dataBase64?: string;
+  }): Promise<{
+    filename: string;
+    detectedCategory: string;
+    isSupportedInPhase2A: boolean;
+    reasonIfDeferred?: string;
+    viableTargets: Array<{
+      targetFormat: string;
+      displayName: string;
+      extension: string;
+      isSupported: boolean;
+      preservesFullNotation: boolean;
+      preservesHarmony: boolean;
+      preservesLyrics: boolean;
+      lossWarning?: string;
+    }>;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Ejecuta transpilación directa en memoria en el servidor.
+   */
+  public async transpileConversionDirect(payload: {
+    filename: string;
+    targetFormat: string;
+    rawText?: string;
+    dataBase64?: string;
+    options?: {
+      transposeSemitones?: number;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    };
+  }): Promise<{
+    success: boolean;
+    targetFormat: string;
+    filename: string;
+    mimeType: string;
+    content: string | Uint8Array;
+    diagnostics: Array<{
+      code: string;
+      severity: 'INFO' | 'WARNING' | 'ERROR';
+      message: string;
+      measureNumber?: number;
+    }>;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/transpile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Crea y encola un trabajo de conversión asíncrono con persistencia en pg-boss.
+   */
+  public async createConversionJob(payload: {
+    filename: string;
+    targetFormat: string;
+    rawText?: string;
+    dataBase64?: string;
+    options?: {
+      transposeSemitones?: number;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    };
+  }): Promise<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    errorDetails?: any;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Consulta el estado y progreso en tiempo real de un trabajo de conversión.
+   */
+  public async getConversionJob(jobId: string): Promise<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    errorDetails?: any;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista todos los trabajos de conversión del usuario autenticado.
+   */
+  public async listConversionJobs(): Promise<Array<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    createdAt: string;
+  }>> {
+    const res = await this.fetchWithAuth('/conversion/jobs', {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Reintenta un trabajo de conversión fallido tras verificar el hash SHA-256 del archivo en disco.
+   */
+  public async retryConversionJob(jobId: string): Promise<{
+    id: string;
+    status: string;
+    progress: number;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Cancela un trabajo de conversión en curso o pendiente.
+   */
+  public async cancelConversionJob(jobId: string): Promise<{
+    id: string;
+    status: string;
+    progress: number;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Descarga el archivo generado por el trabajo de conversión completado.
+   */
+  public async downloadConversionOutput(jobId: string): Promise<{
+    blob: Blob;
+    filename: string;
+    mimeType: string;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/download`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const contentDisposition = res.headers.get('content-disposition') || '';
+    let filename = 'conversion_output';
+    const match = contentDisposition.match(/filename="?([^";]+)"?/);
+    if (match && match[1]) {
+      filename = match[1];
+    }
+    const mimeType = res.headers.get('content-type') || 'application/octet-stream';
+    const blob = await res.blob();
+    return { blob, filename, mimeType };
+  }
+
+  /**
+   * Guarda el resultado convertido directamente en el catálogo de canciones de Bethesda (CR-06).
+   */
+  public async commitConversionJobToCatalog(
+    jobId: string,
+    overrides?: { title?: string; artist?: string }
+  ): Promise<any> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overrides ?? {}),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
 }
 
 export interface DocumentAnalysisSongDTO {

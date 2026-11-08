@@ -6,6 +6,11 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { CanonicalToMidiSerializer } from '../exporters/midi-serializer.ts';
+import { CanonicalMusicPayload } from '../../canonical-model/canonical-music-payload.ts';
+import { Measure } from '../../canonical-model/measure.ts';
+import { Voice } from '../../canonical-model/musical-event.ts';
+import { Timeline } from '../../canonical-model/timeline.ts';
+import { TempoMap } from '../../canonical-model/tempo-map.ts';
 import {
   createChordsAndLyricsOnlyFixture,
   createFullSongFixture,
@@ -92,5 +97,83 @@ describe('CanonicalToMidiSerializer Tests', () => {
 
     assert.strictEqual(result.success, true);
     assert.ok(result.content.length > 20);
+  });
+
+  it('should reject serialization and NOT clamp pitches when pitch is out of range 0-127 (CR-05)', () => {
+    const timeline = new Timeline({
+      totalDurationTicks: 1920,
+      measureCount: 1,
+      tempoMap: new TempoMap([]),
+    });
+    const badPitchNote = {
+      isRest: false,
+      id: 'bad-pitch-1',
+      pitch: { midiNumber: 135, toString: () => 'G10' },
+      startTick: 0,
+      durationTicks: 480,
+      voice: 1,
+      staff: 1,
+    } as any;
+    const badMeasure = new Measure({
+      number: 1,
+      startTick: 0,
+      durationTicks: 1920,
+      voices: [new Voice(1, [badPitchNote])],
+      chords: [],
+      lyrics: [],
+    });
+    const payload = new CanonicalMusicPayload({
+      title: 'Bad Pitch Song',
+      timeline,
+      measures: [badMeasure],
+    });
+
+    const result = CanonicalToMidiSerializer.serialize(payload);
+    assert.strictEqual(result.success, false, 'No debe tener éxito al encontrar alturas fuera de rango');
+    assert.strictEqual(result.content.length, 0);
+
+    const pitchError = result.diagnostics.find((d) => d.code === 'MIDI_PITCH_OUT_OF_RANGE');
+    assert.ok(pitchError, 'Debe registrar diagnóstico de error MIDI_PITCH_OUT_OF_RANGE');
+    assert.strictEqual(pitchError.severity, 'ERROR');
+    assert.ok(pitchError.message.includes('CERO fabricación'));
+  });
+
+  it('should reject serialization and NOT invent duration when durationTicks <= 0 (CR-05)', () => {
+    const timeline = new Timeline({
+      totalDurationTicks: 1920,
+      measureCount: 1,
+      tempoMap: new TempoMap([]),
+    });
+    const badDurationNote = {
+      isRest: false,
+      id: 'bad-duration-1',
+      pitch: { midiNumber: 60, toString: () => 'C4' },
+      startTick: 0,
+      durationTicks: 0, // Invalido: 0 ticks
+      voice: 1,
+      staff: 1,
+    } as any;
+    const badMeasure = new Measure({
+      number: 1,
+      startTick: 0,
+      durationTicks: 1920,
+      voices: [new Voice(1, [badDurationNote])],
+      chords: [],
+      lyrics: [],
+    });
+    const payload = new CanonicalMusicPayload({
+      title: 'Bad Duration Song',
+      timeline,
+      measures: [badMeasure],
+    });
+
+    const result = CanonicalToMidiSerializer.serialize(payload);
+    assert.strictEqual(result.success, false, 'No debe tener éxito con duración de nota <= 0');
+    assert.strictEqual(result.content.length, 0);
+
+    const durationError = result.diagnostics.find((d) => d.code === 'MIDI_INVALID_NOTE_DURATION');
+    assert.ok(durationError, 'Debe registrar diagnóstico de error MIDI_INVALID_NOTE_DURATION');
+    assert.strictEqual(durationError.severity, 'ERROR');
+    assert.ok(durationError.message.includes('CERO fabricación'));
   });
 });

@@ -72,6 +72,21 @@ export class CanonicalToMidiSerializer {
     // Pistas 1..N: Pistas de notas
     const musicTracksBytes = this.buildMusicTracks(payload, options, diagnostics);
 
+    // Principio de Cero-Fabricación: Si ocurrieron errores de integridad (alturas fuera de rango o duraciones inválidas),
+    // se prohíbe generar un archivo MIDI corrupto o clamped.
+    const hasIntegrityErrors = diagnostics.some((d) => d.severity === 'ERROR');
+    if (hasIntegrityErrors) {
+      return {
+        success: false,
+        targetFormat: 'MIDI',
+        filename: `${this.sanitizeFilename(payload.title)}.mid`,
+        mimeType: 'audio/midi',
+        content: new Uint8Array(0),
+        canonicalPayload: payload,
+        diagnostics,
+      };
+    }
+
     const totalTracks = 1 + musicTracksBytes.length;
 
     // Cabecera MThd (14 bytes):
@@ -208,19 +223,31 @@ export class CanonicalToMidiSerializer {
         for (const event of voice.events) {
           if (!event.isRest) {
             const note = event as Note;
+            // Principio de Cero-Fabricación: Validar duración fidedigna sin inventar 1 tick con Math.max
+            if (!Number.isFinite(note.durationTicks) || note.durationTicks <= 0) {
+              diagnostics.push({
+                code: 'MIDI_INVALID_NOTE_DURATION',
+                severity: 'ERROR',
+                message: `Duración de nota inválida (${note.durationTicks} ticks) en compás ${measure.number}. CERO fabricación: se prohíbe inventar duraciones arbitrarias.`,
+                measureNumber: measure.number,
+              });
+              continue;
+            }
+
             const startTick = measureStart + note.startTick;
-            const duration = Math.max(1, note.durationTicks);
+            const duration = note.durationTicks;
             const endTick = startTick + duration;
 
-            let pitchNum = note.pitch.midiNumber;
+            const pitchNum = note.pitch.midiNumber;
+            // Principio de Cero-Fabricación: Prohibido clamping que modifique notas (ej. C-1 a C0 o G9 a G8)
             if (pitchNum < 0 || pitchNum > 127) {
               diagnostics.push({
                 code: 'MIDI_PITCH_OUT_OF_RANGE',
-                severity: 'WARNING',
-                message: `Tono MIDI ${pitchNum} fuera de rango 0-127 en compás ${measure.number}. Ajustando a rango válido.`,
+                severity: 'ERROR',
+                message: `Tono MIDI ${pitchNum} fuera del rango físico representable (0-127) en compás ${measure.number}. CERO fabricación: se prohíbe el clamping que alteraría la altura musical.`,
                 measureNumber: measure.number,
               });
-              pitchNum = Math.max(0, Math.min(127, pitchNum));
+              continue;
             }
 
             const velocity = Math.max(1, Math.min(127, note.velocity ?? 80));

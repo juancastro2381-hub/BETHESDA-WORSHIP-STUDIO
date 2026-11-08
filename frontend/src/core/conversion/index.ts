@@ -6,5 +6,6 @@
 export * from './types.ts';
 export * from './format-capabilities.ts';
 export * from './conversion-engine.ts';
+export * from './conversion-transformer.ts';
 export * from './exporters/index.ts';
 

@@ -15,7 +15,8 @@ import {
 
 export class FormatCapabilitiesEvaluator {
   /**
-   * Detecta la categoría de fuente a partir del nombre de archivo y/o contenido en bytes/texto.
+   * Detecta la categoría de fuente a partir de inspección de Magic Bytes, estructura de contenido
+   * y extensión de archivo, garantizando detección fidedigna y prevención de extensiones falsificadas (CR-07).
    */
   public static detectSourceCategory(
     filename: string,
@@ -23,7 +24,114 @@ export class FormatCapabilitiesEvaluator {
   ): ConversionSourceCategory {
     const lowerName = filename.toLowerCase().trim();
 
-    // 1. Verificación por extensión de archivo
+    // 1. Verificación primaria por Magic Bytes (si se suministra buffer binario)
+    if (content instanceof Uint8Array && content.length >= 4) {
+      // 1.1 MIDI Header 'MThd' (0x4D 0x54 0x68 0x64)
+      if (
+        content[0] === 0x4d &&
+        content[1] === 0x54 &&
+        content[2] === 0x68 &&
+        content[3] === 0x64
+      ) {
+        return 'STRUCTURED_MIDI';
+      }
+
+      // 1.2 PDF Header '%PDF' (0x25 0x50 0x44 0x46)
+      if (
+        content[0] === 0x25 &&
+        content[1] === 0x50 &&
+        content[2] === 0x44 &&
+        content[3] === 0x46
+      ) {
+        return 'PDF_SCORE';
+      }
+
+      // 1.3 PNG Header (0x89 0x50 0x4E 0x47)
+      if (
+        content[0] === 0x89 &&
+        content[1] === 0x50 &&
+        content[2] === 0x4e &&
+        content[3] === 0x47
+      ) {
+        return 'IMAGE_SCORE';
+      }
+
+      // 1.4 JPEG Header (0xFF 0xD8 0xFF)
+      if (content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) {
+        return 'IMAGE_SCORE';
+      }
+
+      // 1.5 TIFF Header ('II*\0' o 'MM\0*')
+      if (
+        (content[0] === 0x49 && content[1] === 0x49 && content[2] === 0x2a && content[3] === 0x00) ||
+        (content[0] === 0x4d && content[1] === 0x4d && content[2] === 0x00 && content[3] === 0x2a)
+      ) {
+        return 'IMAGE_SCORE';
+      }
+
+      // 1.6 RIFF Container: WAV ('WAVE') o WebP ('WEBP')
+      if (
+        content.length >= 12 &&
+        content[0] === 0x52 &&
+        content[1] === 0x49 &&
+        content[2] === 0x46 &&
+        content[3] === 0x46
+      ) {
+        const subType = String.fromCharCode(content[8]!, content[9]!, content[10]!, content[11]!);
+        if (subType === 'WAVE') return 'AUDIO_RECORDING';
+        if (subType === 'WEBP') return 'IMAGE_SCORE';
+      }
+
+      // 1.7 Audio OGG ('OggS') o FLAC ('fLaC') o ID3 (MP3)
+      if (
+        content[0] === 0x4f &&
+        content[1] === 0x67 &&
+        content[2] === 0x67 &&
+        content[3] === 0x53
+      ) {
+        return 'AUDIO_RECORDING';
+      }
+      if (
+        content[0] === 0x66 &&
+        content[1] === 0x4c &&
+        content[2] === 0x61 &&
+        content[3] === 0x43
+      ) {
+        return 'AUDIO_RECORDING';
+      }
+      if (content[0] === 0x49 && content[1] === 0x44 && content[2] === 0x33) {
+        return 'AUDIO_RECORDING';
+      }
+    }
+
+    // 2. Verificación por estructura de texto
+    const textContent =
+      typeof content === 'string'
+        ? content
+        : content instanceof Uint8Array
+        ? new TextDecoder('utf-8', { fatal: false }).decode(content.slice(0, 4096))
+        : null;
+
+    if (textContent) {
+      const trimmed = textContent.trim();
+      if (
+        trimmed.startsWith('<?xml') &&
+        (trimmed.includes('<score-partwise') || trimmed.includes('<score-timewise>'))
+      ) {
+        return 'STRUCTURED_MUSICXML';
+      }
+      if (
+        /\{(title|key|tempo|start_of_chorus|soc|sov|start_of_verse):/i.test(trimmed) ||
+        /\[[A-G][b#]?[^\]]*\]/.test(trimmed)
+      ) {
+        return 'STRUCTURED_CHORDPRO';
+      }
+      if (trimmed.startsWith('{') && trimmed.includes('"version"') && trimmed.includes('"timeline"')) {
+        return 'WRITTEN_NOTES';
+      }
+    }
+
+    // 3. Verificación por extensión de archivo (cuando el contenido no es concluyente)
     if (lowerName.endsWith('.mid') || lowerName.endsWith('.midi')) {
       return 'STRUCTURED_MIDI';
     }
@@ -75,46 +183,6 @@ export class FormatCapabilitiesEvaluator {
     }
     if (lowerName.endsWith('.json')) {
       return 'WRITTEN_NOTES';
-    }
-
-    // 2. Verificación por inspección de contenido o Magic Bytes
-    if (content instanceof Uint8Array) {
-      // MIDI Header 'MThd' (0x4D 0x54 0x68 0x64)
-      if (
-        content.length >= 4 &&
-        content[0] === 0x4d &&
-        content[1] === 0x54 &&
-        content[2] === 0x68 &&
-        content[3] === 0x64
-      ) {
-        return 'STRUCTURED_MIDI';
-      }
-      // PDF Header '%PDF' (0x25 0x50 0x44 0x46)
-      if (
-        content.length >= 4 &&
-        content[0] === 0x25 &&
-        content[1] === 0x50 &&
-        content[2] === 0x44 &&
-        content[3] === 0x46
-      ) {
-        return 'PDF_SCORE';
-      }
-    }
-
-    if (typeof content === 'string') {
-      const trimmed = content.trim();
-      if (
-        trimmed.startsWith('<?xml') &&
-        (trimmed.includes('<score-partwise') || trimmed.includes('<score-timewise>'))
-      ) {
-        return 'STRUCTURED_MUSICXML';
-      }
-      if (
-        /\{(title|key|tempo|start_of_chorus|soc|sov|start_of_verse):/i.test(trimmed) ||
-        /\[[A-G][b#]?[^\]]*\]/.test(trimmed)
-      ) {
-        return 'STRUCTURED_CHORDPRO';
-      }
     }
 
     // Por defecto asume notas escritas si es texto general o desconocido

@@ -66,6 +66,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const [conversionStatus, setConversionStatus] = useState<
     'IDLE' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   >('IDLE');
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [exportResult, setExportResult] = useState<ConversionExportResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -169,6 +170,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setCapabilities([]);
     setExportResult(null);
     setConversionStatus('IDLE');
+    setActiveJobId(null);
     setProgress(0);
     setErrorMessage(null);
     if (fileInputRef.current) {
@@ -176,13 +178,97 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     }
   }, []);
 
+  const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]!);
+    }
+    return window.btoa(binary);
+  };
+
+  // Polling autoritativo del progreso del trabajo en el backend (CR-01)
+  useEffect(() => {
+    if (!activeJobId || conversionStatus !== 'PROCESSING') {
+      return;
+    }
+
+    let isMounted = true;
+    const interval = setInterval(async () => {
+      try {
+        const job = await client.getConversionJob(activeJobId);
+        if (!isMounted) return;
+
+        setProgress(job.progress || 20);
+
+        if (job.status === 'COMPLETED' || job.status === 'REVIEW_REQUIRED') {
+          clearInterval(interval);
+          setConversionStatus(job.status);
+          setProgress(100);
+
+          const details = job.errorDetails as any;
+          if (details) {
+            let canonicalPayload: CanonicalMusicPayload | undefined;
+            if (details.canonicalPayload) {
+              try {
+                canonicalPayload = CanonicalMusicPayload.fromJSON(details.canonicalPayload);
+              } catch (e) {
+                console.warn('No se pudo hidratar canonicalPayload:', e);
+              }
+            }
+
+            let content: string | Uint8Array = details.data ?? '';
+            if (details.isBinary && typeof details.data === 'string') {
+              const binStr = window.atob(details.data);
+              const bytes = new Uint8Array(binStr.length);
+              for (let i = 0; i < binStr.length; i++) {
+                bytes[i] = binStr.charCodeAt(i);
+              }
+              content = bytes;
+            }
+
+            setExportResult({
+              success: true,
+              targetFormat: details.targetFormat || selectedTarget,
+              filename: job.outputRef || selectedFile?.name || 'conversion_output',
+              mimeType: details.mimeType || 'text/plain',
+              content,
+              diagnostics: details.diagnostics || [],
+              canonicalPayload,
+            });
+          }
+        } else if (job.status === 'FAILED') {
+          clearInterval(interval);
+          setConversionStatus('FAILED');
+          const details = job.errorDetails as any;
+          setErrorMessage(
+            details?.diagnostics?.find((d: any) => d.severity === 'ERROR')?.message ||
+              (job as any).errorCode ||
+              'La conversión en segundo plano ha fallado.'
+          );
+        } else if (job.status === 'CANCELLED') {
+          clearInterval(interval);
+          setConversionStatus('CANCELLED');
+        }
+      } catch (err: any) {
+        console.warn('Error en sondeo de trabajo:', err.message);
+      }
+    }, 700);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeJobId, conversionStatus, client, selectedTarget, selectedFile]);
+
   // Ejecución de Conversión
   const handleStartConversion = useCallback(async () => {
     if (!selectedFile) return;
 
     setConversionStatus('PROCESSING');
-    setProgress(15);
+    setProgress(10);
     setErrorMessage(null);
+    setSavedToCatalog(false);
 
     const options: ConversionOptions = {
       targetFormat: selectedTarget,
@@ -192,6 +278,58 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       timeSignatureOverride: timeSignatureOverride.trim() || undefined,
     };
 
+    // Si el usuario está autenticado, usar el backend autoritativo con cola persistente (CR-01)
+    if (user) {
+      try {
+        let rawText: string | undefined = fileRawText ?? undefined;
+        let dataBase64: string | undefined;
+
+        if (!rawText && fileRawBytes) {
+          dataBase64 = uint8ArrayToBase64(fileRawBytes);
+        }
+
+        const apiOptions: {
+          transposeSemitones?: number;
+          keyOverride?: string;
+          bpmOverride?: number;
+          timeSignatureOverride?: string;
+        } = {};
+        if (options.transposeSemitones !== undefined) apiOptions.transposeSemitones = options.transposeSemitones;
+        if (options.keyOverride !== undefined) apiOptions.keyOverride = options.keyOverride;
+        if (options.bpmOverride !== undefined) apiOptions.bpmOverride = options.bpmOverride;
+        if (options.timeSignatureOverride !== undefined) apiOptions.timeSignatureOverride = options.timeSignatureOverride;
+
+        const jobPayload: {
+          filename: string;
+          targetFormat: string;
+          rawText?: string;
+          dataBase64?: string;
+          options?: {
+            transposeSemitones?: number;
+            keyOverride?: string;
+            bpmOverride?: number;
+            timeSignatureOverride?: string;
+          };
+        } = {
+          filename: selectedFile.name,
+          targetFormat: selectedTarget,
+          options: apiOptions,
+        };
+        if (rawText !== undefined) jobPayload.rawText = rawText;
+        if (dataBase64 !== undefined) jobPayload.dataBase64 = dataBase64;
+
+        const job = await client.createConversionJob(jobPayload);
+
+        setActiveJobId(job.id);
+        setProgress(job.progress || 15);
+      } catch (err: any) {
+        setConversionStatus('FAILED');
+        setErrorMessage(err.message || 'Error al iniciar trabajo de conversión en el servidor.');
+      }
+      return;
+    }
+
+    // Modo sin conexión o invitado: Transpilación local instantánea
     try {
       setProgress(40);
       let contentToConvert = fileRawText;
@@ -205,7 +343,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
 
       setProgress(70);
 
-      // Usar ConversionEngine del cliente para respuesta instantánea de alta fidelidad
       const result = engineRef.current.convertSource(
         contentToConvert,
         selectedFile.name,
@@ -238,10 +375,58 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     timeSignatureOverride,
     fileRawText,
     fileRawBytes,
+    user,
+    client,
   ]);
 
+  const handleCancelJob = useCallback(async () => {
+    if (!activeJobId) {
+      setConversionStatus('CANCELLED');
+      return;
+    }
+    try {
+      await client.cancelConversionJob(activeJobId);
+      setConversionStatus('CANCELLED');
+    } catch (err: any) {
+      alert(`Error al cancelar: ${err.message}`);
+    }
+  }, [activeJobId, client]);
+
+  const handleRetryJob = useCallback(async () => {
+    if (!activeJobId) {
+      handleStartConversion();
+      return;
+    }
+    try {
+      setConversionStatus('PROCESSING');
+      setProgress(15);
+      setErrorMessage(null);
+      await client.retryConversionJob(activeJobId);
+    } catch (err: any) {
+      setConversionStatus('FAILED');
+      setErrorMessage(err.message || 'Error al solicitar reintento.');
+    }
+  }, [activeJobId, client, handleStartConversion]);
+
   // Descarga del archivo convertido
-  const handleDownloadOutput = useCallback(() => {
+  const handleDownloadOutput = useCallback(async () => {
+    if (activeJobId && (conversionStatus === 'COMPLETED' || conversionStatus === 'REVIEW_REQUIRED')) {
+      try {
+        const { blob, filename } = await client.downloadConversionOutput(activeJobId);
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        return;
+      } catch (e) {
+        console.warn('Descarga por API falló, usando buffer local:', e);
+      }
+    }
+
     if (!exportResult || !exportResult.content) return;
 
     let blob: Blob;
@@ -259,7 +444,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  }, [exportResult]);
+  }, [activeJobId, conversionStatus, exportResult, client]);
 
   // Persistir en Catálogo de Canciones
   const handleSaveToCatalog = useCallback(async () => {
@@ -267,19 +452,22 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setSavingCatalog(true);
 
     try {
-      const contentStr =
-        typeof exportResult.content === 'string'
-          ? exportResult.content
-          : new TextDecoder().decode(exportResult.content);
-
-      await client.importAndPersist(contentStr, exportResult.filename);
+      if (activeJobId) {
+        await client.commitConversionJobToCatalog(activeJobId);
+      } else {
+        const contentStr =
+          typeof exportResult.content === 'string'
+            ? exportResult.content
+            : new TextDecoder().decode(exportResult.content);
+        await client.importAndPersist(contentStr, exportResult.filename);
+      }
       setSavedToCatalog(true);
     } catch (err: any) {
       alert(`Error al guardar en el catálogo: ${err.message}`);
     } finally {
       setSavingCatalog(false);
     }
-  }, [exportResult, user, client]);
+  }, [activeJobId, exportResult, user, client]);
 
   // Abrir en Atril Digital
   const handleOpenInStand = useCallback(() => {
@@ -622,6 +810,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   {conversionStatus === 'COMPLETED' && '✅ COMPLETADO'}
                   {conversionStatus === 'REVIEW_REQUIRED' && '⚠️ REVISIÓN REQUERIDA'}
                   {conversionStatus === 'FAILED' && '❌ FALLIDO'}
+                  {conversionStatus === 'CANCELLED' && '🛑 CANCELADO'}
                 </span>
               </div>
 
@@ -634,6 +823,63 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   aria-valuemin={0}
                   aria-valuemax={100}
                 />
+              </div>
+
+              <div className="queue-controls-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+                {conversionStatus === 'PROCESSING' && (
+                  <button
+                    type="button"
+                    className="btn-cancel-job"
+                    onClick={handleCancelJob}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.4)',
+                      color: '#f87171',
+                      borderRadius: '6px',
+                      padding: '0.35rem 0.75rem',
+                      fontSize: '0.825rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🛑 Cancelar Proceso
+                  </button>
+                )}
+                {conversionStatus === 'FAILED' && (
+                  <button
+                    type="button"
+                    className="btn-retry-job"
+                    onClick={handleRetryJob}
+                    style={{
+                      background: 'rgba(59, 130, 246, 0.15)',
+                      border: '1px solid rgba(59, 130, 246, 0.4)',
+                      color: '#60a5fa',
+                      borderRadius: '6px',
+                      padding: '0.35rem 0.75rem',
+                      fontSize: '0.825rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🔄 Reintentar Trabajo
+                  </button>
+                )}
+                {conversionStatus === 'CANCELLED' && (
+                  <button
+                    type="button"
+                    className="btn-retry-job"
+                    onClick={handleStartConversion}
+                    style={{
+                      background: 'rgba(59, 130, 246, 0.15)',
+                      border: '1px solid rgba(59, 130, 246, 0.4)',
+                      color: '#60a5fa',
+                      borderRadius: '6px',
+                      padding: '0.35rem 0.75rem',
+                      fontSize: '0.825rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🔄 Reiniciar Conversión
+                  </button>
+                )}
               </div>
 
               {errorMessage && <div className="conversion-error-alert">{errorMessage}</div>}

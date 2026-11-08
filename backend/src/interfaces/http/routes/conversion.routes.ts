@@ -73,6 +73,17 @@ const CommitInputSchema = z.object({
   artist: z.string().max(255).optional(),
 });
 
+function extractAuthenticatedUser(request: any): AuthenticatedUser {
+  if (!request.user || (!request.user.sub && !request.user.id)) {
+    throw new UnauthorizedError('Autenticación requerida para acceder a este recurso.');
+  }
+  return {
+    id: request.user.sub || request.user.id,
+    role: request.user.role,
+    email: request.user.email,
+  };
+}
+
 export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const userRepo = new DrizzleUserRepository();
@@ -116,10 +127,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 3. POST /api/v1/conversion/jobs (Exige autenticación)
   fastify.post('/jobs', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión para encolar trabajos de conversión.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const parsed = TranspileInputSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -137,10 +145,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 4. GET /api/v1/conversion/jobs
   fastify.get('/jobs', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión para listar trabajos.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const jobs = await conversionService.listUserJobs(user);
     return reply.status(200).send({
@@ -153,10 +158,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 5. GET /api/v1/conversion/jobs/:jobId
   fastify.get('/jobs/:jobId', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión para consultar el trabajo.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const { jobId } = request.params as { jobId: string };
     const job = await conversionService.getJob(jobId, user);
@@ -170,10 +172,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 6. POST /api/v1/conversion/jobs/:jobId/retry
   fastify.post('/jobs/:jobId/retry', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const { jobId } = request.params as { jobId: string };
     const retriedJob = await conversionService.retryJob(jobId, user);
@@ -187,10 +186,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 7. POST /api/v1/conversion/jobs/:jobId/cancel
   fastify.post('/jobs/:jobId/cancel', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const { jobId } = request.params as { jobId: string };
     const cancelledJob = await conversionService.cancelJob(jobId, user);
@@ -204,10 +200,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 8. GET /api/v1/conversion/jobs/:jobId/download
   fastify.get('/jobs/:jobId/download', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión para descargar.');
-    }
+    const user = extractAuthenticatedUser(request);
 
     const { jobId } = request.params as { jobId: string };
     const job = await conversionService.getJob(jobId, user);
@@ -234,7 +227,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   // 9. POST /api/v1/conversion/jobs/:jobId/commit
   fastify.post('/jobs/:jobId/commit', async (request, reply) => {
     await authGuard.authenticate(request, reply);
-    const user = (request as any).user as AuthenticatedUser;
+    const user = extractAuthenticatedUser(request);
     if (!user) {
       throw new UnauthorizedError('Se requiere iniciar sesión para guardar en el catálogo.');
     }

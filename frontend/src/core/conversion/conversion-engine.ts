@@ -10,6 +10,7 @@
 import { CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 import { UnifiedMusicImporter } from '../ingestion/unified-importer.ts';
 import { FormatCapabilitiesEvaluator } from './format-capabilities.ts';
+import { ConversionTransformer } from './conversion-transformer.ts';
 import {
   CanonicalToChordProSerializer,
   CanonicalToLyricsSerializer,
@@ -100,7 +101,8 @@ export class ConversionEngine {
   }
 
   /**
-   * Serializa directamente un CanonicalMusicPayload hacia el formato objetivo solicitado.
+   * Serializa directamente un CanonicalMusicPayload hacia el formato objetivo solicitado,
+   * aplicando de forma fidedigna opciones de transposición y anulaciones (CR-04 & CR-05).
    */
   public convertPayload(
     payload: CanonicalMusicPayload,
@@ -108,27 +110,51 @@ export class ConversionEngine {
   ): ConversionExportResult {
     const target = options.targetFormat;
 
+    // Aplicar opciones de transposición y anulación armónica (CR-04)
+    const { payload: transformedPayload, diagnostics: transformDiagnostics } =
+      ConversionTransformer.applyOptions(payload, options);
+
+    // Si la transformación produjo errores críticos (ej. nota transpuesta fuera de rango MIDI 0-127), fallar con diagnósticos
+    const hasTransformErrors = transformDiagnostics.some((d) => d.severity === 'ERROR');
+    if (hasTransformErrors) {
+      return {
+        success: false,
+        targetFormat: target,
+        filename: this.buildOutputFilename(payload.title, target),
+        mimeType: 'text/plain',
+        content: '',
+        canonicalPayload: payload,
+        diagnostics: transformDiagnostics,
+      };
+    }
+
+    let result: ConversionExportResult;
+
     switch (target) {
       case 'MUSIC_XML':
-        return CanonicalToMusicXmlSerializer.serialize(payload);
+        result = CanonicalToMusicXmlSerializer.serialize(transformedPayload);
+        break;
 
       case 'MIDI':
-        return CanonicalToMidiSerializer.serialize(payload);
+        result = CanonicalToMidiSerializer.serialize(transformedPayload);
+        break;
 
       case 'CHORD_PRO':
-        return CanonicalToChordProSerializer.serialize(payload);
+        result = CanonicalToChordProSerializer.serialize(transformedPayload);
+        break;
 
       case 'LYRICS_ONLY':
-        return CanonicalToLyricsSerializer.serialize(payload);
+        result = CanonicalToLyricsSerializer.serialize(transformedPayload);
+        break;
 
       case 'ENGRAVED_PDF':
-        return {
+        result = {
           success: false,
           targetFormat: 'ENGRAVED_PDF',
-          filename: `${this.sanitizeFilename(payload.title)}.pdf`,
+          filename: `${this.sanitizeFilename(transformedPayload.title)}.pdf`,
           mimeType: 'application/pdf',
           content: new Uint8Array(0),
-          canonicalPayload: payload,
+          canonicalPayload: transformedPayload,
           diagnostics: [
             {
               code: 'ENGRAVED_PDF_DEFERRED_PHASE',
@@ -138,15 +164,16 @@ export class ConversionEngine {
             },
           ],
         };
+        break;
 
       case 'TABLATURE':
-        return {
+        result = {
           success: false,
           targetFormat: 'TABLATURE',
-          filename: `${this.sanitizeFilename(payload.title)}.tab`,
+          filename: `${this.sanitizeFilename(transformedPayload.title)}.tab`,
           mimeType: 'text/plain',
           content: '',
-          canonicalPayload: payload,
+          canonicalPayload: transformedPayload,
           diagnostics: [
             {
               code: 'TABLATURE_DEFERRED_PHASE',
@@ -156,15 +183,16 @@ export class ConversionEngine {
             },
           ],
         };
+        break;
 
       default:
-        return {
+        result = {
           success: false,
           targetFormat: target,
           filename: 'conversion_error.txt',
           mimeType: 'text/plain',
           content: '',
-          canonicalPayload: payload,
+          canonicalPayload: transformedPayload,
           diagnostics: [
             {
               code: 'UNSUPPORTED_TARGET_FORMAT',
@@ -173,7 +201,13 @@ export class ConversionEngine {
             },
           ],
         };
+        break;
     }
+
+    return {
+      ...result,
+      diagnostics: [...transformDiagnostics, ...result.diagnostics],
+    };
   }
 
   private buildOutputFilename(inputFilename: string, targetFormat: ConversionOptions['targetFormat']): string {

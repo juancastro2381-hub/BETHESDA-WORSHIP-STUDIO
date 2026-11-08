@@ -338,6 +338,7 @@ export const songSources = pgTable(
     index('idx_song_sources_user_id').on(table.userId),
     index('idx_song_sources_checksum').on(table.checksumSha256),
     index('idx_song_sources_job_id').on(table.jobId),
+    uniqueIndex('idx_song_sources_job_id_unique').on(table.jobId),
   ]
 );
 
@@ -784,6 +785,11 @@ export const backgroundJobs = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp('started_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    leaseOwner: varchar('lease_owner', { length: 255 }),
+    leaseToken: varchar('lease_token', { length: 255 }),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
+    committedSongId: uuid('committed_song_id').references(() => songs.id, { onDelete: 'set null' }),
   },
   (table) => [
     index('idx_background_jobs_job_type').on(table.jobType),
@@ -791,6 +797,9 @@ export const backgroundJobs = pgTable(
     index('idx_background_jobs_user_id').on(table.userId),
     index('idx_background_jobs_correlation_id').on(table.correlationId),
     index('idx_background_jobs_created_at').on(table.createdAt),
+    index('idx_background_jobs_lease_expires').on(table.leaseExpiresAt),
+    index('idx_background_jobs_lease_token').on(table.leaseToken),
+    uniqueIndex('idx_background_jobs_committed_song_id').on(table.committedSongId),
   ]
 );
 
@@ -889,6 +898,10 @@ export const backgroundJobsRelations = relations(backgroundJobs, ({ one, many })
   user: one(users, {
     fields: [backgroundJobs.userId],
     references: [users.id],
+  }),
+  committedSong: one(songs, {
+    fields: [backgroundJobs.committedSongId],
+    references: [songs.id],
   }),
   proposals: many(omrProposals),
 }));

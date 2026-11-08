@@ -9,12 +9,13 @@
  */
 
 import crypto from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or, lt } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import { backgroundJobs, songSources, type BackgroundJobRow } from '../db/schema.ts';
 import {
   ForbiddenError,
   NotFoundError,
+  PersistenceError,
   ValidationError,
 } from '../domain/errors.ts';
 import type { AuthenticatedUser } from '../domain/auth-types.ts';
@@ -214,7 +215,7 @@ export class ConversionJobService {
       importerVersion: '2.0.0',
     });
 
-    // 5. Encolar en pg-boss (CR-02)
+    // 5. Encolar autoritativamente en pg-boss (CR-01)
     const jobPayload: ConversionJobPayload = {
       jobId: job.id,
       userId: user.id,
@@ -228,19 +229,14 @@ export class ConversionJobService {
 
     try {
       await enqueueConversionJob(jobPayload);
-    } catch {
-      // Si pg-boss no puede encolar inmediatamente, no detener la ejecución directa del worker
+    } catch (err: any) {
+      await this.jobRepo.failJob(job.id, 'QUEUE_UNAVAILABLE', {
+        message: err.message,
+      });
+      throw new PersistenceError(`No se pudo encolar el trabajo de conversión en el servicio persistente: ${err.message}`);
     }
 
-    // 6. Ejecución controlada en segundo plano por el worker
-    // Desacoplado con setImmediate para permitir respuesta HTTP rápida al cliente
-    setImmediate(async () => {
-      try {
-        await this.worker.processJob(jobPayload);
-      } catch (err: any) {
-        // Excepción de worker capturada internamente
-      }
-    });
+    // Zero direct setImmediate() processing! pg-boss es el mecanismo autoritativo exclusivo (CR-01).
 
     const createdJob = await this.jobRepo.findJobById(job.id);
     return createdJob!;
@@ -270,22 +266,56 @@ export class ConversionJobService {
   }
 
   /**
-   * Cancela un trabajo en ejecución o pendiente (anti-IDOR, CR-08).
+   * Cancela un trabajo en ejecución o pendiente de forma atómica y coordinada (CR-03).
+   * Los estados terminales (COMPLETED, REVIEW_REQUIRED, FAILED) son inmutables.
    */
   public async cancelJob(jobId: string, user: AuthenticatedUser): Promise<BackgroundJobRow> {
     const job = await this.getJob(jobId, user);
-    if (job.status === 'COMPLETED') {
-      throw new ValidationError('No se puede cancelar un trabajo que ya ha sido completado.');
+    if (job.status === 'CANCELLED') {
+      throw new ValidationError('El trabajo ya se encuentra cancelado.');
     }
-    await this.jobRepo.updateJobProgress(jobId, job.progress, 'CANCELLED');
-    return (await this.jobRepo.findJobById(jobId))!;
+    if (job.status === 'COMPLETED' || job.status === 'REVIEW_REQUIRED' || job.status === 'FAILED') {
+      throw new ValidationError('No se puede cancelar un trabajo que ya se encuentra en estado terminal.');
+    }
+
+    const [cancelled] = await this.db
+      .update(backgroundJobs)
+      .set({
+        status: 'CANCELLED',
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(backgroundJobs.id, jobId),
+          or(
+            eq(backgroundJobs.status, 'PENDING'),
+            eq(backgroundJobs.status, 'PROCESSING')
+          )
+        )
+      )
+      .returning();
+
+    if (!cancelled) {
+      const current = await this.jobRepo.findJobById(jobId);
+      if (current && (current.status === 'COMPLETED' || current.status === 'REVIEW_REQUIRED')) {
+        throw new ValidationError('El trabajo acaba de completarse y ya no puede ser cancelado.');
+      }
+      return current!;
+    }
+
+    return cancelled;
   }
 
   /**
-   * Reintenta un trabajo fallido o cancelado utilizando la fuente física inmutable (CR-03).
+   * Reintenta un trabajo fallido o cancelado utilizando la fuente física inmutable y verificación criptográfica (CR-03).
    */
   public async retryJob(jobId: string, user: AuthenticatedUser): Promise<BackgroundJobRow> {
     const job = await this.getJob(jobId, user);
+    if (job.status !== 'FAILED' && job.status !== 'CANCELLED') {
+      throw new ValidationError('Solo se pueden reintentar trabajos que se encuentren en estado FAILED o CANCELLED.');
+    }
+
     const details = job.errorDetails as any;
     const storageKey = details?.storageKey;
     const checksumSha256 = details?.checksumSha256;
@@ -303,8 +333,20 @@ export class ConversionJobService {
       throw new Error('Violación de Integridad Criptográfica: El archivo físico fue alterado.');
     }
 
-    // Reiniciar trabajo a PENDING y progreso 0
-    await this.jobRepo.updateJobProgress(jobId, 0, 'PENDING');
+    // Reiniciar trabajo a PENDING, progreso 0, y limpiar arrendamientos anteriores
+    await this.db
+      .update(backgroundJobs)
+      .set({
+        status: 'PENDING',
+        progress: 0,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        completedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(backgroundJobs.id, jobId));
 
     const jobPayload: ConversionJobPayload = {
       jobId,
@@ -319,23 +361,18 @@ export class ConversionJobService {
 
     try {
       await enqueueConversionJob(jobPayload);
-    } catch {
-      // Ignorar fallback
+    } catch (err: any) {
+      throw new PersistenceError(`No se pudo reencolar el trabajo en pg-boss: ${err.message}`);
     }
 
-    setImmediate(async () => {
-      try {
-        await this.worker.processJob(jobPayload);
-      } catch {}
-    });
+    // Zero direct setImmediate() processing!
 
     return (await this.jobRepo.findJobById(jobId))!;
   }
 
   /**
-   * Guarda el resultado convertido directamente en el catálogo de canciones de Bethesda (CR-06).
-   * Recupera el CanonicalMusicPayload real generado durante la conversión, valida su completitud
-   * estructural y garantiza idempotencia relacional.
+   * Guarda el resultado convertido directamente en el catálogo de canciones de Bethesda (CR-05).
+   * Ejecuta dentro de una transacción serializable con bloqueo FOR UPDATE e idempotencia estricta.
    */
   public async commitJobToCatalog(
     jobId: string,
@@ -345,84 +382,126 @@ export class ConversionJobService {
     if (!this.songService) {
       throw new ValidationError('SongService no disponible para persistir al catálogo.');
     }
+    const songService = this.songService;
 
-    const job = await this.getJob(jobId, user);
-    if (job.status !== 'COMPLETED' && job.status !== 'REVIEW_REQUIRED') {
-      throw new ValidationError('Solo se pueden agregar al catálogo trabajos completados o revisados.');
-    }
+    return await this.db.transaction(async (tx) => {
+      // 1. Bloqueo pesimista de fila en background_jobs con FOR UPDATE (CR-05)
+      const [job] = await tx
+        .select()
+        .from(backgroundJobs)
+        .where(eq(backgroundJobs.id, jobId))
+        .for('update');
 
-    // 1. Idempotencia: Verificar si este trabajo ya fue registrado en el catálogo
-    const sources = await this.db
-      .select()
-      .from(songSources)
-      .where(eq(songSources.jobId, jobId));
+      if (!job) {
+        throw new NotFoundError('Trabajo de conversión', jobId);
+      }
 
-    const existingLinkedSource = sources.find((s) => s.songId !== null);
-    if (existingLinkedSource && existingLinkedSource.songId) {
-      // Retornar la canción existente (idempotente)
-      return await this.songService.getSong(existingLinkedSource.songId);
-    }
+      // Verificación de autorización anti-IDOR
+      const isOwner = job.userId === user.id;
+      const isPrivileged = user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
+      if (!isOwner && !isPrivileged) {
+        throw new ForbiddenError('No tienes autorización para consultar este trabajo de conversión.');
+      }
 
-    // 2. Extraer el grafo canónico real serializado durante la conversión
-    const details = job.errorDetails as any;
-    const rawCanonicalJson = details?.canonicalPayload;
+      // Verificación de estado terminal válido
+      if (job.status !== 'COMPLETED' && job.status !== 'REVIEW_REQUIRED') {
+        throw new ValidationError('Solo se pueden agregar al catálogo trabajos completados o revisados.');
+      }
 
-    if (!rawCanonicalJson) {
-      throw new ValidationError(
-        'El trabajo de conversión no generó un CanonicalMusicPayload válido para persistencia en catálogo.'
-      );
-    }
+      // 2. Idempotencia Nivel 1: Si ya fue comprometido previamente en background_jobs
+      if (job.committedSongId) {
+        return await songService.getSong(job.committedSongId);
+      }
 
-    // 3. Deserializar e hidratar el CanonicalMusicPayload fidedigno (CR-06)
-    const canonicalPayload = CanonicalDeserializer.deserialize(rawCanonicalJson);
+      // 3. Idempotencia Nivel 2: Verificar si ya existe una fuente asociada con song_id
+      const sources = await tx
+        .select()
+        .from(songSources)
+        .where(eq(songSources.jobId, jobId));
 
-    // 4. Determinar metadatos fidedignos
-    const title = overrides?.title || canonicalPayload.title || job.inputRef.replace(/\.[^.]+$/, '') || 'Canción Convertida';
-    const artist =
-      overrides?.artist ||
-      (typeof canonicalPayload.metadata?.artist === 'string'
-        ? canonicalPayload.metadata.artist
-        : 'Autor Desconocido');
+      const existingLinkedSource = sources.find((s) => s.songId !== null);
+      if (existingLinkedSource && existingLinkedSource.songId) {
+        await tx
+          .update(backgroundJobs)
+          .set({ committedSongId: existingLinkedSource.songId })
+          .where(eq(backgroundJobs.id, jobId));
+        return await songService.getSong(existingLinkedSource.songId);
+      }
 
-    // 5. Persistir en el catálogo canónico mediante SongService
-    const song = await this.songService.createSong({
-      title,
-      artist,
-      sourceFormat: this.mapCategoryToFormat(details.targetFormat),
-      canonicalPayload: rawCanonicalJson,
-      sourceRecord: {
-        userId: user.id,
-        sourceType: this.mapCategoryToFormat(details.targetFormat),
-        filename: job.outputRef || job.inputRef,
-        rawContent: details?.data ? (details.isBinary ? null : details.data) : null,
-        importerName: 'ConversionJobService',
-        importerVersion: '2.0.0',
-      },
-    });
+      // 4. Extraer el grafo canónico real serializado durante la conversión
+      const details = job.errorDetails as any;
+      const rawCanonicalJson = details?.canonicalPayload;
 
-    // 6. Vincular o insertar el registro de song_sources al song_id recién creado
-    if (sources.length > 0 && sources[0]) {
-      await this.db
-        .update(songSources)
-        .set({ songId: song.song.id })
-        .where(eq(songSources.id, sources[0].id));
-    } else {
-      await this.db.insert(songSources).values({
-        userId: user.id,
-        sourceType: this.mapCategoryToFormat(details.targetFormat),
-        filename: job.outputRef || job.inputRef,
-        storagePath: details?.storageKey || 'conversion-result',
-        mimeType: details?.mimeType || 'text/plain',
-        fileSizeBytes: Buffer.byteLength(details?.data || ''),
-        checksumSha256: crypto.createHash('sha256').update(details?.data || '').digest('hex'),
-        jobId: job.id,
-        songId: song.song.id,
-        importerName: 'ConversionJobService',
-        importerVersion: '2.0.0',
+      if (!rawCanonicalJson) {
+        throw new ValidationError(
+          'El trabajo de conversión no generó un CanonicalMusicPayload válido para persistencia en catálogo.'
+        );
+      }
+
+      const canonicalPayload = CanonicalDeserializer.deserialize(rawCanonicalJson);
+
+      const title =
+        overrides?.title ||
+        canonicalPayload.title ||
+        job.inputRef.replace(/\.[^.]+$/, '') ||
+        'Canción Convertida';
+
+      const artist =
+        overrides?.artist ||
+        (typeof canonicalPayload.metadata?.artist === 'string'
+          ? canonicalPayload.metadata.artist
+          : 'Autor Desconocido');
+
+      // 5. Persistir en el catálogo canónico mediante SongService
+      const song = await songService.createSong({
+        title,
+        artist,
+        sourceFormat: this.mapCategoryToFormat(details.targetFormat),
+        canonicalPayload: rawCanonicalJson,
+        sourceRecord: {
+          userId: user.id,
+          sourceType: this.mapCategoryToFormat(details.targetFormat),
+          filename: job.outputRef || job.inputRef,
+          rawContent: details?.data ? (details.isBinary ? null : details.data) : null,
+          importerName: 'ConversionJobService',
+          importerVersion: '2.0.0',
+        },
       });
-    }
 
-    return song;
+      // 6. Registrar atómicamente el song_id comprometido en background_jobs
+      await tx
+        .update(backgroundJobs)
+        .set({ committedSongId: song.song.id })
+        .where(eq(backgroundJobs.id, jobId));
+
+      // 7. Vincular o insertar el registro de song_sources al song_id recién creado
+      if (sources.length > 0 && sources[0]) {
+        await tx
+          .update(songSources)
+          .set({
+            songId: song.song.id,
+            versionId: song.version.id,
+          })
+          .where(eq(songSources.id, sources[0].id));
+      } else {
+        await tx.insert(songSources).values({
+          userId: user.id,
+          sourceType: this.mapCategoryToFormat(details.targetFormat),
+          filename: job.outputRef || job.inputRef,
+          storagePath: details?.storageKey || 'conversion-result',
+          mimeType: details?.mimeType || 'text/plain',
+          fileSizeBytes: Buffer.byteLength(details?.data || ''),
+          checksumSha256: crypto.createHash('sha256').update(details?.data || '').digest('hex'),
+          jobId: job.id,
+          songId: song.song.id,
+          versionId: song.version.id,
+          importerName: 'ConversionJobService',
+          importerVersion: '2.0.0',
+        });
+      }
+
+      return song;
+    });
   }
 
   private extractContent(input: { rawText?: string | undefined; dataBase64?: string | undefined }): string | Uint8Array {

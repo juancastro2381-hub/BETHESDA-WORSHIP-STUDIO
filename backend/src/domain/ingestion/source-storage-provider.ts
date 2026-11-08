@@ -78,9 +78,21 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
     const storageKey = `${checksumSha256}${ext}`;
     const targetPath = this.resolveSafePath(storageKey);
 
-    // Escribir archivo si aún no existe (idempotencia en almacenamiento físico)
+    // Escribir archivo atómicamente mediante archivo temporal y renombrado atómico (CR-06)
     if (!fs.existsSync(targetPath)) {
-      await fs.promises.writeFile(targetPath, buffer);
+      const tempPath = `${targetPath}.tmp.${crypto.randomUUID()}`;
+      try {
+        await fs.promises.writeFile(tempPath, buffer);
+        await fs.promises.rename(tempPath, targetPath);
+      } catch (err) {
+        if (fs.existsSync(tempPath)) {
+          await fs.promises.unlink(tempPath).catch(() => {});
+        }
+        // Si el archivo de destino ya existe (escritura concurrente idempotente), no fallar
+        if (!fs.existsSync(targetPath)) {
+          throw err;
+        }
+      }
     }
 
     return {

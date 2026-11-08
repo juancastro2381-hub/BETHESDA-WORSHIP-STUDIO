@@ -9,6 +9,7 @@
 
 import { PgBoss } from 'pg-boss';
 import { env } from '../../config/env.ts';
+import { PersistenceError } from '../../domain/errors.ts';
 
 export type ConversionTargetFormat =
   | 'MUSIC_XML'
@@ -46,6 +47,7 @@ export interface ConversionJobPayload {
 
 let bossInstance: PgBoss | null = null;
 let isStarted = false;
+let startPromise: Promise<PgBoss> | null = null;
 
 /**
  * Obtiene o crea la instancia singleton de PgBoss conectada a la base de datos correspondiente.
@@ -68,16 +70,42 @@ export function getConversionQueue(): PgBoss {
 }
 
 /**
+ * Verifica si la cola de conversión está iniciada y lista para operar.
+ */
+export function isConversionQueueReady(): boolean {
+  return isStarted && bossInstance !== null;
+}
+
+/**
  * Inicia la infraestructura de colas de pg-boss y crea la cola de conversión si no existe.
+ * Idempotente y seguro ante llamadas concurrentes múltiples.
  */
 export async function startConversionQueue(): Promise<PgBoss> {
-  const boss = getConversionQueue();
-  if (!isStarted) {
-    await boss.start();
-    await boss.createQueue(CONVERSION_QUEUE_NAME);
-    isStarted = true;
+  if (isStarted && bossInstance) {
+    return bossInstance;
   }
-  return boss;
+
+  if (startPromise) {
+    return await startPromise;
+  }
+
+  startPromise = (async () => {
+    try {
+      const boss = getConversionQueue();
+      await boss.start();
+      await boss.createQueue(CONVERSION_QUEUE_NAME);
+      isStarted = true;
+      return boss;
+    } catch (err: any) {
+      isStarted = false;
+      bossInstance = null;
+      throw new PersistenceError(`Fallo al inicializar cola pg-boss: ${err.message}`);
+    } finally {
+      startPromise = null;
+    }
+  })();
+
+  return await startPromise;
 }
 
 /**
@@ -92,13 +120,25 @@ export async function stopConversionQueue(): Promise<void> {
 }
 
 /**
- * Encola un nuevo trabajo de conversión en pg-boss.
+ * Encola un nuevo trabajo de conversión en pg-boss como mecanismo autoritativo (CR-01).
+ * Si la cola no está disponible o el encolado falla, lanza PersistenceError sin bypass en memoria.
  */
-export async function enqueueConversionJob(payload: ConversionJobPayload): Promise<string | null> {
+export async function enqueueConversionJob(payload: ConversionJobPayload): Promise<string> {
   const boss = await startConversionQueue();
-  return await boss.send(CONVERSION_QUEUE_NAME, payload, {
-    retryLimit: 2,
-    retryDelay: 5,
-    expireInSeconds: 300, // 5 minutos de tiempo límite por trabajo
-  });
+  try {
+    const jobId = await boss.send(CONVERSION_QUEUE_NAME, payload, {
+      retryLimit: 2,
+      retryDelay: 5,
+      expireInSeconds: 300, // 5 minutos de tiempo límite por trabajo
+    });
+
+    if (!jobId) {
+      throw new PersistenceError('pg-boss rechazó el encolado del trabajo (retornó null).');
+    }
+
+    return jobId;
+  } catch (err: any) {
+    if (err instanceof PersistenceError) throw err;
+    throw new PersistenceError(`Fallo al encolar trabajo en pg-boss: ${err.message}`);
+  }
 }

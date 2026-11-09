@@ -30,6 +30,35 @@ import {
 } from '../../../frontend/src/core/conversion/index.ts';
 import { CanonicalSerializer } from '../domain/canonical-serializer.ts';
 
+export class TransientWorkerError extends Error {
+  public constructor(message: string, public readonly originalError?: unknown) {
+    super(message);
+    this.name = 'TransientWorkerError';
+  }
+}
+
+export function isTransientError(err: any): boolean {
+  if (err instanceof TransientWorkerError) return true;
+  if (!err) return false;
+  const msg = String(err.message || '').toLowerCase();
+  const code = String(err.code || '').toLowerCase();
+  return (
+    code === 'econnreset' ||
+    code === 'econnrefused' ||
+    code === 'etimedout' ||
+    code === '57p01' || // PostgreSQL admin shutdown
+    code === '08006' || // PostgreSQL connection failure
+    code === '08001' || // PostgreSQL unable to establish connection
+    code === '40001' || // PostgreSQL serialization failure / deadlock
+    msg.includes('connection terminated') ||
+    msg.includes('timeout') ||
+    msg.includes('network') ||
+    msg.includes('transient') ||
+    msg.includes('econnreset') ||
+    msg.includes('deadlock')
+  );
+}
+
 export class ConversionWorker {
   public static readonly LEASE_DURATION_MS = 60_000; // 60 segundos de validez de arrendamiento
   public static readonly HEARTBEAT_INTERVAL_MS = 15_000; // 15 segundos entre renovaciones de latido
@@ -162,6 +191,26 @@ export class ConversionWorker {
 
       const sourceCategory = FormatCapabilitiesEvaluator.detectSourceCategory(filename, sourceBuffer);
 
+      if (sourceCategory === 'UNKNOWN_UNSUPPORTED') {
+        const errCode = 'UNKNOWN_OR_UNSUPPORTED_FORMAT';
+        const unsupportedMsg = `El archivo "${filename}" no es un formato musical soportado o su contenido no contiene datos de notación musical válidos. Se rechaza por fail-closed format validation.`;
+        await this.failJobFenced(jobId, executionToken, errCode, unsupportedMsg);
+        return {
+          success: false,
+          targetFormat,
+          filename,
+          mimeType: 'text/plain',
+          content: '',
+          diagnostics: [
+            {
+              code: errCode,
+              severity: 'ERROR',
+              message: unsupportedMsg,
+            },
+          ],
+        };
+      }
+
       if (
         sourceCategory === 'AUDIO_RECORDING' ||
         sourceCategory === 'VIDEO_REFERENCE' ||
@@ -186,6 +235,31 @@ export class ConversionWorker {
               code: errCode,
               severity: 'ERROR',
               message: deferredError,
+            },
+          ],
+        };
+      }
+
+      // Validar viabilidad de conversión frente al principio de Cero Fabricación
+      const caps = FormatCapabilitiesEvaluator.getFormatCapabilities(sourceCategory);
+      const requestedCap = caps.find((c) => c.format === targetFormat);
+      if (!requestedCap || !requestedCap.isAvailable) {
+        const errCode = requestedCap?.statusBadge === 'BLOCKED_ZERO_FABRICATION'
+          ? 'ZERO_FABRICATION_VIOLATION'
+          : 'UNSUPPORTED_CONVERSION';
+        const capMsg = requestedCap?.blockingReason ?? `Conversión de "${sourceCategory}" hacia "${targetFormat}" no es viable o carece de información musical esencial.`;
+        await this.failJobFenced(jobId, executionToken, errCode, capMsg);
+        return {
+          success: false,
+          targetFormat,
+          filename,
+          mimeType: 'text/plain',
+          content: '',
+          diagnostics: [
+            {
+              code: errCode,
+              severity: 'ERROR',
+              message: capMsg,
             },
           ],
         };
@@ -278,7 +352,51 @@ export class ConversionWorker {
 
       return exportResult;
     } catch (err: any) {
-      await this.failJobFenced(jobId, executionToken, 'WORKER_PROCESSING_EXCEPTION', err.message);
+      const isTransient = isTransientError(err);
+      let attempts = 1;
+      let maxAttempts = 3;
+
+      try {
+        const [currentJob] = await this.db
+          .select({ attempts: backgroundJobs.attempts, maxAttempts: backgroundJobs.maxAttempts })
+          .from(backgroundJobs)
+          .where(eq(backgroundJobs.id, jobId));
+        if (currentJob) {
+          attempts = currentJob.attempts;
+          maxAttempts = currentJob.maxAttempts;
+        }
+      } catch {
+        // Fallback a valores por defecto
+      }
+
+      if (isTransient && attempts < maxAttempts) {
+        // Error transitorio con reintentos disponibles: resetear arrendamiento y propagar a pg-boss
+        await this.db
+          .update(backgroundJobs)
+          .set({
+            status: 'PENDING',
+            leaseOwner: null,
+            leaseToken: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            progress: 0,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(backgroundJobs.id, jobId),
+              eq(backgroundJobs.leaseToken, executionToken),
+              eq(backgroundJobs.status, 'PROCESSING')
+            )
+          )
+          .catch(() => {});
+
+        throw err;
+      }
+
+      // Fallo permanente o reintentos agotados
+      const errorCode = isTransient ? 'RETRIES_EXHAUSTED' : 'WORKER_PROCESSING_EXCEPTION';
+      await this.failJobFenced(jobId, executionToken, errorCode, err.message);
       return {
         success: false,
         targetFormat,
@@ -287,7 +405,7 @@ export class ConversionWorker {
         content: '',
         diagnostics: [
           {
-            code: 'WORKER_PROCESSING_EXCEPTION',
+            code: errorCode,
             severity: 'ERROR',
             message: err.message,
           },
@@ -300,7 +418,8 @@ export class ConversionWorker {
 
   /**
    * Recupera trabajos que hayan quedado en estado PROCESSING con arrendamiento genuinamente expirado (CR-04).
-   * Nunca toca trabajos con arrendamiento activo.
+   * Emplea un reclamo atómico de recuperación para evitar colisiones y garantiza que si el reencolado
+   * en pg-boss falla, el trabajo no quede en el limbo sino inmediatamente recoverable en la siguiente pasada.
    */
   public async recoverStaleJobs(): Promise<number> {
     const now = new Date();
@@ -343,16 +462,16 @@ export class ConversionWorker {
           );
         recoveredCount++;
       } else {
-        // Arrendamiento expirado reintentable: resetear a PENDING y reencolar en pg-boss
-        const [reset] = await this.db
+        // Reclamo atómico de recuperación con testigo y tiempo acotado
+        const recoveryToken = crypto.randomUUID();
+        const recoveryLeaseExpires = new Date(Date.now() + 30_000); // 30s de ventana
+
+        const [claimed] = await this.db
           .update(backgroundJobs)
           .set({
-            status: 'PENDING',
-            leaseOwner: null,
-            leaseToken: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-            progress: 0,
+            leaseOwner: `recovery_${this.workerId}`,
+            leaseToken: recoveryToken,
+            leaseExpiresAt: recoveryLeaseExpires,
             updatedAt: new Date(),
           })
           .where(
@@ -364,21 +483,80 @@ export class ConversionWorker {
           )
           .returning();
 
-        if (reset) {
+        if (claimed) {
           const details = job.errorDetails as any;
           if (details?.storageKey && details?.checksumSha256) {
-            await enqueueConversionJob({
-              jobId: job.id,
-              userId: job.userId ?? 'system',
-              tenantId: job.tenantId,
-              storageKey: details.storageKey,
-              checksumSha256: details.checksumSha256,
-              filename: job.inputRef,
-              targetFormat: details.targetFormat ?? 'CHORD_PRO',
-              options: details.options,
-            }).catch(() => {});
+            try {
+              await enqueueConversionJob({
+                jobId: job.id,
+                userId: job.userId ?? 'system',
+                tenantId: job.tenantId,
+                storageKey: details.storageKey,
+                checksumSha256: details.checksumSha256,
+                filename: job.inputRef,
+                targetFormat: details.targetFormat ?? 'CHORD_PRO',
+                options: details.options,
+              });
+
+              // Reencolado exitoso: resetear a PENDING y liberar arrendamiento
+              await this.db
+                .update(backgroundJobs)
+                .set({
+                  status: 'PENDING',
+                  leaseOwner: null,
+                  leaseToken: null,
+                  leaseExpiresAt: null,
+                  heartbeatAt: null,
+                  progress: 0,
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(backgroundJobs.id, job.id),
+                    eq(backgroundJobs.leaseToken, recoveryToken)
+                  )
+                );
+              recoveredCount++;
+            } catch {
+              // Si falla el reencolado, expirar de inmediato el arrendamiento para reintentarlo en el próximo ciclo
+              await this.db
+                .update(backgroundJobs)
+                .set({
+                  leaseOwner: null,
+                  leaseToken: null,
+                  leaseExpiresAt: new Date(Date.now() - 10_000),
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(backgroundJobs.id, job.id),
+                    eq(backgroundJobs.leaseToken, recoveryToken)
+                  )
+                );
+            }
+          } else {
+            // Metadatos insuficientes para reencolado
+            await this.db
+              .update(backgroundJobs)
+              .set({
+                status: 'FAILED',
+                progress: 100,
+                errorCode: 'RECOVERY_MISSING_METADATA',
+                errorDetails: {
+                  code: 'RECOVERY_MISSING_METADATA',
+                  message: 'El trabajo no cuenta con storageKey o checksumSha256 para ser reencolado.',
+                },
+                completedAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(backgroundJobs.id, job.id),
+                  eq(backgroundJobs.leaseToken, recoveryToken)
+                )
+              );
+            recoveredCount++;
           }
-          recoveredCount++;
         }
       }
     }

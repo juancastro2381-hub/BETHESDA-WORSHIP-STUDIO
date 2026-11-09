@@ -119,10 +119,92 @@ export class ConversionJobService {
   }
 
   /**
+   * Validador unificado de viabilidad de conversión (Single Source of Truth).
+   * Utilizado idénticamente por transpileDirect y createJob.
+   */
+  public checkViability(
+    filename: string,
+    rawContent: string | Buffer | Uint8Array,
+    targetFormat: ConversionTargetFormat
+  ): {
+    viable: boolean;
+    detectedCategory: ConversionSourceCategory;
+    reason?: string;
+    errorCode?: string;
+  } {
+    const detectedCategory = FormatCapabilitiesEvaluator.detectSourceCategory(filename, rawContent);
+    const capabilities = FormatCapabilitiesEvaluator.getFormatCapabilities(detectedCategory);
+    const requestedCap = capabilities.find((c) => c.format === targetFormat);
+
+    if (detectedCategory === 'UNKNOWN_UNSUPPORTED') {
+      return {
+        viable: false,
+        detectedCategory,
+        errorCode: 'UNKNOWN_OR_UNSUPPORTED_FORMAT',
+        reason: `El archivo "${filename}" no es un formato musical soportado o su contenido no contiene datos de notación musical válidos. Se rechaza por fail-closed format validation.`,
+      };
+    }
+
+    if (!requestedCap || !requestedCap.isAvailable) {
+      if (requestedCap?.statusBadge === 'BLOCKED_ZERO_FABRICATION') {
+        const errCode = targetFormat === 'MIDI' ? 'CANNOT_EXPORT_MIDI_WITHOUT_NOTES' : 'ZERO_FABRICATION_VIOLATION';
+        return {
+          viable: false,
+          detectedCategory,
+          errorCode: errCode,
+          reason: `Conversión bloqueada por el Principio de CERO Fabricación: ${requestedCap.blockingReason ?? 'La fuente musical carece de la información requerida para este formato.'}`,
+        };
+      }
+      if (
+        requestedCap?.statusBadge === 'DEFERRED_PHASE' ||
+        requestedCap?.capabilityState === 'PLANNED_PHASE_2B'
+      ) {
+        return {
+          viable: false,
+          detectedCategory,
+          errorCode: 'SOURCE_CATEGORY_DEFERRED_PHASE',
+          reason: `Conversión no disponible en Fase 2A: ${requestedCap?.blockingReason ?? 'Esta capacidad está planificada para la Fase 2B.'}`,
+        };
+      }
+      return {
+        viable: false,
+        detectedCategory,
+        errorCode: 'UNSUPPORTED_FORMAT_CONVERSION',
+        reason: `El formato objetivo "${targetFormat}" no es compatible con el archivo de origen "${filename}" (${detectedCategory}).`,
+      };
+    }
+
+    return {
+      viable: true,
+      detectedCategory,
+    };
+  }
+
+  /**
    * Transpila inmediatamente en memoria una fuente hacia el formato objetivo (síncrono/directo).
    */
   public async transpileDirect(input: TranspileInputDTO): Promise<TranspileResponseDTO> {
     const rawContent = this.extractContent(input);
+    const viability = this.checkViability(input.filename, rawContent, input.targetFormat);
+
+    if (!viability.viable) {
+      return {
+        success: false,
+        targetFormat: input.targetFormat,
+        filename: input.filename,
+        mimeType: 'text/plain',
+        isBinary: false,
+        data: '',
+        diagnostics: [
+          {
+            code: viability.errorCode ?? 'CONVERSION_NOT_VIABLE',
+            severity: 'ERROR',
+            message: viability.reason ?? 'Conversión no soportada o rechazada.',
+          },
+        ],
+      };
+    }
+
     const contentString =
       typeof rawContent === 'string'
         ? rawContent
@@ -163,6 +245,7 @@ export class ConversionJobService {
 
   /**
    * Crea, preserva físicamente y encola un trabajo de conversión persistente con pg-boss (CR-02 & CR-03).
+   * Ejecuta la creación en background_jobs y song_sources dentro de una transacción DB atómica única.
    */
   public async createJob(
     user: AuthenticatedUser,
@@ -177,68 +260,61 @@ export class ConversionJobService {
     const buffer =
       typeof rawContent === 'string' ? Buffer.from(rawContent, 'utf-8') : Buffer.from(rawContent);
 
-    // 1.1 Validación estricta de viabilidad de capacidades (Prevenir creación de trabajos inviables)
-    const detectedCategory = FormatCapabilitiesEvaluator.detectSourceCategory(input.filename, buffer);
-    const capabilities = FormatCapabilitiesEvaluator.getFormatCapabilities(detectedCategory);
-    const requestedCap = capabilities.find((c) => c.format === input.targetFormat);
-
-    if (!requestedCap || !requestedCap.isAvailable) {
-      if (requestedCap?.statusBadge === 'BLOCKED_ZERO_FABRICATION') {
-        throw new ValidationError(
-          `Conversión bloqueada por el Principio de CERO Fabricación: ${requestedCap.blockingReason ?? 'La fuente musical carece de la información requerida para este formato.'}`
-        );
-      }
-      if (
-        requestedCap?.statusBadge === 'DEFERRED_PHASE' ||
-        requestedCap?.capabilityState === 'PLANNED_PHASE_2B'
-      ) {
-        throw new ValidationError(
-          `Conversión no disponible en Fase 2A: ${requestedCap.blockingReason ?? 'Esta capacidad está planificada para la Fase 2B.'}`
-        );
-      }
-      throw new ValidationError(
-        `El formato objetivo "${input.targetFormat}" no es compatible con el archivo de origen "${input.filename}" (${detectedCategory}).`
-      );
+    // 1.1 Validación unificada de viabilidad de capacidades
+    const viability = this.checkViability(input.filename, buffer, input.targetFormat);
+    if (!viability.viable) {
+      throw new ValidationError(viability.reason ?? 'Conversión no viable.');
     }
+    const detectedCategory = viability.detectedCategory;
 
     // 2. Preservar duraderamente el archivo en almacenamiento físico (CR-03)
     const storageResult = await this.storage.save(input.filename, buffer);
 
-    // 3. Registrar el trabajo en background_jobs con estado inicial PENDING
-    const job = await this.jobRepo.createJob({
-      jobType: 'CONVERSION',
-      status: 'PENDING',
-      progress: 0,
-      userId: user.id,
-      tenantId: 'bethesda-default',
-      inputRef: input.filename,
-      outputRef: null,
-      errorDetails: {
-        storageKey: storageResult.storageKey,
-        checksumSha256: storageResult.checksumSha256,
+    // 3. Registrar atómicamente el trabajo en background_jobs y song_sources en una transacción DB única (CR-06)
+    const job = await this.db.transaction(async (tx) => {
+      const [newJob] = await tx
+        .insert(backgroundJobs)
+        .values({
+          jobType: 'CONVERSION',
+          status: 'PENDING',
+          progress: 0,
+          userId: user.id,
+          tenantId: 'bethesda-default',
+          inputRef: input.filename,
+          outputRef: null,
+          errorDetails: {
+            storageKey: storageResult.storageKey,
+            checksumSha256: storageResult.checksumSha256,
+            fileSizeBytes: storageResult.fileSizeBytes,
+            targetFormat: input.targetFormat,
+            options: input.options ?? {},
+          },
+          startedAt: new Date(),
+        })
+        .returning();
+
+      if (!newJob) {
+        throw new PersistenceError('Fallo al registrar la tarea de conversión en background_jobs.');
+      }
+
+      await tx.insert(songSources).values({
+        userId: user.id,
+        sourceType: detectedCategory,
+        filename: input.filename,
+        storagePath: storageResult.storageKey,
+        mimeType: this.resolveMimeType(input.filename, input.targetFormat),
         fileSizeBytes: storageResult.fileSizeBytes,
-        targetFormat: input.targetFormat,
-        options: input.options ?? {},
-      },
-      startedAt: new Date(),
+        checksumSha256: storageResult.checksumSha256,
+        jobId: newJob.id,
+        rawContent: input.rawText ?? null,
+        importerName: 'ConversionJobService',
+        importerVersion: '2.0.0',
+      });
+
+      return newJob;
     });
 
-    // 4. Registrar en song_sources la trazabilidad inmutable de la fuente original (CR-03)
-    await this.db.insert(songSources).values({
-      userId: user.id,
-      sourceType: detectedCategory,
-      filename: input.filename,
-      storagePath: storageResult.storageKey,
-      mimeType: this.resolveMimeType(input.filename, input.targetFormat),
-      fileSizeBytes: storageResult.fileSizeBytes,
-      checksumSha256: storageResult.checksumSha256,
-      jobId: job.id,
-      rawContent: input.rawText ?? null,
-      importerName: 'ConversionJobService',
-      importerVersion: '2.0.0',
-    });
-
-    // 5. Encolar autoritativamente en pg-boss (CR-01)
+    // 4. Encolar autoritativamente en pg-boss (CR-01)
     const jobPayload: ConversionJobPayload = {
       jobId: job.id,
       userId: user.id,
@@ -525,6 +601,57 @@ export class ConversionJobService {
 
       return song;
     });
+  }
+
+  /**
+   * Reconcilia el almacenamiento físico con los registros de la base de datos (CR-06).
+   * Identifica archivos huérfanos en disco (sin referencia en song_sources ni en background_jobs)
+   * y referencias en base de datos sin archivo físico correspondiente, SIN eliminar archivos activos ni recuperables.
+   */
+  public async reconcileStorage(): Promise<{
+    orphanedFiles: string[];
+    missingFiles: string[];
+    healthyFilesCount: number;
+  }> {
+    // 1. Obtener todas las claves físicas en disco
+    const diskKeys = this.storage.listKeys ? await this.storage.listKeys() : [];
+
+    // 2. Obtener todas las referencias registradas en song_sources
+    const dbSources = await this.db.select({ storagePath: songSources.storagePath }).from(songSources);
+    const sourceKeys = new Set(
+      dbSources.map((s) => s.storagePath).filter((p): p is string => Boolean(p))
+    );
+
+    // 3. Obtener todas las referencias en background_jobs
+    const dbJobs = await this.db
+      .select({ errorDetails: backgroundJobs.errorDetails, status: backgroundJobs.status })
+      .from(backgroundJobs);
+
+    const jobKeys = new Set<string>();
+    for (const job of dbJobs) {
+      const details = job.errorDetails as any;
+      if (details?.storageKey) {
+        jobKeys.add(details.storageKey);
+      }
+    }
+
+    const activeDbKeys = new Set([...sourceKeys, ...jobKeys]);
+
+    // 4. Archivos huérfanos: están en disco pero no tienen referencia en BD
+    const orphanedFiles = diskKeys.filter((key) => !activeDbKeys.has(key));
+
+    // 5. Archivos faltantes: referenciados en BD pero ausentes en disco
+    const diskKeySet = new Set(diskKeys);
+    const missingFiles = Array.from(activeDbKeys).filter((key) => !diskKeySet.has(key));
+
+    // 6. Archivos saludables: presentes tanto en disco como en BD
+    const healthyFilesCount = diskKeys.length - orphanedFiles.length;
+
+    return {
+      orphanedFiles,
+      missingFiles,
+      healthyFilesCount,
+    };
   }
 
   private extractContent(input: { rawText?: string | undefined; dataBase64?: string | undefined }): string | Uint8Array {

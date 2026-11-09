@@ -40,7 +40,25 @@ export class ConversionEngine {
   ): ConversionExportResult {
     const sourceCategory = FormatCapabilitiesEvaluator.detectSourceCategory(filename, source);
 
-    // 1. Verificar si la fuente corresponde a categorías diferidas para Fase 2B o no soportadas
+    // 1. Fail-closed: Formatos no soportados o desconocidos
+    if (sourceCategory === 'UNKNOWN_UNSUPPORTED') {
+      return {
+        success: false,
+        targetFormat: options.targetFormat,
+        filename: this.buildOutputFilename(filename, options.targetFormat),
+        mimeType: 'text/plain',
+        content: '',
+        diagnostics: [
+          {
+            code: 'UNKNOWN_OR_UNSUPPORTED_FORMAT',
+            severity: 'ERROR',
+            message: `El archivo "${filename}" no es un formato musical soportado o su contenido no contiene datos de notación musical válidos. Se rechaza por fail-closed format validation.`,
+          },
+        ],
+      };
+    }
+
+    // 2. Verificar si la fuente corresponde a categorías diferidas para Fase 2B o no soportadas
     if (
       sourceCategory === 'AUDIO_RECORDING' ||
       sourceCategory === 'VIDEO_REFERENCE' ||

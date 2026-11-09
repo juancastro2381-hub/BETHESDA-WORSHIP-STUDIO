@@ -807,6 +807,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     ? '📄'
                     : sourceCategory === 'TABLATURE_ASCII'
                     ? '⚠️'
+                    : sourceCategory === 'UNKNOWN_UNSUPPORTED'
+                    ? '❌'
                     : 'ℹ️'}
                 </span>
                 <div className="advisory-content">
@@ -836,6 +838,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   {sourceCategory === 'VIDEO_REFERENCE' && '🎥 Video de Referencia'}
                   {sourceCategory === 'TABLATURE_ASCII' && '🎸 Tablatura ASCII'}
                   {sourceCategory === 'WRITTEN_NOTES' && '📝 Notas Escritas / JSON'}
+                  {sourceCategory === 'UNKNOWN_UNSUPPORTED' && '❓ Formato No Reconocido'}
                 </span>
                 {sourceSummary && (
                   <span

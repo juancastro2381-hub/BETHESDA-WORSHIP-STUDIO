@@ -198,5 +198,68 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
       'TXT_LYRICS'
     );
   });
+
+  it('should fail-closed on unknown formats, arbitrary json, invalid xml, and unsupported binaries', () => {
+    // 1. Unknown extension without content
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('archivo.desconocido'),
+      'UNKNOWN_UNSUPPORTED'
+    );
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('sin_extension'),
+      'UNKNOWN_UNSUPPORTED'
+    );
+
+    // 2. Unsupported binary content (random bytes with nulls)
+    const randomBinary = new Uint8Array([0x00, 0x01, 0x02, 0x7f, 0x1a, 0x2b]);
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('datos.bin', randomBinary),
+      'UNKNOWN_UNSUPPORTED'
+    );
+
+    // 3. XML that is not MusicXML
+    const nonMusicXml = '<?xml version="1.0"?><configuration><setting name="port">8080</setting></configuration>';
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('config.xml', nonMusicXml),
+      'UNKNOWN_UNSUPPORTED'
+    );
+
+    // 4. Arbitrary non-canonical JSON
+    const arbitraryJson = JSON.stringify({ name: 'package', version: '1.0.0', dependencies: {} });
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('package.json', arbitraryJson),
+      'UNKNOWN_UNSUPPORTED'
+    );
+
+    // 5. Malformed JSON
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('corrupt.json', '{ "incomplete": true'),
+      'UNKNOWN_UNSUPPORTED'
+    );
+
+    // 6. Valid canonical JSON should be detected as WRITTEN_NOTES
+    const canonicalJson = JSON.stringify({
+      version: '1.0',
+      title: 'Canción Canónica',
+      timeline: { measures: [] },
+    });
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('score.json', canonicalJson),
+      'WRITTEN_NOTES'
+    );
+
+    // 7. Source capability summary for UNKNOWN_UNSUPPORTED
+    const unknownSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('UNKNOWN_UNSUPPORTED', 'datos.bin');
+    assert.strictEqual(unknownSum.state, 'NOT_SUPPORTED');
+    assert.strictEqual(unknownSum.canConvert, false);
+    assert.ok(unknownSum.advisoryNotice?.includes('no reconocido'));
+
+    // 8. Format capabilities for UNKNOWN_UNSUPPORTED
+    const unknownCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('UNKNOWN_UNSUPPORTED');
+    for (const cap of unknownCaps) {
+      assert.strictEqual(cap.isAvailable, false);
+      assert.strictEqual(cap.capabilityState, 'NOT_SUPPORTED');
+    }
+  });
 });
 

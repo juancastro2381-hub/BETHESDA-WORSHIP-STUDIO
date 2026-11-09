@@ -23,6 +23,7 @@ export interface ISourceStorageProvider {
   exists(storageKey: string): Promise<boolean>;
   delete(storageKey: string): Promise<boolean>;
   resolveSafePath(storageKey: string): string;
+  listKeys?(): Promise<string[]>;
 }
 
 export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvider {
@@ -129,6 +130,18 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
       return false;
     } catch {
       return false;
+    }
+  }
+
+  public async listKeys(): Promise<string[]> {
+    try {
+      if (!fs.existsSync(this.baseDir)) return [];
+      const entries = await fs.promises.readdir(this.baseDir, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isFile() && !entry.name.includes('.tmp.'))
+        .map((entry) => entry.name);
+    } catch {
+      return [];
     }
   }
 }

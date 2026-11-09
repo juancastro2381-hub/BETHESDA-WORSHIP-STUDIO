@@ -1,9 +1,10 @@
 /**
  * @file format-capabilities.ts
- * @description Evaluador de capacidades de formato y compatibilidad de conversión (Fase 2A / UX Correction).
+ * @description Evaluador de capacidades de formato y compatibilidad de conversión (Fase 2A / UX Correction / R2.1).
  *
- * Determina qué formatos de destino son viables, cuáles están diferidos (Fase 2B)
- * y cuáles están estrictamente bloqueados por el Principio de CERO Fabricación.
+ * Determina qué formatos de destino son viables, cuáles están diferidos (Fase 2B),
+ * cuáles no están soportados y cuáles están estrictamente bloqueados por el Principio de CERO Fabricación.
+ * Implementa una política de validación FAIL-CLOSED: formatos desconocidos o no verificados son rechazados.
  */
 
 import { type CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
@@ -17,13 +18,19 @@ import {
 export class FormatCapabilitiesEvaluator {
   /**
    * Detecta la categoría de fuente a partir de inspección de Magic Bytes, estructura de contenido
-   * y extensión de archivo, garantizando detección fidedigna y prevención de extensiones falsificadas (CR-07).
+   * y extensión de archivo, garantizando detección fidedigna y prevención de extensiones falsificadas (CR-07 / R2.1).
+   * Principio Fail-Closed: Entradas no reconocidas jamás caen por defecto en WRITTEN_NOTES.
    */
   public static detectSourceCategory(
     filename: string,
     content?: string | Uint8Array
   ): ConversionSourceCategory {
-    const lowerName = filename.toLowerCase().trim();
+    const lowerName = filename ? filename.toLowerCase().trim() : '';
+
+    const hasBinaryContent = content instanceof Uint8Array && content.length > 0;
+    const isBufferBinary =
+      hasBinaryContent &&
+      content.some((b) => b === 0x00 || (b < 0x09 && b !== 0x0a && b !== 0x0d));
 
     // 1. Verificación primaria por Magic Bytes (si se suministra buffer binario)
     if (content instanceof Uint8Array && content.length >= 4) {
@@ -103,42 +110,83 @@ export class FormatCapabilitiesEvaluator {
       if (content[0] === 0x49 && content[1] === 0x44 && content[2] === 0x33) {
         return 'AUDIO_RECORDING';
       }
+
+      // Si es un buffer binario (con bytes nulos o de control) que no coincidió con ninguna firma reconocida:
+      if (isBufferBinary) {
+        return 'UNKNOWN_UNSUPPORTED';
+      }
     }
 
     // 2. Verificación por estructura de texto
     const textContent =
       typeof content === 'string'
         ? content
-        : content instanceof Uint8Array
-        ? new TextDecoder('utf-8', { fatal: false }).decode(content.slice(0, 4096))
+        : content instanceof Uint8Array && !isBufferBinary
+        ? new TextDecoder('utf-8', { fatal: false }).decode(content.slice(0, 8192))
         : null;
 
-    if (textContent) {
+    if (textContent !== null) {
       const trimmed = textContent.trim();
-      if (
-        trimmed.startsWith('<?xml') &&
-        (trimmed.includes('<score-partwise') || trimmed.includes('<score-timewise>'))
-      ) {
-        return 'STRUCTURED_MUSICXML';
+
+      // 2.1 Archivos XML / MusicXML
+      if (trimmed.startsWith('<')) {
+        if (
+          trimmed.includes('<score-partwise') ||
+          trimmed.includes('<score-timewise') ||
+          (trimmed.includes('<?xml') && (trimmed.includes('score') || trimmed.includes('part-list')))
+        ) {
+          return 'STRUCTURED_MUSICXML';
+        }
+        // Archivo XML arbitrario o no musical (ej. HTML o catálogo XML no MusicXML)
+        return 'UNKNOWN_UNSUPPORTED';
       }
+
+      // 2.2 ChordPro (directivas {title:...} o acordes [A-G])
       if (
-        /\{(title|key|tempo|start_of_chorus|soc|sov|start_of_verse):/i.test(trimmed) ||
+        lowerName.endsWith('.cho') ||
+        lowerName.endsWith('.crd') ||
+        /\{(title|key|tempo|start_of_chorus|soc|sov|start_of_verse|artist):/i.test(trimmed) ||
         /\[[A-G][b#]?[^\]]*\]/.test(trimmed)
       ) {
         return 'STRUCTURED_CHORDPRO';
       }
-      if (trimmed.startsWith('{') && trimmed.includes('"version"') && trimmed.includes('"timeline"')) {
-        return 'WRITTEN_NOTES';
+
+      // 2.3 JSON canónico de notas escritas
+      if (lowerName.endsWith('.json') || (trimmed.startsWith('{') && trimmed.includes('"'))) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            ((parsed.version && parsed.timeline) ||
+              (parsed.title && Array.isArray(parsed.measures)) ||
+              Array.isArray(parsed.tracks))
+          ) {
+            return 'WRITTEN_NOTES';
+          }
+          // JSON arbitrario sin estructura musical canónica
+          return 'UNKNOWN_UNSUPPORTED';
+        } catch {
+          // JSON malformado
+          return 'UNKNOWN_UNSUPPORTED';
+        }
       }
-      if (lowerName.endsWith('.tab')) {
+
+      // 2.4 Tablatura ASCII
+      if (lowerName.endsWith('.tab') || /\|[-0-9pbrh\/]{4,}\|/.test(trimmed)) {
         return 'TABLATURE_ASCII';
       }
+
+      // 2.5 Letra TXT
       if (lowerName.endsWith('.txt')) {
-        return 'TXT_LYRICS';
+        if (trimmed.length > 0) {
+          return 'TXT_LYRICS';
+        }
+        return 'UNKNOWN_UNSUPPORTED';
       }
     }
 
-    // 3. Verificación por extensión de archivo (cuando el contenido no es concluyente)
+    // 3. Verificación por extensión de archivo soportada
     if (lowerName.endsWith('.mid') || lowerName.endsWith('.midi')) {
       return 'STRUCTURED_MIDI';
     }
@@ -194,12 +242,9 @@ export class FormatCapabilitiesEvaluator {
     if (lowerName.endsWith('.txt')) {
       return 'TXT_LYRICS';
     }
-    if (lowerName.endsWith('.json')) {
-      return 'WRITTEN_NOTES';
-    }
 
-    // Por defecto asume notas escritas si es texto general o desconocido
-    return 'WRITTEN_NOTES';
+    // 4. Default: FAIL-CLOSED (Jamás asumir WRITTEN_NOTES para formatos desconocidos o no soportados)
+    return 'UNKNOWN_UNSUPPORTED';
   }
 
   /**
@@ -297,13 +342,23 @@ export class FormatCapabilitiesEvaluator {
             'La ingesta y conversión directa de tablaturas ASCII no está soportada en esta fase. El cálculo y generación de tablaturas está planificado para la Fase 2B.',
         };
       case 'WRITTEN_NOTES':
-      default:
         return {
           category: 'WRITTEN_NOTES',
           label: 'Notas Escritas / JSON Canónico',
           state: 'SUPPORTED',
           description: 'Estructura canónica de eventos musicales y notas.',
           canConvert: true,
+        };
+      case 'UNKNOWN_UNSUPPORTED':
+      default:
+        return {
+          category: 'UNKNOWN_UNSUPPORTED',
+          label: 'Formato No Reconocido / No Soportado',
+          state: 'NOT_SUPPORTED',
+          description: 'El archivo suministrado no corresponde a un formato musical admitido.',
+          canConvert: false,
+          advisoryNotice:
+            'Formato no reconocido o no soportado. Por favor suministre una partitura MusicXML (.musicxml), secuencia MIDI (.mid), cifrado ChordPro (.cho), archivo de texto de letra (.txt) o un documento visual (PDF/Imagen).',
         };
     }
   }
@@ -321,6 +376,7 @@ export class FormatCapabilitiesEvaluator {
     const isPdfOrImage =
       sourceCategory === 'PDF_SCORE' || sourceCategory === 'IMAGE_SCORE';
     const isTablature = sourceCategory === 'TABLATURE_ASCII';
+    const isUnknown = sourceCategory === 'UNKNOWN_UNSUPPORTED';
 
     // Formato base: MusicXML
     const musicXmlCap: FormatCapabilityInfo = {
@@ -397,6 +453,25 @@ export class FormatCapabilitiesEvaluator {
       blockingReason:
         'El cálculo polifónico de digitaciones óptimas de tablatura está planificado para Fase 2B.',
     };
+
+    // 0. Formatos Desconocidos / No Soportados (FAIL-CLOSED)
+    if (isUnknown) {
+      const unsupportedReason =
+        'El archivo de origen no corresponde a un formato musical admitido. Bethesda Worship Studio admite MusicXML (.musicxml), MIDI (.mid), ChordPro (.cho), solo letra (.txt) y documentos visuales (PDF/Imágenes).';
+      musicXmlCap.blockingReason = unsupportedReason;
+      musicXmlCap.capabilityState = 'NOT_SUPPORTED';
+      midiCap.blockingReason = unsupportedReason;
+      midiCap.capabilityState = 'NOT_SUPPORTED';
+      chordProCap.blockingReason = unsupportedReason;
+      chordProCap.capabilityState = 'NOT_SUPPORTED';
+      lyricsCap.blockingReason = unsupportedReason;
+      lyricsCap.capabilityState = 'NOT_SUPPORTED';
+      pdfCap.blockingReason = unsupportedReason;
+      pdfCap.capabilityState = 'NOT_SUPPORTED';
+      tabCap.blockingReason = unsupportedReason;
+      tabCap.capabilityState = 'NOT_SUPPORTED';
+      return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
+    }
 
     // 1. Fuentes de Audio o Video (Planificado Fase 2B)
     if (isAudioOrVideo) {
@@ -516,8 +591,7 @@ export class FormatCapabilitiesEvaluator {
       midiCap.capabilityState = 'NOT_SUPPORTED';
       midiCap.blockingReason =
         'Un archivo de solo letra no contiene notas melódicas ni acordes. No se generará un archivo MIDI con melodías inventadas.';
-    } else {
-      // WRITTEN_NOTES
+    } else if (sourceCategory === 'WRITTEN_NOTES') {
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'CONVERTED';
       musicXmlCap.capabilityState = 'SUPPORTED';

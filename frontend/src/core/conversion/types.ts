@@ -28,7 +28,8 @@ export type ConversionSourceCategory =
   | 'IMAGE_SCORE'
   | 'AUDIO_RECORDING'
   | 'VIDEO_REFERENCE'
-  | 'TABLATURE_ASCII';
+  | 'TABLATURE_ASCII'
+  | 'UNKNOWN_UNSUPPORTED';
 
 export interface SourceCapabilitySummary {
   category: ConversionSourceCategory;

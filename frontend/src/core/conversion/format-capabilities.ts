@@ -1,6 +1,6 @@
 /**
  * @file format-capabilities.ts
- * @description Evaluador de capacidades de formato y compatibilidad de conversión (Fase 2A).
+ * @description Evaluador de capacidades de formato y compatibilidad de conversión (Fase 2A / UX Correction).
  *
  * Determina qué formatos de destino son viables, cuáles están diferidos (Fase 2B)
  * y cuáles están estrictamente bloqueados por el Principio de CERO Fabricación.
@@ -11,6 +11,7 @@ import {
   type ConversionSourceCategory,
   type ConversionTargetFormat,
   type FormatCapabilityInfo,
+  type SourceCapabilitySummary,
 } from './types.ts';
 
 export class FormatCapabilitiesEvaluator {
@@ -129,6 +130,12 @@ export class FormatCapabilitiesEvaluator {
       if (trimmed.startsWith('{') && trimmed.includes('"version"') && trimmed.includes('"timeline"')) {
         return 'WRITTEN_NOTES';
       }
+      if (lowerName.endsWith('.tab')) {
+        return 'TABLATURE_ASCII';
+      }
+      if (lowerName.endsWith('.txt')) {
+        return 'TXT_LYRICS';
+      }
     }
 
     // 3. Verificación por extensión de archivo (cuando el contenido no es concluyente)
@@ -181,12 +188,124 @@ export class FormatCapabilitiesEvaluator {
     ) {
       return 'VIDEO_REFERENCE';
     }
+    if (lowerName.endsWith('.tab')) {
+      return 'TABLATURE_ASCII';
+    }
+    if (lowerName.endsWith('.txt')) {
+      return 'TXT_LYRICS';
+    }
     if (lowerName.endsWith('.json')) {
       return 'WRITTEN_NOTES';
     }
 
     // Por defecto asume notas escritas si es texto general o desconocido
     return 'WRITTEN_NOTES';
+  }
+
+  /**
+   * Resumen de alto nivel del estado de soporte y capacidades de la fuente musical.
+   */
+  public static getSourceCapabilitySummary(
+    sourceCategory: ConversionSourceCategory,
+    _filename?: string
+  ): SourceCapabilitySummary {
+    switch (sourceCategory) {
+      case 'STRUCTURED_MUSICXML':
+        return {
+          category: 'STRUCTURED_MUSICXML',
+          label: 'Partitura MusicXML 4.0',
+          state: 'SUPPORTED',
+          description: 'Partitura digital completa con notas, compases, armonía y texto vocal.',
+          canConvert: true,
+        };
+      case 'STRUCTURED_MIDI':
+        return {
+          category: 'STRUCTURED_MIDI',
+          label: 'Secuencia MIDI Estándar (SMF 1)',
+          state: 'SUPPORTED',
+          description: 'Eventos de notas polifónicas, tempos, divisiones de tiempo y métrica.',
+          canConvert: true,
+        };
+      case 'STRUCTURED_CHORDPRO':
+        return {
+          category: 'STRUCTURED_CHORDPRO',
+          label: 'Cifrado Armónico ChordPro',
+          state: 'SUPPORTED',
+          description: 'Cifrado de acordes y texto lírico estructurado.',
+          canConvert: true,
+          advisoryNotice:
+            'Conversión a formatos de texto y lead sheet disponible. La exportación a MIDI melódico está bloqueada por Cero Fabricación (la fuente no contiene notas melódicas).',
+        };
+      case 'TXT_LYRICS':
+        return {
+          category: 'TXT_LYRICS',
+          label: 'Solo Letra / Texto Plano',
+          state: 'PARTIALLY_SUPPORTED',
+          description: 'Texto lírico vocal sin armonía ni notas melódicas.',
+          canConvert: true,
+          advisoryNotice:
+            'Archivo de solo letra reconocido. Conversión a texto y borrador ChordPro disponible. Conversión a MIDI bloqueada por Cero Fabricación.',
+        };
+      case 'PDF_SCORE':
+        return {
+          category: 'PDF_SCORE',
+          label: 'Partitura en Documento PDF',
+          state: 'PARTIALLY_SUPPORTED',
+          description: 'Documento visual preservado de forma íntegra en el almacenamiento duradero.',
+          canConvert: false,
+          advisoryNotice:
+            'Documento PDF reconocido y preservado de forma íntegra. Puede visualizarlo en el atril digital. La digitalización óptica de partituras (OMR) para convertir a notas editables está planificada para la Fase 2B.',
+        };
+      case 'IMAGE_SCORE':
+        return {
+          category: 'IMAGE_SCORE',
+          label: 'Partitura en Imagen (PNG, JPG, WEBP, TIFF)',
+          state: 'PARTIALLY_SUPPORTED',
+          description: 'Imagen gráfica de partitura preservada de forma inmutable.',
+          canConvert: false,
+          advisoryNotice:
+            'Partitura en imagen reconocida y preservada. Puede visualizarla en el atril digital. El reconocimiento óptico de partituras (OMR) está planificado para la Fase 2B.',
+        };
+      case 'AUDIO_RECORDING':
+        return {
+          category: 'AUDIO_RECORDING',
+          label: 'Grabación de Audio (MP3, WAV, M4A, FLAC, OGG)',
+          state: 'PARTIALLY_SUPPORTED',
+          description: 'Archivo sonoro preservado con verificación criptográfica SHA-256.',
+          canConvert: false,
+          advisoryNotice:
+            'Archivo de audio reconocido y preservado de forma duradera. Puede reproducir el archivo en el atril digital. La transcripción automática polifónica a partitura (Demucs / Basic Pitch / Whisper) está planificada para la Fase 2B sin servicios comerciales de terceros.',
+        };
+      case 'VIDEO_REFERENCE':
+        return {
+          category: 'VIDEO_REFERENCE',
+          label: 'Video de Referencia',
+          state: 'PARTIALLY_SUPPORTED',
+          description: 'Archivo multimedia o referencia audiovisual.',
+          canConvert: false,
+          advisoryNotice:
+            'Video reconocido. La extracción de audio y transcripción está diferida para fases posteriores.',
+        };
+      case 'TABLATURE_ASCII':
+        return {
+          category: 'TABLATURE_ASCII',
+          label: 'Tablatura en Texto ASCII (.tab)',
+          state: 'NOT_SUPPORTED',
+          description: 'Tablatura textual de guitarra o bajo.',
+          canConvert: false,
+          advisoryNotice:
+            'La ingesta y conversión directa de tablaturas ASCII no está soportada en esta fase. El cálculo y generación de tablaturas está planificado para la Fase 2B.',
+        };
+      case 'WRITTEN_NOTES':
+      default:
+        return {
+          category: 'WRITTEN_NOTES',
+          label: 'Notas Escritas / JSON Canónico',
+          state: 'SUPPORTED',
+          description: 'Estructura canónica de eventos musicales y notas.',
+          canConvert: true,
+        };
+    }
   }
 
   /**
@@ -201,6 +320,7 @@ export class FormatCapabilitiesEvaluator {
       sourceCategory === 'AUDIO_RECORDING' || sourceCategory === 'VIDEO_REFERENCE';
     const isPdfOrImage =
       sourceCategory === 'PDF_SCORE' || sourceCategory === 'IMAGE_SCORE';
+    const isTablature = sourceCategory === 'TABLATURE_ASCII';
 
     // Formato base: MusicXML
     const musicXmlCap: FormatCapabilityInfo = {
@@ -209,6 +329,7 @@ export class FormatCapabilitiesEvaluator {
       extension: '.musicxml',
       mimeType: 'application/vnd.recordare.musicxml+xml',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Partitura estándar MusicXML 4.0 con pentagramas, notas, compases y acordes.',
     };
@@ -220,6 +341,7 @@ export class FormatCapabilitiesEvaluator {
       extension: '.mid',
       mimeType: 'audio/midi',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Archivo MIDI estándar a 480 ticks/negra para secuenciadores y DAWs.',
     };
@@ -231,6 +353,7 @@ export class FormatCapabilitiesEvaluator {
       extension: '.cho',
       mimeType: 'text/plain',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Cifrado armónico con letra integrada [Acorde] y directivas de estructura.',
     };
@@ -242,6 +365,7 @@ export class FormatCapabilitiesEvaluator {
       extension: '.txt',
       mimeType: 'text/plain',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Texto limpio de la letra organizado por secciones sin marcado técnico.',
     };
@@ -253,10 +377,11 @@ export class FormatCapabilitiesEvaluator {
       extension: '.pdf',
       mimeType: 'application/pdf',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Partitura visual grabada en PDF con tipografía profesional (Bravura).',
       blockingReason:
-        'El grabado visual a PDF mediante headless Chromium o VexFlow server-side está programado para Fase 2B. En Fase 2A utilice exportación MusicXML para abrir e imprimir en software de notación.',
+        'El grabado visual a PDF mediante headless Chromium o VexFlow server-side está planificado para Fase 2B. En Fase 2A utilice exportación MusicXML para abrir e imprimir en software de notación.',
     };
 
     // Formato base: Tablatura (Diferido Fase 2B)
@@ -266,93 +391,151 @@ export class FormatCapabilitiesEvaluator {
       extension: '.tab',
       mimeType: 'text/plain',
       isAvailable: false,
+      capabilityState: 'PLANNED_PHASE_2B',
       statusBadge: 'DEFERRED_PHASE',
       description: 'Generación de digitaciones automáticas en tablatura de 6 o 4 cuerdas.',
       blockingReason:
-        'El cálculo polifónico de digitaciones óptimas de tablatura está programado para Fase 2B.',
+        'El cálculo polifónico de digitaciones óptimas de tablatura está planificado para Fase 2B.',
     };
 
-    // 1. Fuentes de Audio o Video
+    // 1. Fuentes de Audio o Video (Planificado Fase 2B)
     if (isAudioOrVideo) {
       const audioReason =
-        'La transcripción automática de audio a partitura (Basic Pitch / Demucs / Whisper.cpp) está diferida formalmente para Fase 2B con modelos locales sin servicios comerciales pagos.';
+        'La transcripción automática de audio a partitura (Basic Pitch / Demucs / Whisper.cpp) está planificada formalmente para Fase 2B con modelos locales sin servicios comerciales pagos.';
       musicXmlCap.blockingReason = audioReason;
+      musicXmlCap.capabilityState = 'PLANNED_PHASE_2B';
       midiCap.blockingReason = audioReason;
+      midiCap.capabilityState = 'PLANNED_PHASE_2B';
       chordProCap.blockingReason = audioReason;
+      chordProCap.capabilityState = 'PLANNED_PHASE_2B';
       lyricsCap.blockingReason = audioReason;
+      lyricsCap.capabilityState = 'PLANNED_PHASE_2B';
       return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
     }
 
-    // 2. Fuentes de Partitura en PDF o Imagen (OMR)
+    // 2. Fuentes de Partitura en PDF o Imagen (OMR Planificado Fase 2B)
     if (isPdfOrImage) {
       const omrReason =
-        'El reconocimiento óptico de partituras (OMR con Audiveris / oemer) está diferido para Fase 2B para garantizar precisión profesional sin alucinación de notas.';
+        'El reconocimiento óptico de partituras (OMR con Audiveris / oemer) está planificado para Fase 2B para garantizar precisión profesional sin alucinación de notas.';
       musicXmlCap.blockingReason = omrReason;
+      musicXmlCap.capabilityState = 'PLANNED_PHASE_2B';
       midiCap.blockingReason = omrReason;
+      midiCap.capabilityState = 'PLANNED_PHASE_2B';
       chordProCap.blockingReason = omrReason;
+      chordProCap.capabilityState = 'PLANNED_PHASE_2B';
       lyricsCap.blockingReason = omrReason;
+      lyricsCap.capabilityState = 'PLANNED_PHASE_2B';
       pdfCap.blockingReason = omrReason;
       tabCap.blockingReason = omrReason;
       return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
     }
 
-    // 3. Fuentes Estructuradas (MusicXML, MIDI, ChordPro, Notas escritas)
+    // 3. Tablatura ASCII (No Soportada en Ingesta)
+    if (isTablature) {
+      const tabReason =
+        'La ingesta y conversión directa de tablaturas ASCII (.tab) no está soportada en esta versión. El motor de tablatura está planificado para la Fase 2B.';
+      musicXmlCap.blockingReason = tabReason;
+      musicXmlCap.capabilityState = 'NOT_SUPPORTED';
+      midiCap.blockingReason = tabReason;
+      midiCap.capabilityState = 'NOT_SUPPORTED';
+      chordProCap.blockingReason = tabReason;
+      chordProCap.capabilityState = 'NOT_SUPPORTED';
+      lyricsCap.blockingReason = tabReason;
+      lyricsCap.capabilityState = 'NOT_SUPPORTED';
+      return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
+    }
+
+    // 4. Fuentes Estructuradas (MusicXML, MIDI, ChordPro, TXT Lyrics, Notas escritas)
     if (sourceCategory === 'STRUCTURED_MUSICXML') {
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'NATIVE';
+      musicXmlCap.capabilityState = 'SUPPORTED';
 
       midiCap.isAvailable = true;
       midiCap.statusBadge = 'CONVERTED';
+      midiCap.capabilityState = 'SUPPORTED';
 
       chordProCap.isAvailable = true;
       chordProCap.statusBadge = 'CONVERTED';
+      chordProCap.capabilityState = 'SUPPORTED';
 
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
+      lyricsCap.capabilityState = 'SUPPORTED';
     } else if (sourceCategory === 'STRUCTURED_MIDI') {
       midiCap.isAvailable = true;
       midiCap.statusBadge = 'NATIVE';
+      midiCap.capabilityState = 'SUPPORTED';
 
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'CONVERTED';
+      musicXmlCap.capabilityState = 'SUPPORTED';
 
       chordProCap.isAvailable = true;
       chordProCap.statusBadge = 'CONVERTED';
+      chordProCap.capabilityState = 'SUPPORTED';
 
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
+      lyricsCap.capabilityState = 'SUPPORTED';
     } else if (sourceCategory === 'STRUCTURED_CHORDPRO') {
       chordProCap.isAvailable = true;
       chordProCap.statusBadge = 'NATIVE';
+      chordProCap.capabilityState = 'SUPPORTED';
 
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
+      lyricsCap.capabilityState = 'SUPPORTED';
 
       // MusicXML es viable como lead sheet (compases, acordes y letra, sin notas inventadas)
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'CONVERTED';
+      musicXmlCap.capabilityState = 'SUPPORTED';
 
       // MIDI está BLOQUEADO por CERO-FABRICACIÓN si la fuente es sólo cifrado
       midiCap.isAvailable = false;
       midiCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+      midiCap.capabilityState = 'NOT_SUPPORTED';
       midiCap.blockingReason =
         'No es posible generar MIDI melódico desde un cifrado ChordPro sin notas, pues violaría el principio de CERO invención de melodía.';
+    } else if (sourceCategory === 'TXT_LYRICS') {
+      lyricsCap.isAvailable = true;
+      lyricsCap.statusBadge = 'NATIVE';
+      lyricsCap.capabilityState = 'SUPPORTED';
+
+      chordProCap.isAvailable = true;
+      chordProCap.statusBadge = 'CONVERTED';
+      chordProCap.capabilityState = 'SUPPORTED';
+
+      musicXmlCap.isAvailable = true;
+      musicXmlCap.statusBadge = 'CONVERTED';
+      musicXmlCap.capabilityState = 'PARTIALLY_SUPPORTED';
+
+      midiCap.isAvailable = false;
+      midiCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+      midiCap.capabilityState = 'NOT_SUPPORTED';
+      midiCap.blockingReason =
+        'Un archivo de solo letra no contiene notas melódicas ni acordes. No se generará un archivo MIDI con melodías inventadas.';
     } else {
       // WRITTEN_NOTES
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'CONVERTED';
+      musicXmlCap.capabilityState = 'SUPPORTED';
 
       midiCap.isAvailable = true;
       midiCap.statusBadge = 'CONVERTED';
+      midiCap.capabilityState = 'SUPPORTED';
 
       chordProCap.isAvailable = true;
       chordProCap.statusBadge = 'CONVERTED';
+      chordProCap.capabilityState = 'SUPPORTED';
 
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
+      lyricsCap.capabilityState = 'SUPPORTED';
     }
 
-    // 4. Ajustes Dinámicos según Contenido Real del Payload Canónico (si está disponible)
+    // 5. Ajustes Dinámicos según Contenido Real del Payload Canónico (si está disponible)
     if (payload) {
       const notes = payload.getAllNotes();
       const chords = payload.getAllChords();
@@ -362,6 +545,7 @@ export class FormatCapabilitiesEvaluator {
       if (notes.length === 0) {
         midiCap.isAvailable = false;
         midiCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+        midiCap.capabilityState = 'NOT_SUPPORTED';
         midiCap.blockingReason =
           'El documento canónico no contiene notas melódicas. No se generará un archivo MIDI con notas inventadas.';
       }
@@ -370,6 +554,7 @@ export class FormatCapabilitiesEvaluator {
       if (lyrics.length === 0) {
         lyricsCap.isAvailable = false;
         lyricsCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+        lyricsCap.capabilityState = 'NOT_SUPPORTED';
         lyricsCap.blockingReason =
           'El documento canónico no contiene texto lírico vocal (obra instrumental).';
       }
@@ -377,6 +562,7 @@ export class FormatCapabilitiesEvaluator {
       // Si no hay acordes ni letra, ChordPro avisa
       if (chords.length === 0 && lyrics.length === 0) {
         chordProCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+        chordProCap.capabilityState = 'NOT_SUPPORTED';
         chordProCap.isAvailable = false;
         chordProCap.blockingReason =
           'La obra es puramente melódica instrumental sin cifrado ni letra.';

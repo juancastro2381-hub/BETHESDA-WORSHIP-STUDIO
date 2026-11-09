@@ -40,13 +40,15 @@ export class ConversionEngine {
   ): ConversionExportResult {
     const sourceCategory = FormatCapabilitiesEvaluator.detectSourceCategory(filename, source);
 
-    // 1. Verificar si la fuente corresponde a categorías diferidas para Fase 2B
+    // 1. Verificar si la fuente corresponde a categorías diferidas para Fase 2B o no soportadas
     if (
       sourceCategory === 'AUDIO_RECORDING' ||
       sourceCategory === 'VIDEO_REFERENCE' ||
       sourceCategory === 'PDF_SCORE' ||
-      sourceCategory === 'IMAGE_SCORE'
+      sourceCategory === 'IMAGE_SCORE' ||
+      sourceCategory === 'TABLATURE_ASCII'
     ) {
+      const isTab = sourceCategory === 'TABLATURE_ASCII';
       return {
         success: false,
         targetFormat: options.targetFormat,
@@ -55,9 +57,11 @@ export class ConversionEngine {
         content: '',
         diagnostics: [
           {
-            code: 'SOURCE_CATEGORY_DEFERRED_PHASE',
+            code: isTab ? 'TABLATURE_INGESTION_UNSUPPORTED' : 'SOURCE_CATEGORY_DEFERRED_PHASE',
             severity: 'ERROR',
-            message: `La fuente de tipo "${sourceCategory}" requiere transcripción de audio (Demucs/Basic Pitch) u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
+            message: isTab
+              ? 'La ingesta y conversión directa de tablaturas ASCII (.tab) no está soportada en esta versión. El motor de tablatura está planificado para la Fase 2B.'
+              : `La fuente de tipo "${sourceCategory}" requiere transcripción de audio (Demucs/Basic Pitch) u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
           },
         ],
       };

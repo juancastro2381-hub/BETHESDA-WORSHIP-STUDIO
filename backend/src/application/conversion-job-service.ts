@@ -177,6 +177,30 @@ export class ConversionJobService {
     const buffer =
       typeof rawContent === 'string' ? Buffer.from(rawContent, 'utf-8') : Buffer.from(rawContent);
 
+    // 1.1 Validación estricta de viabilidad de capacidades (Prevenir creación de trabajos inviables)
+    const detectedCategory = FormatCapabilitiesEvaluator.detectSourceCategory(input.filename, buffer);
+    const capabilities = FormatCapabilitiesEvaluator.getFormatCapabilities(detectedCategory);
+    const requestedCap = capabilities.find((c) => c.format === input.targetFormat);
+
+    if (!requestedCap || !requestedCap.isAvailable) {
+      if (requestedCap?.statusBadge === 'BLOCKED_ZERO_FABRICATION') {
+        throw new ValidationError(
+          `Conversión bloqueada por el Principio de CERO Fabricación: ${requestedCap.blockingReason ?? 'La fuente musical carece de la información requerida para este formato.'}`
+        );
+      }
+      if (
+        requestedCap?.statusBadge === 'DEFERRED_PHASE' ||
+        requestedCap?.capabilityState === 'PLANNED_PHASE_2B'
+      ) {
+        throw new ValidationError(
+          `Conversión no disponible en Fase 2A: ${requestedCap.blockingReason ?? 'Esta capacidad está planificada para la Fase 2B.'}`
+        );
+      }
+      throw new ValidationError(
+        `El formato objetivo "${input.targetFormat}" no es compatible con el archivo de origen "${input.filename}" (${detectedCategory}).`
+      );
+    }
+
     // 2. Preservar duraderamente el archivo en almacenamiento físico (CR-03)
     const storageResult = await this.storage.save(input.filename, buffer);
 
@@ -200,7 +224,6 @@ export class ConversionJobService {
     });
 
     // 4. Registrar en song_sources la trazabilidad inmutable de la fuente original (CR-03)
-    const detectedCategory = FormatCapabilitiesEvaluator.detectSourceCategory(input.filename, buffer);
     await this.db.insert(songSources).values({
       userId: user.id,
       sourceType: detectedCategory,

@@ -49,6 +49,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
 
   after(async () => {
     await app.close();
+    await pool.end();
   });
 
   it('1. POST /api/v1/conversion/validate — should detect STRUCTURED_MUSICXML and valid capabilities', async () => {
@@ -188,5 +189,63 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     });
 
     assert.strictEqual(res.statusCode, 401);
+  });
+
+  it('7. POST /api/v1/conversion/jobs — should REJECT job creation for AUDIO_RECORDING (Phase 2B Deferred Guard)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/conversion/jobs',
+      headers: { authorization: `Bearer ${testUserToken}` },
+      payload: {
+        filename: 'adoracion.mp3',
+        targetFormat: 'MUSIC_XML',
+        dataBase64: Buffer.from('fake-mp3-bytes').toString('base64'),
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 400);
+    const body = JSON.parse(res.payload);
+    assert.strictEqual(body.error.code, 'VALIDATION_ERROR');
+    assert.ok(body.error.message.includes('Fase 2B'));
+  });
+
+  it('8. POST /api/v1/conversion/jobs — should REJECT job creation for ChordPro -> MIDI (Zero-Fabrication Guard)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/conversion/jobs',
+      headers: { authorization: `Bearer ${testUserToken}` },
+      payload: {
+        filename: 'cifrado.cho',
+        targetFormat: 'MIDI',
+        rawText: validChordProContent,
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 400);
+    const body = JSON.parse(res.payload);
+    assert.strictEqual(body.error.code, 'VALIDATION_ERROR');
+    assert.ok(body.error.message.includes('CERO Fabricación'));
+  });
+
+  it('9. POST /api/v1/conversion/validate — should expose explicit capabilityState in capabilities matrix', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/conversion/validate',
+      payload: {
+        filename: 'cancion.cho',
+        rawText: validChordProContent,
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    const body = JSON.parse(res.payload);
+    const choCap = body.data.capabilities.find((c: any) => c.format === 'CHORD_PRO');
+    assert.strictEqual(choCap.capabilityState, 'SUPPORTED');
+
+    const midiCap = body.data.capabilities.find((c: any) => c.format === 'MIDI');
+    assert.strictEqual(midiCap.capabilityState, 'NOT_SUPPORTED');
+
+    const pdfCap = body.data.capabilities.find((c: any) => c.format === 'ENGRAVED_PDF');
+    assert.strictEqual(pdfCap.capabilityState, 'PLANNED_PHASE_2B');
   });
 });

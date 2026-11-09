@@ -105,5 +105,98 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
     assert.strictEqual(instLyrics?.isAvailable, false);
     assert.strictEqual(instLyrics?.statusBadge, 'BLOCKED_ZERO_FABRICATION');
   });
+
+  it('should correctly classify the 4 explicit capability states', () => {
+    // 1. MusicXML -> SUPPORTED
+    const xmlCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('STRUCTURED_MUSICXML');
+    const xmlSelf = xmlCaps.find((c) => c.format === 'MUSIC_XML');
+    assert.strictEqual(xmlSelf?.capabilityState, 'SUPPORTED');
+    assert.strictEqual(xmlSelf?.isAvailable, true);
+
+    const xmlMidi = xmlCaps.find((c) => c.format === 'MIDI');
+    assert.strictEqual(xmlMidi?.capabilityState, 'SUPPORTED');
+
+    const xmlPdf = xmlCaps.find((c) => c.format === 'ENGRAVED_PDF');
+    assert.strictEqual(xmlPdf?.capabilityState, 'PLANNED_PHASE_2B');
+    assert.strictEqual(xmlPdf?.isAvailable, false);
+
+    // 2. ChordPro -> MIDI is NOT_SUPPORTED (Zero Fabrication)
+    const choCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('STRUCTURED_CHORDPRO');
+    const choMidi = choCaps.find((c) => c.format === 'MIDI');
+    assert.strictEqual(choMidi?.capabilityState, 'NOT_SUPPORTED');
+    assert.strictEqual(choMidi?.statusBadge, 'BLOCKED_ZERO_FABRICATION');
+    assert.strictEqual(choMidi?.isAvailable, false);
+
+    // 3. Audio -> PLANNED_PHASE_2B
+    const audioCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('AUDIO_RECORDING');
+    for (const cap of audioCaps) {
+      assert.strictEqual(cap.capabilityState, 'PLANNED_PHASE_2B');
+      assert.strictEqual(cap.isAvailable, false);
+    }
+
+    // 4. Tablature -> NOT_SUPPORTED
+    const tabCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('TABLATURE_ASCII');
+    for (const cap of tabCaps.filter((c) => c.format !== 'ENGRAVED_PDF' && c.format !== 'TABLATURE')) {
+      assert.strictEqual(cap.capabilityState, 'NOT_SUPPORTED');
+      assert.strictEqual(cap.isAvailable, false);
+    }
+  });
+
+  it('should produce accurate SourceCapabilitySummary for all source formats', () => {
+    // MusicXML
+    const xmlSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('STRUCTURED_MUSICXML');
+    assert.strictEqual(xmlSum.state, 'SUPPORTED');
+    assert.strictEqual(xmlSum.canConvert, true);
+
+    // MIDI
+    const midiSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('STRUCTURED_MIDI');
+    assert.strictEqual(midiSum.state, 'SUPPORTED');
+    assert.strictEqual(midiSum.canConvert, true);
+
+    // ChordPro
+    const choSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('STRUCTURED_CHORDPRO');
+    assert.strictEqual(choSum.state, 'SUPPORTED');
+    assert.strictEqual(choSum.canConvert, true);
+    assert.ok(choSum.advisoryNotice?.includes('Cero Fabricación'));
+
+    // TXT Lyrics
+    const txtSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('TXT_LYRICS');
+    assert.strictEqual(txtSum.state, 'PARTIALLY_SUPPORTED');
+    assert.strictEqual(txtSum.canConvert, true);
+
+    // PDF Score
+    const pdfSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('PDF_SCORE');
+    assert.strictEqual(pdfSum.state, 'PARTIALLY_SUPPORTED');
+    assert.strictEqual(pdfSum.canConvert, false);
+    assert.ok(pdfSum.advisoryNotice?.includes('Fase 2B'));
+
+    // Image Score
+    const imgSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('IMAGE_SCORE');
+    assert.strictEqual(imgSum.state, 'PARTIALLY_SUPPORTED');
+    assert.strictEqual(imgSum.canConvert, false);
+    assert.ok(imgSum.advisoryNotice?.includes('Fase 2B'));
+
+    // Audio
+    const audioSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('AUDIO_RECORDING');
+    assert.strictEqual(audioSum.state, 'PARTIALLY_SUPPORTED');
+    assert.strictEqual(audioSum.canConvert, false);
+    assert.ok(audioSum.advisoryNotice?.includes('Fase 2B'));
+
+    // Tablature
+    const tabSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('TABLATURE_ASCII');
+    assert.strictEqual(tabSum.state, 'NOT_SUPPORTED');
+    assert.strictEqual(tabSum.canConvert, false);
+  });
+
+  it('should detect tablature and lyrics extensions properly', () => {
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('solo.tab'),
+      'TABLATURE_ASCII'
+    );
+    assert.strictEqual(
+      FormatCapabilitiesEvaluator.detectSourceCategory('letra.txt', 'Sublime Gracia del Senor'),
+      'TXT_LYRICS'
+    );
+  });
 });
 

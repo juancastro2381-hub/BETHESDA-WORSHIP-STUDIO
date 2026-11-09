@@ -24,6 +24,8 @@ import {
   type ConversionTargetFormat,
   type FormatCapabilityInfo,
   type ConversionDiagnostic,
+  type CapabilityState,
+  type SourceCapabilitySummary,
 } from '../../core/conversion/index.ts';
 import { CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
 
@@ -115,8 +117,16 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       file.name.endsWith('.mid') ||
       file.name.endsWith('.midi') ||
       file.name.endsWith('.pdf') ||
+      file.name.endsWith('.png') ||
+      file.name.endsWith('.jpg') ||
+      file.name.endsWith('.jpeg') ||
+      file.name.endsWith('.webp') ||
+      file.name.endsWith('.tiff') ||
       file.name.endsWith('.mp3') ||
-      file.name.endsWith('.wav');
+      file.name.endsWith('.wav') ||
+      file.name.endsWith('.m4a') ||
+      file.name.endsWith('.ogg') ||
+      file.name.endsWith('.flac');
 
     const reader = new FileReader();
 
@@ -265,6 +275,18 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const handleStartConversion = useCallback(async () => {
     if (!selectedFile) return;
 
+    // Guard: Validación estricta antes de iniciar procesamiento
+    const canConvertNow = capabilities.some((c) => c.isAvailable);
+    const targetCap = capabilities.find((c) => c.format === selectedTarget);
+    if (!canConvertNow || !targetCap || !targetCap.isAvailable) {
+      setConversionStatus('FAILED');
+      const err =
+        targetCap?.blockingReason ||
+        'La conversión no está disponible para este tipo de archivo en la versión actual (planificado para la Fase 2B).';
+      setErrorMessage(err);
+      return;
+    }
+
     setConversionStatus('PROCESSING');
     setProgress(10);
     setErrorMessage(null);
@@ -377,6 +399,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     fileRawBytes,
     user,
     client,
+    capabilities,
   ]);
 
   const handleCancelJob = useCallback(async () => {
@@ -486,6 +509,128 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     }
   }, [exportResult, onOpenInMusicStand, onClose]);
 
+  const sourceSummary = sourceCategory
+    ? FormatCapabilitiesEvaluator.getSourceCapabilitySummary(sourceCategory, selectedFile?.name)
+    : null;
+  const canConvert = capabilities.some((c) => c.isAvailable);
+  const currentTargetCap = capabilities.find((c) => c.format === selectedTarget);
+  const isTargetAvailable = Boolean(currentTargetCap?.isAvailable);
+
+  const isPermanentFailure =
+    Boolean(errorMessage) &&
+    (errorMessage!.includes('SOURCE_CATEGORY_DEFERRED_PHASE') ||
+      errorMessage!.includes('BLOCKED_ZERO_FABRICATION') ||
+      errorMessage!.includes('CERO Fabricación') ||
+      errorMessage!.includes('CERO-FABRICACIÓN') ||
+      errorMessage!.includes('DEFERRED_PHASE') ||
+      errorMessage!.includes('Fase 2B') ||
+      errorMessage!.includes('TABLATURE_INGESTION_UNSUPPORTED') ||
+      errorMessage!.includes('no admite conversión') ||
+      errorMessage!.includes('no es compatible') ||
+      errorMessage!.includes('requiere transcripción'));
+
+  const getCapabilityStateBadgeClass = (state: CapabilityState): string => {
+    switch (state) {
+      case 'SUPPORTED':
+        return 'badge-state-supported';
+      case 'PARTIALLY_SUPPORTED':
+        return 'badge-state-partially-supported';
+      case 'NOT_SUPPORTED':
+        return 'badge-state-not-supported';
+      case 'PLANNED_PHASE_2B':
+        return 'badge-state-planned-phase-2b';
+      default:
+        return '';
+    }
+  };
+
+  const getCapabilityStateBadgeLabel = (state: CapabilityState): string => {
+    switch (state) {
+      case 'SUPPORTED':
+        return 'SOPORTADO';
+      case 'PARTIALLY_SUPPORTED':
+        return 'PARCIAL';
+      case 'NOT_SUPPORTED':
+        return 'NO SOPORTADO';
+      case 'PLANNED_PHASE_2B':
+        return 'PLANIFICADO FASE 2B';
+      default:
+        return state;
+    }
+  };
+
+  const formatHumanFriendlyError = (
+    rawError: string | null
+  ): { title: string; explanation: string; technical?: string } => {
+    if (!rawError) {
+      return {
+        title: 'Error en la conversión',
+        explanation: 'Ocurrió un error inesperado durante el procesamiento.',
+      };
+    }
+
+    if (
+      rawError.includes('SOURCE_CATEGORY_DEFERRED_PHASE') ||
+      rawError.includes('requiere transcripción o digitalización óptica diferida')
+    ) {
+      return {
+        title: 'Conversión Planificada para la Fase 2B',
+        explanation:
+          'La transcripción automática de audio a partitura y el reconocimiento óptico (OMR) están planificados para la Fase 2B mediante modelos locales de alta fidelidad sin servicios comerciales de terceros. Su archivo original ha sido preservado íntegramente en el sistema.',
+        technical: rawError,
+      };
+    }
+
+    if (
+      rawError.includes('BLOCKED_ZERO_FABRICATION') ||
+      rawError.includes('CERO Fabricación') ||
+      rawError.includes('CERO-FABRICACIÓN') ||
+      rawError.includes('sin notas')
+    ) {
+      return {
+        title: 'Conversión Bloqueada por Cero Fabricación',
+        explanation:
+          'Bethesda Worship Studio opera bajo el principio de fidelidad estricta y CERO invención de notas. El archivo fuente no contiene notas melódicas, por lo que no es posible generar un archivo MIDI sin inventar notas.',
+        technical: rawError,
+      };
+    }
+
+    if (rawError.includes('ENGRAVED_PDF_DEFERRED_PHASE')) {
+      return {
+        title: 'Grabado de PDF en Servidor Planificado para Fase 2B',
+        explanation:
+          'El grabado vectorial directo a PDF en servidor mediante Bravura está planificado para la Fase 2B. Puede exportar a MusicXML para abrir e imprimir en software de notación profesional.',
+        technical: rawError,
+      };
+    }
+
+    if (
+      rawError.includes('TABLATURE_INGESTION_UNSUPPORTED') ||
+      rawError.includes('tablatura')
+    ) {
+      return {
+        title: 'Tablatura ASCII No Soportada Directamente',
+        explanation:
+          'La ingesta y conversión directa de tablaturas en texto (.tab) está planificada para la Fase 2B. El atril permite visualizar digitaciones a partir de partituras canónicas.',
+        technical: rawError,
+      };
+    }
+
+    if (rawError.includes('QUEUE_UNAVAILABLE')) {
+      return {
+        title: 'Servicio de Cola No Disponible',
+        explanation:
+          'El gestor de tareas en segundo plano no se encuentra accesible en este momento. Por favor verifique la conexión del servidor o reintente en unos instantes.',
+        technical: rawError,
+      };
+    }
+
+    return {
+      title: 'Error de Procesamiento',
+      explanation: rawError,
+    };
+  };
+
   const formatFileSize = (bytes: number): string => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -551,6 +696,36 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
         )}
       </div>
 
+      {/* Barra de Estado del Sistema y Compatibilidad */}
+      <div className="conversion-health-bar">
+        <div className="health-indicators-group">
+          <div className="health-item">
+            <span className="health-dot dot-online" />
+            <span className="health-item-label">Servidor API:</span>
+            <span className="health-item-val">En línea</span>
+          </div>
+          <div className="health-item">
+            <span className="health-dot dot-online" />
+            <span className="health-item-label">Motor de Cola:</span>
+            <span className="health-item-val">{user ? 'pg-boss Activo' : 'Transpilador Local'}</span>
+          </div>
+        </div>
+        <div className="health-item">
+          <span className="health-item-label">Compatibilidad:</span>
+          <span className="health-item-val">
+            {!selectedFile
+              ? '⚪ Esperando archivo...'
+              : sourceSummary?.state === 'SUPPORTED'
+              ? `🟢 Formato Soportado (${sourceSummary.label})`
+              : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
+              ? `⚠️ Soporte Parcial (${sourceSummary.label})`
+              : sourceSummary?.state === 'NOT_SUPPORTED'
+              ? `❌ No Soportado (${sourceSummary.label})`
+              : `⏱️ Planificado Fase 2B (${sourceSummary?.label})`}
+          </span>
+        </div>
+      </div>
+
       <div className="conversion-grid-container">
         {/* COLUMNA IZQUIERDA: Carga, Detección y Opciones */}
         <div className="conversion-panel-left">
@@ -614,6 +789,31 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </button>
               </div>
             )}
+
+            {selectedFile && sourceSummary?.advisoryNotice && (
+              <div
+                className={`capability-advisory-banner ${
+                  sourceSummary.state === 'NOT_SUPPORTED'
+                    ? 'advisory-blocked'
+                    : sourceSummary.state === 'PARTIALLY_SUPPORTED'
+                    ? 'advisory-warning'
+                    : 'advisory-info'
+                }`}
+              >
+                <span className="advisory-icon">
+                  {sourceCategory === 'AUDIO_RECORDING'
+                    ? '🎙️'
+                    : sourceCategory === 'PDF_SCORE' || sourceCategory === 'IMAGE_SCORE'
+                    ? '📄'
+                    : sourceCategory === 'TABLATURE_ASCII'
+                    ? '⚠️'
+                    : 'ℹ️'}
+                </span>
+                <div className="advisory-content">
+                  <strong>{sourceSummary.label}:</strong> {sourceSummary.advisoryNotice}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* SECCIÓN B: Detección Automática y Capacidades */}
@@ -629,21 +829,36 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   {sourceCategory === 'STRUCTURED_MUSICXML' && '🎼 MusicXML 4.0'}
                   {sourceCategory === 'STRUCTURED_MIDI' && '🎹 MIDI Estándar (SMF 1)'}
                   {sourceCategory === 'STRUCTURED_CHORDPRO' && '🎸 ChordPro (Cifrado con Letra)'}
+                  {sourceCategory === 'TXT_LYRICS' && '📝 Solo Letra / Texto'}
                   {sourceCategory === 'PDF_SCORE' && '📄 Partitura en PDF'}
                   {sourceCategory === 'IMAGE_SCORE' && '🖼️ Partitura en Imagen'}
                   {sourceCategory === 'AUDIO_RECORDING' && '🎙️ Grabación de Audio'}
                   {sourceCategory === 'VIDEO_REFERENCE' && '🎥 Video de Referencia'}
+                  {sourceCategory === 'TABLATURE_ASCII' && '🎸 Tablatura ASCII'}
                   {sourceCategory === 'WRITTEN_NOTES' && '📝 Notas Escritas / JSON'}
                 </span>
+                {sourceSummary && (
+                  <span
+                    className={`cap-badge ${getCapabilityStateBadgeClass(sourceSummary.state)}`}
+                    style={{ marginLeft: '8px' }}
+                  >
+                    {getCapabilityStateBadgeLabel(sourceSummary.state)}
+                  </span>
+                )}
               </div>
 
               <div className="capabilities-matrix-list">
                 {capabilities.map((cap) => (
                   <div key={cap.format} className="capability-row">
                     <span className="cap-format-name">{cap.label}</span>
-                    <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
-                      {getBadgeLabel(cap.statusBadge)}
-                    </span>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
+                        {getCapabilityStateBadgeLabel(cap.capabilityState)}
+                      </span>
+                      <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
+                        {getBadgeLabel(cap.statusBadge)}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -679,9 +894,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     >
                       <div className="target-card-header">
                         <span className="target-card-label">{cap.label}</span>
-                        <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
-                          {getBadgeLabel(cap.statusBadge)}
-                        </span>
+                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                          <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
+                            {getCapabilityStateBadgeLabel(cap.capabilityState)}
+                          </span>
+                          <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
+                            {getBadgeLabel(cap.statusBadge)}
+                          </span>
+                        </div>
                       </div>
                       <p className="target-card-desc">{cap.description}</p>
                       {isBlocked && cap.blockingReason && (
@@ -781,14 +1001,36 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </div>
               </div>
 
+              {!canConvert && (
+                <div className="conversion-disabled-notice">
+                  🚫 <strong>Conversión no disponible para este tipo de archivo:</strong>{' '}
+                  {sourceSummary?.advisoryNotice ||
+                    'Este formato está reservado para preservación o planificado para la Fase 2B.'}
+                </div>
+              )}
+
+              {canConvert && !isTargetAvailable && (
+                <div className="conversion-disabled-notice">
+                  ⚠️ <strong>Formato objetivo no disponible:</strong>{' '}
+                  {currentTargetCap?.blockingReason ||
+                    'El formato seleccionado no es viable para la fuente actual.'}
+                </div>
+              )}
+
               {/* Botón de Iniciar Conversión */}
               <button
                 type="button"
                 className="btn-execute-conversion"
                 onClick={handleStartConversion}
-                disabled={conversionStatus === 'PROCESSING'}
+                disabled={conversionStatus === 'PROCESSING' || !canConvert || !isTargetAvailable}
               >
-                {conversionStatus === 'PROCESSING' ? '⚙️ Procesando...' : '🚀 Convertir Archivo'}
+                {conversionStatus === 'PROCESSING'
+                  ? '⚙️ Procesando...'
+                  : !canConvert
+                  ? '🚫 Conversión no disponible (Planificado Fase 2B)'
+                  : !isTargetAvailable
+                  ? '🚫 Formato Objetivo No Disponible'
+                  : '🚀 Convertir Archivo'}
               </button>
             </div>
           )}
@@ -845,22 +1087,28 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   </button>
                 )}
                 {conversionStatus === 'FAILED' && (
-                  <button
-                    type="button"
-                    className="btn-retry-job"
-                    onClick={handleRetryJob}
-                    style={{
-                      background: 'rgba(59, 130, 246, 0.15)',
-                      border: '1px solid rgba(59, 130, 246, 0.4)',
-                      color: '#60a5fa',
-                      borderRadius: '6px',
-                      padding: '0.35rem 0.75rem',
-                      fontSize: '0.825rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🔄 Reintentar Trabajo
-                  </button>
+                  isPermanentFailure ? (
+                    <div className="retry-blocked-notice">
+                      ℹ️ <em>Reintento deshabilitado: La conversión no es viable para este tipo de archivo en la versión actual.</em>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-retry-job"
+                      onClick={handleRetryJob}
+                      style={{
+                        background: 'rgba(59, 130, 246, 0.15)',
+                        border: '1px solid rgba(59, 130, 246, 0.4)',
+                        color: '#60a5fa',
+                        borderRadius: '6px',
+                        padding: '0.35rem 0.75rem',
+                        fontSize: '0.825rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      🔄 Reintentar Trabajo
+                    </button>
+                  )
                 )}
                 {conversionStatus === 'CANCELLED' && (
                   <button
@@ -882,7 +1130,27 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 )}
               </div>
 
-              {errorMessage && <div className="conversion-error-alert">{errorMessage}</div>}
+              {errorMessage && (
+                <div className="human-friendly-error-card">
+                  {(() => {
+                    const errorInfo = formatHumanFriendlyError(errorMessage);
+                    return (
+                      <>
+                        <div className="human-error-title">
+                          <span>⚠️</span>
+                          <span>{errorInfo.title}</span>
+                        </div>
+                        <div className="human-error-explanation">{errorInfo.explanation}</div>
+                        {errorInfo.technical && (
+                          <div className="human-error-technical">
+                            Diagnóstico técnico: {errorInfo.technical}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           )}
 

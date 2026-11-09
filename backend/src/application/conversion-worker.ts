@@ -60,6 +60,8 @@ export function isTransientError(err: any): boolean {
   );
 }
 
+export type WorkerLifecycleState = 'IDLE' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED';
+
 export interface ConversionWorkerOptions {
   recoveryIntervalMs?: number;
   onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
@@ -78,11 +80,11 @@ export class ConversionWorker {
   private readonly activeJobIds = new Set<string>();
   private readonly activeJobCounts = new Map<string, number>();
   private recoveryTimer: NodeJS.Timeout | null = null;
-  private recoveryCycleCount = 0;
+  private startupRecoveryCount = 0;
+  private periodicRecoveryCycleCount = 0;
+  private totalRecoveryExecutions = 0;
   private isRecovering = false;
-  private isWorking = false;
-  private isStarted = false;
-  private isStopping = false;
+  private lifecycleState: WorkerLifecycleState = 'IDLE';
   private stoppingPromise: Promise<void> | null = null;
 
   public constructor(
@@ -102,7 +104,11 @@ export class ConversionWorker {
   }
 
   public isActive(): boolean {
-    return this.isStarted && this.isWorking;
+    return this.lifecycleState === 'RUNNING';
+  }
+
+  public getLifecycleState(): WorkerLifecycleState {
+    return this.lifecycleState;
   }
 
   public getActiveJobsCount(): number {
@@ -113,8 +119,20 @@ export class ConversionWorker {
     return new Set(this.activeJobIds);
   }
 
+  public getStartupRecoveryCount(): number {
+    return this.startupRecoveryCount;
+  }
+
+  public getPeriodicRecoveryCycleCount(): number {
+    return this.periodicRecoveryCycleCount;
+  }
+
   public getRecoveryCycleCount(): number {
-    return this.recoveryCycleCount;
+    return this.startupRecoveryCount + this.periodicRecoveryCycleCount;
+  }
+
+  public getTotalRecoveryExecutions(): number {
+    return this.totalRecoveryExecutions;
   }
 
   public isRecoveryActive(): boolean {
@@ -139,73 +157,89 @@ export class ConversionWorker {
 
   /**
    * Inicia el worker y se suscribe autoritativamente a la cola pg-boss (CR-01).
-   * Ejecuta además la recuperación segura y consciente de arrendamientos expirados (CR-04, WS03).
-   * Idempotente ante llamadas repetidas de inicio.
+   * Ejecuta además la recuperación segura y consciente de arrendamientos expirados al arranque (CR-04, WS03).
+   * Idempotente ante llamadas repetidas de inicio y consciente del ciclo de vida.
    */
   public async start(): Promise<void> {
     if (this.stoppingPromise) {
       await this.stoppingPromise;
     }
-    if (this.isStarted) return;
+    if (this.lifecycleState === 'RUNNING' || this.lifecycleState === 'STARTING') {
+      return;
+    }
 
-    // 1. Recuperar únicamente trabajos con arrendamiento expirado (CR-04, WS03)
+    this.lifecycleState = 'STARTING';
+
     try {
-      await this.recoverStaleJobs();
-    } catch (err) {
-      console.warn('[ConversionWorker] Error no fatal en recuperación inicial de stale jobs al arrancar:', err);
-    }
+      // 1. Recuperar únicamente trabajos con arrendamiento expirado al arranque (CR-04, WS03)
+      try {
+        this.startupRecoveryCount++;
+        await this.recoverStaleJobs();
+      } catch (err) {
+        console.warn('[ConversionWorker] Error no fatal en recuperación inicial de stale jobs al arrancar:', err);
+      }
 
-    // 2. Programar recuperación periódica recurrente y segura (WS03)
-    if (!this.recoveryTimer && this.recoveryIntervalMs > 0) {
-      this.recoveryTimer = setInterval(async () => {
-        try {
-          await this.recoverStaleJobs();
-        } catch (err) {
-          console.error('[ConversionWorker] Error en ciclo periódico de recuperación de stale jobs:', err);
+      // 2. Programar recuperación periódica recurrente y segura (WS03)
+      if (!this.recoveryTimer && this.recoveryIntervalMs > 0) {
+        this.recoveryTimer = setInterval(async () => {
+          try {
+            this.periodicRecoveryCycleCount++;
+            await this.recoverStaleJobs();
+          } catch (err) {
+            console.error('[ConversionWorker] Error en ciclo periódico de recuperación de stale jobs:', err);
+          }
+        }, this.recoveryIntervalMs);
+        if (this.recoveryTimer.unref) {
+          this.recoveryTimer.unref();
         }
-      }, this.recoveryIntervalMs);
-      if (this.recoveryTimer.unref) {
-        this.recoveryTimer.unref();
       }
+
+      // 3. Iniciar pg-boss y registrar handler de trabajo
+      const boss = await startConversionQueue();
+      await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
+        for (const job of jobs) {
+          await this.processJob(job.data);
+        }
+      });
+
+      this.lifecycleState = 'RUNNING';
+    } catch (err) {
+      this.lifecycleState = 'STOPPED';
+      if (this.recoveryTimer) {
+        clearInterval(this.recoveryTimer);
+        this.recoveryTimer = null;
+      }
+      throw err;
     }
-
-    // 3. Iniciar pg-boss y registrar handler de trabajo
-    const boss = await startConversionQueue();
-    await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
-      for (const job of jobs) {
-        await this.processJob(job.data);
-      }
-    });
-
-    this.isWorking = true;
-    this.isStarted = true;
   }
 
   /**
    * Detiene el worker de forma segura, acotada e idempotente (WS02):
    * 1. Cómputo del plazo límite (deadline) inmediato previo a cualquier espera asíncrona.
    * 2. Desactivación de banderas y cancelación inmediata de temporizador periódico (WS03).
-   * 3. Desuscripción de pg-boss acotada por el plazo restante.
+   * 3. Desuscripción de pg-boss acotada por el plazo restante con limpieza estricta de timers (sin leaks).
    * 4. Drenaje acotado de trabajos activos por el plazo restante.
    * 5. Si expira el plazo, no se bloquea indefinidamente; los trabajos incompletos
-   *    permanecen en PROCESSING para que sus arrendamientos expiren y sean recuperados.
-   * 6. Idempotencia ante llamadas paralelas o secuenciales.
+   *    permanecen en PROCESSING para que sus arrendamientos expiren naturalmente y sean recuperados.
+   * 6. Idempotencia ante llamadas paralelas o secuenciales y sincronización con start() si settling está activo.
    */
   public async stop(timeoutMs: number = 5000): Promise<void> {
-    if (this.isStopping) {
+    if (this.lifecycleState === 'STOPPING') {
       return this.stoppingPromise ?? Promise.resolve();
     }
-    if (!this.isStarted && !this.isWorking && this.activeJobIds.size === 0) {
-      if (this.recoveryTimer) {
-        clearInterval(this.recoveryTimer);
-        this.recoveryTimer = null;
+    if (this.lifecycleState === 'IDLE' || this.lifecycleState === 'STOPPED') {
+      if (this.activeJobIds.size === 0) {
+        if (this.recoveryTimer) {
+          clearInterval(this.recoveryTimer);
+          this.recoveryTimer = null;
+        }
+        return;
       }
-      return;
     }
 
-    this.isStopping = true;
+    this.lifecycleState = 'STOPPING';
     this.stoppingPromise = this.performStop(timeoutMs).finally(() => {
-      this.isStopping = false;
+      this.lifecycleState = 'STOPPED';
       this.stoppingPromise = null;
     });
 
@@ -214,7 +248,6 @@ export class ConversionWorker {
 
   private async performStop(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    this.isWorking = false;
 
     // 1. Detener ciclo recurrente de recuperación inmediatamente (WS02/WS03)
     if (this.recoveryTimer) {
@@ -222,20 +255,29 @@ export class ConversionWorker {
       this.recoveryTimer = null;
     }
 
-    // 2. Cancelar suscripción a la cola en pg-boss de forma acotada (WS02)
-    if (this.isStarted) {
-      try {
-        const remainingForOffWork = Math.max(0, deadline - Date.now());
-        const boss = getConversionQueue();
-        if (remainingForOffWork > 0) {
+    // 2. Cancelar suscripción a la cola en pg-boss de forma acotada y sin fugas de temporizadores (WS02)
+    try {
+      const remainingForOffWork = Math.max(0, deadline - Date.now());
+      const boss = getConversionQueue();
+      if (remainingForOffWork > 0) {
+        let offWorkTimer: NodeJS.Timeout | null = null;
+        const timeoutPromise = new Promise<void>((resolve) => {
+          offWorkTimer = setTimeout(resolve, remainingForOffWork);
+        });
+        try {
           await Promise.race([
             boss.offWork(CONVERSION_QUEUE_NAME),
-            new Promise((resolve) => setTimeout(resolve, remainingForOffWork)),
+            timeoutPromise,
           ]);
+        } finally {
+          if (offWorkTimer) {
+            clearTimeout(offWorkTimer);
+            offWorkTimer = null;
+          }
         }
-      } catch {
-        // Ignorar si la cola ya fue cerrada
       }
+    } catch {
+      // Ignorar si la cola ya fue cerrada previamente o no está inicializada
     }
 
     // 3. Espera acotada para que trabajos activos terminen (Graceful Drain)
@@ -250,8 +292,6 @@ export class ConversionWorker {
         `[ConversionWorker] Graceful shutdown timeout (${timeoutMs}ms) alcanzado con ${this.activeJobIds.size} trabajo(s) aún en ejecución. Los arrendamientos expirarán para recuperación segura.`
       );
     }
-
-    this.isStarted = false;
   }
 
   /**
@@ -587,7 +627,7 @@ export class ConversionWorker {
     this.isRecovering = true;
 
     try {
-      this.recoveryCycleCount++;
+      this.totalRecoveryExecutions++;
       const now = new Date();
       const expiredJobs = await this.db
         .select()

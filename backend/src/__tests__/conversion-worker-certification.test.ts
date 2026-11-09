@@ -24,6 +24,8 @@ import { ConversionJobService } from '../application/conversion-job-service.ts';
 import {
   LocalFileSystemSourceStorageProvider,
   StorageReadError,
+  StorageWriteError,
+  StorageDeleteError,
 } from '../domain/ingestion/source-storage-provider.ts';
 import { stopConversionQueue, type ConversionJobPayload } from '../infrastructure/queue/conversion-queue.ts';
 import { ValidationError, PersistenceError } from '../domain/errors.ts';
@@ -453,7 +455,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
 
       assert.strictEqual(worker.isActive(), false, 'Worker debe quedar inactivo tras deadline');
       assert.ok(
-        elapsed < 1500,
+        elapsed >= 250 && elapsed <= 700,
         `Stop debió retornar en ~300ms respetando el deadline estricto (duración real: ${elapsed}ms)`
       );
 
@@ -542,67 +544,117 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       await worker.stop(1000);
       assert.strictEqual(worker.isActive(), false);
     });
+
+    it('2.6 should prevent race condition if start() is called while stop() is settling', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-settling-restart');
+      await worker.start();
+      assert.strictEqual(worker.isActive(), true);
+
+      // Iniciar stop() con un pequeño timeout
+      const stopPromise = worker.stop(100);
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPING');
+
+      // Intentar start() mientras stop() está resolviendo
+      const startPromise = worker.start();
+
+      await Promise.all([stopPromise, startPromise]);
+
+      assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+      assert.strictEqual(worker.isActive(), true);
+
+      await worker.stop(500);
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+    });
+
+    it('2.7 should transition cleanly across lifecycle states (IDLE -> STARTING -> RUNNING -> STOPPING -> STOPPED)', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-lifecycle-states');
+      assert.strictEqual(worker.getLifecycleState(), 'IDLE');
+
+      const startPromise = worker.start();
+      await startPromise;
+      assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+      const stopPromise = worker.stop(500);
+      await stopPromise;
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+    });
   });
 
   // ===========================================================================
   // WS03: REAL PERIODIC RECOVERY AND MUTUAL EXCLUSION
   // ===========================================================================
   describe('WS03 — Real Periodic Recovery & Mutual Exclusion', () => {
-    it('3.1 should execute multiple periodic recovery cycles over time (at least 2 observed cycles)', async () => {
-      // Iniciar worker con intervalo periódico muy corto (60ms) para observar al menos 2 ciclos
+    it('3.1 should execute multiple periodic recovery cycles over time (at least 2 observed periodic cycles)', async () => {
+      // Iniciar worker con intervalo periódico muy corto (60ms) para observar al menos 2 ciclos periódicos reales
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws03-periodic', {
         recoveryIntervalMs: 60,
       });
 
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
+      assert.strictEqual(worker.getStartupRecoveryCount(), 1, 'Debe haber ejecutado exactamente 1 recuperación al inicio');
 
       // Esperar tiempo suficiente para que se disparen al menos 2 ciclos periódicos
-      await new Promise((resolve) => setTimeout(resolve, 220));
+      await new Promise((resolve) => setTimeout(resolve, 240));
 
-      const cycles = worker.getRecoveryCycleCount();
+      const periodicCycles = worker.getPeriodicRecoveryCycleCount();
       await worker.stop(1000);
 
       assert.ok(
-        cycles >= 2,
-        `Se debieron observar al menos 2 ciclos de recuperación periódica (observados: ${cycles})`
+        periodicCycles >= 2,
+        `Se debieron observar al menos 2 ciclos de recuperación periódica (observados: ${periodicCycles})`
       );
     });
 
     it('3.2 should enforce in-process mutual exclusion to prevent overlapping recovery runs', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws03-mutex');
 
-      // Simular que recoverStaleJobs está en ejecución
-      let releaseRecovery: () => void;
-      const recoveryBlock = new Promise<void>((resolve) => {
-        releaseRecovery = resolve;
+      let releaseRecoveryBarrier!: () => void;
+      const recoveryBarrier = new Promise<void>((resolve) => {
+        releaseRecoveryBarrier = resolve;
       });
 
       const originalSelect = db.select.bind(db);
-      // Interceptar select para simular concurrencia
-      let selectCount = 0;
+      let intercepted = false;
+
       (worker as any).db = {
         ...db,
         select: (...args: any[]) => {
-          selectCount++;
+          if (!intercepted) {
+            intercepted = true;
+            return {
+              from: () => ({
+                where: async () => {
+                  await recoveryBarrier; // Pausar ejecución 1 dentro de la sección crítica
+                  return [];
+                },
+              }),
+            };
+          }
           return (originalSelect as any)(...args);
         },
       };
 
-      // Disparar dos pasadas concurrentes de recoverStaleJobs en la misma instancia
+      // Iniciar ejecución 1 que quedará pausada en la barrera dentro de recoverStaleJobs
       const run1 = worker.recoverStaleJobs();
-      const run2 = worker.recoverStaleJobs();
 
-      const [recovered1, recovered2] = await Promise.all([run1, run2]);
+      // Permitir que run1 ingrese a recoverStaleJobs y adquiera isRecovering = true
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.strictEqual(worker.isRecoveryActive(), true, 'isRecovering debe estar activo');
 
-      // Una de las dos ejecuciones debe retornar 0 de inmediato por exclusión mutua
-      assert.ok(
-        recovered1 === 0 || recovered2 === 0,
-        'Una de las pasadas concurrentes debió ser descartada por el mutex isRecovering'
-      );
+      // Ejecución 2 llamada concurrentemente mientras run1 está dentro del mutex
+      const recovered2 = await worker.recoverStaleJobs();
+      assert.strictEqual(recovered2, 0, 'La ejecución concurrente 2 debe retornar 0 de inmediato por exclusión mutua');
+
+      // Liberar barrera de ejecución 1
+      releaseRecoveryBarrier();
+      const recovered1 = await run1;
+
+      assert.strictEqual(recovered1, 0);
+      assert.strictEqual(worker.isRecoveryActive(), false, 'isRecovering debe ser liberado tras completar run1');
     });
 
-    it('3.3 should be resilient to errors in recovery and continue running subsequent cycles', async () => {
+    it('3.3 should be resilient to errors in recovery, release mutex in finally, and continue subsequent cycles', async () => {
       let callCount = 0;
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws03-resilience', {
         recoveryIntervalMs: 50,
@@ -623,6 +675,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       await worker.stop(1000);
 
       assert.ok(callCount >= 2, `Debió reintentar y ejecutar ciclos subsecuentes (llamadas: ${callCount})`);
+      assert.strictEqual(worker.isRecoveryActive(), false, 'Mutex debe estar libre tras salir de error');
     });
 
     it('3.4 should clear recovery timer cleanly when stopped so no orphaned timers leak', async () => {
@@ -688,6 +741,83 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       const [updatedJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, staleJob.id));
       assert.strictEqual(updatedJob.status, 'PENDING');
       assert.strictEqual(updatedJob.leaseOwner, null);
+    });
+
+    it('3.6 should NOT reclaim jobs with active (unexpired) leases in PROCESSING status', async () => {
+      const activeLeaseExpires = new Date(Date.now() + 120_000); // 2 minutos en el futuro
+      const [activeJob] = await db
+        .insert(backgroundJobs)
+        .values({
+          jobType: 'CONVERSION',
+          status: 'PROCESSING',
+          progress: 40,
+          userId: testUserId,
+          inputRef: 'active_lease_job.cho',
+          leaseOwner: 'worker_currently_active',
+          leaseToken: 'token_currently_active',
+          leaseExpiresAt: activeLeaseExpires,
+          attempts: 1,
+          maxAttempts: 3,
+        })
+        .returning();
+      createdJobIds.push(activeJob.id);
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws03-active-lease');
+      const reclaimed = await worker.recoverStaleJobs();
+
+      const [checkedJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, activeJob.id));
+      assert.strictEqual(checkedJob.status, 'PROCESSING', 'El trabajo activo no debe ser alterado');
+      assert.strictEqual(checkedJob.leaseOwner, 'worker_currently_active');
+      assert.strictEqual(checkedJob.leaseToken, 'token_currently_active');
+    });
+
+    it('3.7 should NEVER overwrite or modify terminal jobs (COMPLETED, CANCELLED, FAILED)', async () => {
+      const pastDate = new Date(Date.now() - 100_000);
+      const [completedJob] = await db
+        .insert(backgroundJobs)
+        .values({
+          jobType: 'CONVERSION',
+          status: 'COMPLETED',
+          progress: 100,
+          userId: testUserId,
+          inputRef: 'terminal_completed.cho',
+          leaseExpiresAt: pastDate,
+        })
+        .returning();
+      const [failedJob] = await db
+        .insert(backgroundJobs)
+        .values({
+          jobType: 'CONVERSION',
+          status: 'FAILED',
+          progress: 100,
+          userId: testUserId,
+          inputRef: 'terminal_failed.cho',
+          leaseExpiresAt: pastDate,
+        })
+        .returning();
+      const [cancelledJob] = await db
+        .insert(backgroundJobs)
+        .values({
+          jobType: 'CONVERSION',
+          status: 'CANCELLED',
+          progress: 50,
+          userId: testUserId,
+          inputRef: 'terminal_cancelled.cho',
+          leaseExpiresAt: pastDate,
+        })
+        .returning();
+      createdJobIds.push(completedJob.id, failedJob.id, cancelledJob.id);
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws03-terminal-jobs');
+      await worker.recoverStaleJobs();
+
+      const [cJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, completedJob.id));
+      const [fJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, failedJob.id));
+      const [xJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, cancelledJob.id));
+
+      assert.strictEqual(cJob.status, 'COMPLETED');
+      assert.strictEqual(fJob.status, 'FAILED');
+      assert.strictEqual(xJob.status, 'CANCELLED');
     });
   });
 
@@ -795,6 +925,105 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         (err: any) => {
           assert.ok(err instanceof PersistenceError, 'reconcileStorage debe abortar de inmediato con PersistenceError');
           assert.match(err.message, /Fallo al inspeccionar el almacenamiento físico durante la reconciliación/);
+          return true;
+        }
+      );
+    });
+
+    it('4.7 exists() must return true for existing file, false on ENOENT, and throw StorageReadError on EACCES', async () => {
+      const testContent = Buffer.from('archivo para verificar existencia');
+      const saveRes = await storage.save('test_exists.txt', testContent);
+
+      // Archivo existente
+      const existsTrue = await storage.exists(saveRes.storageKey);
+      assert.strictEqual(existsTrue, true, 'exists() debe retornar true para archivo existente');
+
+      // Archivo no existente (ENOENT)
+      const existsFalse = await storage.exists('archivo_inexistente_enoent.txt');
+      assert.strictEqual(existsFalse, false, 'exists() debe retornar false cuando fs.access lanza ENOENT');
+
+      // Error de permisos simulado (EACCES)
+      const originalAccess = fs.promises.access;
+      (fs.promises as any).access = async () => {
+        const err: any = new Error('EACCES: permission denied, access');
+        err.code = 'EACCES';
+        throw err;
+      };
+
+      try {
+        await assert.rejects(
+          async () => {
+            await storage.exists('archivo_con_permiso_denegado.txt');
+          },
+          (err: any) => {
+            assert.ok(err instanceof StorageReadError, 'exists() debe lanzar StorageReadError en EACCES');
+            assert.match(err.message, /Fallo al verificar existencia en almacenamiento/);
+            return true;
+          }
+        );
+      } finally {
+        fs.promises.access = originalAccess;
+      }
+    });
+
+    it('4.8 exists() must throw ValidationError on Path Traversal attempt', async () => {
+      await assert.rejects(
+        async () => {
+          await storage.exists('../../etc/passwd');
+        },
+        (err: any) => {
+          assert.ok(err instanceof ValidationError, 'exists() debe lanzar ValidationError ante Path Traversal');
+          assert.match(err.message, /Violación de seguridad: Intento de Path Traversal detectado/);
+          return true;
+        }
+      );
+    });
+
+    it('4.9 delete() must return true on deletion, false on ENOENT, and throw StorageDeleteError on EACCES', async () => {
+      const testContent = Buffer.from('archivo para eliminar');
+      const saveRes = await storage.save('test_delete.txt', testContent);
+
+      // Eliminar archivo existente
+      const deletedTrue = await storage.delete(saveRes.storageKey);
+      assert.strictEqual(deletedTrue, true, 'delete() debe retornar true tras eliminar el archivo');
+
+      // Eliminar archivo que ya no existe (ENOENT)
+      const deletedFalse = await storage.delete(saveRes.storageKey);
+      assert.strictEqual(deletedFalse, false, 'delete() debe retornar false cuando el archivo no existe (ENOENT)');
+
+      // Error de permisos simulado (EACCES)
+      const originalUnlink = fs.promises.unlink;
+      (fs.promises as any).unlink = async () => {
+        const err: any = new Error('EACCES: permission denied, unlink');
+        err.code = 'EACCES';
+        throw err;
+      };
+
+      try {
+        await assert.rejects(
+          async () => {
+            await storage.delete('archivo_no_borrable.txt');
+          },
+          (err: any) => {
+            assert.ok(err instanceof StorageDeleteError, 'delete() debe lanzar StorageDeleteError en EACCES');
+            assert.ok(err instanceof StorageReadError, 'StorageDeleteError debe heredar de StorageReadError');
+            assert.match(err.message, /Fallo al eliminar archivo en almacenamiento/);
+            return true;
+          }
+        );
+      } finally {
+        fs.promises.unlink = originalUnlink;
+      }
+    });
+
+    it('4.10 delete() must throw ValidationError on Path Traversal attempt', async () => {
+      await assert.rejects(
+        async () => {
+          await storage.delete('../../etc/shadow');
+        },
+        (err: any) => {
+          assert.ok(err instanceof ValidationError, 'delete() debe lanzar ValidationError ante Path Traversal');
+          assert.match(err.message, /Violación de seguridad: Intento de Path Traversal detectado/);
           return true;
         }
       );

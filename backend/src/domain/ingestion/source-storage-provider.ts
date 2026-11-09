@@ -22,6 +22,28 @@ export class StorageReadError extends Error {
   }
 }
 
+export class StorageWriteError extends Error {
+  public constructor(
+    message: string,
+    public readonly originalError?: unknown,
+    public readonly targetPath?: string
+  ) {
+    super(message);
+    this.name = 'StorageWriteError';
+  }
+}
+
+export class StorageDeleteError extends StorageReadError {
+  public constructor(
+    message: string,
+    public readonly originalError?: unknown,
+    public readonly targetPath?: string
+  ) {
+    super(message, originalError, targetPath);
+    this.name = 'StorageDeleteError';
+  }
+}
+
 export interface SourceStorageSaveResult {
   readonly storageKey: string;
   readonly checksumSha256: string;
@@ -102,7 +124,11 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
         }
         // Si el archivo de destino ya existe (escritura concurrente idempotente), no fallar
         if (!fs.existsSync(targetPath)) {
-          throw err;
+          throw new StorageWriteError(
+            `Fallo al guardar archivo en almacenamiento "${targetPath}": ${(err as any)?.message ?? String(err)}`,
+            err,
+            targetPath
+          );
         }
       }
     }
@@ -131,24 +157,36 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
   }
 
   public async exists(storageKey: string): Promise<boolean> {
+    const filePath = this.resolveSafePath(storageKey);
     try {
-      const filePath = this.resolveSafePath(storageKey);
-      return fs.existsSync(filePath);
-    } catch {
-      return false;
+      await fs.promises.access(filePath, fs.constants.F_OK);
+      return true;
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        return false;
+      }
+      throw new StorageReadError(
+        `Fallo al verificar existencia en almacenamiento para "${filePath}": ${err?.message ?? String(err)}`,
+        err,
+        filePath
+      );
     }
   }
 
   public async delete(storageKey: string): Promise<boolean> {
+    const filePath = this.resolveSafePath(storageKey);
     try {
-      const filePath = this.resolveSafePath(storageKey);
       await fs.promises.unlink(filePath);
       return true;
     } catch (err: any) {
       if (err?.code === 'ENOENT') {
         return false;
       }
-      return false;
+      throw new StorageDeleteError(
+        `Fallo al eliminar archivo en almacenamiento "${filePath}": ${err?.message ?? String(err)}`,
+        err,
+        filePath
+      );
     }
   }
 

@@ -125,6 +125,7 @@ export class ConversionWorker {
   private unsubscribeSettled = true;
   private lastShutdownError: unknown | null = null;
   private isShutdownTimedOut = false;
+  private isQueueSubscribed = false;
 
   public constructor(
     private readonly db: Database = defaultDb,
@@ -166,10 +167,20 @@ export class ConversionWorker {
     return this.isShutdownTimedOut;
   }
 
+  public isSubscribed(): boolean {
+    return this.isQueueSubscribed;
+  }
+
   public resetLifecycle(): void {
     if (this.pendingUnsubscribePromise !== null && !this.unsubscribeSettled) {
       throw new WorkerLifecycleError(
         'No se puede restablecer el ciclo de vida mientras exista una operación de desuscripción pendiente.'
+      );
+    }
+    if (this.isQueueSubscribed || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
+      throw new WorkerLifecycleError(
+        'No se puede restablecer el ciclo de vida mediante resetLifecycle(): el worker se encuentra en estado de error de desuscripción y la suscripción previa sigue potencialmente activa. ' +
+        'resetLifecycle() no puede eludir esta condición sin una desuscripción confirmada. Ejecute recover() para reintentar la desuscripción o reinicie el proceso.'
       );
     }
     this.lifecycleState = 'STOPPED';
@@ -232,6 +243,11 @@ export class ConversionWorker {
       await this.stoppingPromise;
     }
 
+    // Idempotencia ante llamadas repetidas en estado de ejecución activo
+    if (this.lifecycleState === 'RUNNING' || this.lifecycleState === 'STARTING') {
+      return;
+    }
+
     // Si la desuscripción sigue pendiente (por timeout de stop previo o desuscripción lenta)
     if (this.pendingUnsubscribePromise !== null || !this.unsubscribeSettled) {
       throw new WorkerLifecycleError(
@@ -242,13 +258,17 @@ export class ConversionWorker {
     // Si el worker quedó en estado ERROR por fallo de desuscripción
     if ((this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
       throw new WorkerLifecycleError(
-        'No se puede iniciar el worker: el worker se encuentra en estado ERROR debido a un fallo previo de desuscripción. Ejecute resetLifecycle() o stop() para recuperar el estado antes de iniciar.',
+        'No se puede iniciar el worker: el worker se encuentra en estado ERROR debido a un fallo previo de desuscripción. Ejecute recover() o stop() para recuperar el estado antes de iniciar.',
         this.lastShutdownError
       );
     }
 
-    if (this.lifecycleState === 'RUNNING' || this.lifecycleState === 'STARTING') {
-      return;
+    // Si la cola sigue potencialmente suscrita a pg-boss sin confirmación de remoción
+    if (this.isQueueSubscribed) {
+      throw new WorkerLifecycleError(
+        'No se puede iniciar el worker: una suscripción previa a la cola pg-boss no ha sido removida de forma autoritativa. Ejecute recover() para reintentar la desuscripción antes de reiniciar.',
+        this.lastShutdownError
+      );
     }
 
     this.lifecycleState = 'STARTING';
@@ -285,6 +305,7 @@ export class ConversionWorker {
         }
       });
 
+      this.isQueueSubscribed = true;
       this.lifecycleState = 'RUNNING';
     } catch (err) {
       this.lifecycleState = 'STOPPED';
@@ -323,7 +344,7 @@ export class ConversionWorker {
     }
 
     if (this.lifecycleState === 'IDLE' || this.lifecycleState === 'STOPPED') {
-      if (this.activeJobIds.size === 0 && this.pendingUnsubscribePromise === null) {
+      if (this.activeJobIds.size === 0 && this.pendingUnsubscribePromise === null && !this.isQueueSubscribed) {
         if (this.recoveryTimer) {
           clearInterval(this.recoveryTimer);
           this.recoveryTimer = null;
@@ -339,26 +360,6 @@ export class ConversionWorker {
       }
     }
 
-    if (this.lifecycleState === 'ERROR' && this.pendingUnsubscribePromise === null && this.activeJobIds.size === 0) {
-      if (this.recoveryTimer) {
-        clearInterval(this.recoveryTimer);
-        this.recoveryTimer = null;
-      }
-      const result: WorkerStopResult = {
-        success: false,
-        state: 'ERROR',
-        offWorkSettled: true,
-        activeJobsDrained: true,
-        remainingJobsCount: 0,
-        timedOut: false,
-        error: this.lastShutdownError ?? undefined,
-      };
-      if (throwOnError && this.lastShutdownError) {
-        throw new WorkerShutdownError('Worker en estado ERROR tras fallo de desuscripción', this.lastShutdownError);
-      }
-      return result;
-    }
-
     this.lifecycleState = 'STOPPING';
     this.isShutdownTimedOut = false;
 
@@ -371,6 +372,26 @@ export class ConversionWorker {
     })();
 
     return this.stoppingPromise;
+  }
+
+  /**
+   * Intenta una recuperación explícita y segura del ciclo de vida tras un fallo o timeout de desuscripción (WS01 / Regla C).
+   * Reintenta de forma autoritativa la desuscripción de pg-boss y la remoción del consumidor.
+   * Si la desuscripción tiene éxito y se verifica la remoción, restablece el worker a 'STOPPED'.
+   * Si la desuscripción falla, preserva estrictamente el estado 'ERROR'.
+   */
+  public async recover(timeoutMs: number = 5000): Promise<WorkerStopResult> {
+    if (this.lifecycleState === 'STOPPED' && !this.isQueueSubscribed && this.pendingUnsubscribePromise === null) {
+      return {
+        success: true,
+        state: 'STOPPED',
+        offWorkSettled: true,
+        activeJobsDrained: true,
+        remainingJobsCount: 0,
+        timedOut: false,
+      };
+    }
+    return this.stop({ timeoutMs, throwOnError: false });
   }
 
   private async performStop(timeoutMs: number, throwOnError: boolean = false): Promise<WorkerStopResult> {
@@ -397,12 +418,24 @@ export class ConversionWorker {
         const unsubscribeTask = (async () => {
           try {
             await boss.offWork(CONVERSION_QUEUE_NAME);
+
+            // Verificación autoritativa de que ningún worker para esta cola permanezca activo en pg-boss
+            if (typeof (boss as any).getWipData === 'function') {
+              const activeWorkers = (boss as any).getWipData();
+              if (Array.isArray(activeWorkers) && activeWorkers.some((w: any) => w.name === CONVERSION_QUEUE_NAME)) {
+                throw new Error('pg-boss reporta trabajadores activos en la cola tras invocación de offWork()');
+              }
+            }
+
+            this.isQueueSubscribed = false;
             this.unsubscribeSettled = true;
             this.pendingUnsubscribePromise = null;
-            if (this.lifecycleState === 'STOPPING') {
+            this.lastShutdownError = null;
+            if (this.lifecycleState === 'STOPPING' || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
               this.lifecycleState = 'STOPPED';
             }
           } catch (err) {
+            this.isQueueSubscribed = true;
             this.unsubscribeSettled = true;
             this.pendingUnsubscribePromise = null;
             this.lastShutdownError = err;

@@ -37,6 +37,20 @@ export class TransientWorkerError extends Error {
   }
 }
 
+export class WorkerLifecycleError extends Error {
+  public constructor(message: string, public readonly originalError?: unknown) {
+    super(message);
+    this.name = 'WorkerLifecycleError';
+  }
+}
+
+export class WorkerShutdownError extends Error {
+  public constructor(message: string, public readonly originalError?: unknown) {
+    super(message);
+    this.name = 'WorkerShutdownError';
+  }
+}
+
 export function isTransientError(err: any): boolean {
   if (!err) return false;
   if (err instanceof TransientWorkerError || err?.name === 'TransientWorkerError') return true;
@@ -60,7 +74,28 @@ export function isTransientError(err: any): boolean {
   );
 }
 
-export type WorkerLifecycleState = 'IDLE' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED';
+export type WorkerLifecycleState =
+  | 'IDLE'
+  | 'STARTING'
+  | 'RUNNING'
+  | 'STOPPING'
+  | 'STOPPED'
+  | 'ERROR';
+
+export interface WorkerStopOptions {
+  timeoutMs?: number;
+  throwOnError?: boolean;
+}
+
+export interface WorkerStopResult {
+  readonly success: boolean;
+  readonly state: WorkerLifecycleState;
+  readonly offWorkSettled: boolean;
+  readonly activeJobsDrained: boolean;
+  readonly remainingJobsCount: number;
+  readonly timedOut: boolean;
+  readonly error?: unknown;
+}
 
 export interface ConversionWorkerOptions {
   recoveryIntervalMs?: number;
@@ -85,7 +120,11 @@ export class ConversionWorker {
   private totalRecoveryExecutions = 0;
   private isRecovering = false;
   private lifecycleState: WorkerLifecycleState = 'IDLE';
-  private stoppingPromise: Promise<void> | null = null;
+  private stoppingPromise: Promise<WorkerStopResult> | null = null;
+  private pendingUnsubscribePromise: Promise<void> | null = null;
+  private unsubscribeSettled = true;
+  private lastShutdownError: unknown | null = null;
+  private isShutdownTimedOut = false;
 
   public constructor(
     private readonly db: Database = defaultDb,
@@ -109,6 +148,33 @@ export class ConversionWorker {
 
   public getLifecycleState(): WorkerLifecycleState {
     return this.lifecycleState;
+  }
+
+  public getPendingUnsubscribeOperation(): Promise<void> | null {
+    return this.pendingUnsubscribePromise;
+  }
+
+  public isUnsubscribePending(): boolean {
+    return this.pendingUnsubscribePromise !== null && !this.unsubscribeSettled;
+  }
+
+  public getLastShutdownError(): unknown | null {
+    return this.lastShutdownError;
+  }
+
+  public hasShutdownTimedOut(): boolean {
+    return this.isShutdownTimedOut;
+  }
+
+  public resetLifecycle(): void {
+    if (this.pendingUnsubscribePromise !== null && !this.unsubscribeSettled) {
+      throw new WorkerLifecycleError(
+        'No se puede restablecer el ciclo de vida mientras exista una operación de desuscripción pendiente.'
+      );
+    }
+    this.lifecycleState = 'STOPPED';
+    this.lastShutdownError = null;
+    this.isShutdownTimedOut = false;
   }
 
   public getActiveJobsCount(): number {
@@ -161,9 +227,26 @@ export class ConversionWorker {
    * Idempotente ante llamadas repetidas de inicio y consciente del ciclo de vida.
    */
   public async start(): Promise<void> {
+    // Si hay un stop() en progreso, esperar a que culmine su plazo
     if (this.stoppingPromise) {
       await this.stoppingPromise;
     }
+
+    // Si la desuscripción sigue pendiente (por timeout de stop previo o desuscripción lenta)
+    if (this.pendingUnsubscribePromise !== null || !this.unsubscribeSettled) {
+      throw new WorkerLifecycleError(
+        'No se puede iniciar el worker: una operación previa de desuscripción (offWork) aún se encuentra pendiente de resolución.'
+      );
+    }
+
+    // Si el worker quedó en estado ERROR por fallo de desuscripción
+    if ((this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
+      throw new WorkerLifecycleError(
+        'No se puede iniciar el worker: el worker se encuentra en estado ERROR debido a un fallo previo de desuscripción. Ejecute resetLifecycle() o stop() para recuperar el estado antes de iniciar.',
+        this.lastShutdownError
+      );
+    }
+
     if (this.lifecycleState === 'RUNNING' || this.lifecycleState === 'STARTING') {
       return;
     }
@@ -214,39 +297,83 @@ export class ConversionWorker {
   }
 
   /**
-   * Detiene el worker de forma segura, acotada e idempotente (WS02):
+   * Detiene el worker de forma segura, acotada e idempotente (WS01/WS02):
    * 1. Cómputo del plazo límite (deadline) inmediato previo a cualquier espera asíncrona.
    * 2. Desactivación de banderas y cancelación inmediata de temporizador periódico (WS03).
-   * 3. Desuscripción de pg-boss acotada por el plazo restante con limpieza estricta de timers (sin leaks).
+   * 3. Desuscripción de pg-boss acotada por el plazo restante con rastreo autoritativo de la operación en segundo plano.
    * 4. Drenaje acotado de trabajos activos por el plazo restante.
    * 5. Si expira el plazo, no se bloquea indefinidamente; los trabajos incompletos
    *    permanecen en PROCESSING para que sus arrendamientos expiren naturalmente y sean recuperados.
-   * 6. Idempotencia ante llamadas paralelas o secuenciales y sincronización con start() si settling está activo.
+   * 6. Idempotencia ante llamadas paralelas o secuenciales y compartición de la misma operación en curso.
    */
-  public async stop(timeoutMs: number = 5000): Promise<void> {
+  public async stop(options?: number | WorkerStopOptions): Promise<WorkerStopResult> {
+    const timeoutMs = typeof options === 'number' ? options : (options?.timeoutMs ?? 5000);
+    const throwOnError = typeof options === 'object' ? (options?.throwOnError ?? false) : false;
+
     if (this.lifecycleState === 'STOPPING') {
-      return this.stoppingPromise ?? Promise.resolve();
+      return this.stoppingPromise ?? Promise.resolve({
+        success: false,
+        state: 'STOPPING',
+        offWorkSettled: this.unsubscribeSettled,
+        activeJobsDrained: this.activeJobIds.size === 0,
+        remainingJobsCount: this.activeJobIds.size,
+        timedOut: this.isShutdownTimedOut,
+        error: this.lastShutdownError ?? undefined,
+      });
     }
+
     if (this.lifecycleState === 'IDLE' || this.lifecycleState === 'STOPPED') {
-      if (this.activeJobIds.size === 0) {
+      if (this.activeJobIds.size === 0 && this.pendingUnsubscribePromise === null) {
         if (this.recoveryTimer) {
           clearInterval(this.recoveryTimer);
           this.recoveryTimer = null;
         }
-        return;
+        return {
+          success: true,
+          state: this.lifecycleState,
+          offWorkSettled: true,
+          activeJobsDrained: true,
+          remainingJobsCount: 0,
+          timedOut: false,
+        };
       }
     }
 
+    if (this.lifecycleState === 'ERROR' && this.pendingUnsubscribePromise === null && this.activeJobIds.size === 0) {
+      if (this.recoveryTimer) {
+        clearInterval(this.recoveryTimer);
+        this.recoveryTimer = null;
+      }
+      const result: WorkerStopResult = {
+        success: false,
+        state: 'ERROR',
+        offWorkSettled: true,
+        activeJobsDrained: true,
+        remainingJobsCount: 0,
+        timedOut: false,
+        error: this.lastShutdownError ?? undefined,
+      };
+      if (throwOnError && this.lastShutdownError) {
+        throw new WorkerShutdownError('Worker en estado ERROR tras fallo de desuscripción', this.lastShutdownError);
+      }
+      return result;
+    }
+
     this.lifecycleState = 'STOPPING';
-    this.stoppingPromise = this.performStop(timeoutMs).finally(() => {
-      this.lifecycleState = 'STOPPED';
-      this.stoppingPromise = null;
-    });
+    this.isShutdownTimedOut = false;
+
+    this.stoppingPromise = (async () => {
+      try {
+        return await this.performStop(timeoutMs, throwOnError);
+      } finally {
+        this.stoppingPromise = null;
+      }
+    })();
 
     return this.stoppingPromise;
   }
 
-  private async performStop(timeoutMs: number): Promise<void> {
+  private async performStop(timeoutMs: number, throwOnError: boolean = false): Promise<WorkerStopResult> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
 
     // 1. Detener ciclo recurrente de recuperación inmediatamente (WS02/WS03)
@@ -255,29 +382,75 @@ export class ConversionWorker {
       this.recoveryTimer = null;
     }
 
-    // 2. Cancelar suscripción a la cola en pg-boss de forma acotada y sin fugas de temporizadores (WS02)
+    // 2. Cancelar suscripción a la cola en pg-boss de forma acotada y sin fugas de temporizadores (WS01/WS02)
+    let timedOutDuringOffWork = false;
+    let offWorkSettledThisCall = false;
+    let offWorkErrorThisCall: unknown = null;
+
     try {
-      const remainingForOffWork = Math.max(0, deadline - Date.now());
       const boss = getConversionQueue();
-      if (remainingForOffWork > 0) {
-        let offWorkTimer: NodeJS.Timeout | null = null;
-        const timeoutPromise = new Promise<void>((resolve) => {
-          offWorkTimer = setTimeout(resolve, remainingForOffWork);
-        });
-        try {
-          await Promise.race([
-            boss.offWork(CONVERSION_QUEUE_NAME),
-            timeoutPromise,
-          ]);
-        } finally {
-          if (offWorkTimer) {
-            clearTimeout(offWorkTimer);
-            offWorkTimer = null;
+
+      if (!this.pendingUnsubscribePromise) {
+        this.unsubscribeSettled = false;
+        this.lastShutdownError = null;
+
+        const unsubscribeTask = (async () => {
+          try {
+            await boss.offWork(CONVERSION_QUEUE_NAME);
+            this.unsubscribeSettled = true;
+            this.pendingUnsubscribePromise = null;
+            if (this.lifecycleState === 'STOPPING') {
+              this.lifecycleState = 'STOPPED';
+            }
+          } catch (err) {
+            this.unsubscribeSettled = true;
+            this.pendingUnsubscribePromise = null;
+            this.lastShutdownError = err;
+            this.lifecycleState = 'ERROR';
+            throw err;
           }
-        }
+        })();
+
+        this.pendingUnsubscribePromise = unsubscribeTask.catch(() => {});
       }
-    } catch {
-      // Ignorar si la cola ya fue cerrada previamente o no está inicializada
+
+      const remainingForOffWork = Math.max(0, deadline - Date.now());
+      if (this.pendingUnsubscribePromise && !this.unsubscribeSettled) {
+        if (remainingForOffWork > 0) {
+          let offWorkTimer: NodeJS.Timeout | null = null;
+          const timeoutPromise = new Promise<'TIMED_OUT'>((resolve) => {
+            offWorkTimer = setTimeout(() => resolve('TIMED_OUT'), remainingForOffWork);
+          });
+
+          try {
+            const raceResult = await Promise.race([
+              this.pendingUnsubscribePromise.then(() => 'SETTLED'),
+              timeoutPromise,
+            ]);
+
+            if (raceResult === 'TIMED_OUT') {
+              timedOutDuringOffWork = true;
+              this.isShutdownTimedOut = true;
+            } else {
+              offWorkSettledThisCall = true;
+            }
+          } finally {
+            if (offWorkTimer) {
+              clearTimeout(offWorkTimer);
+              offWorkTimer = null;
+            }
+          }
+        } else {
+          timedOutDuringOffWork = true;
+          this.isShutdownTimedOut = true;
+        }
+      } else {
+        offWorkSettledThisCall = true;
+      }
+    } catch (err) {
+      this.lastShutdownError = err;
+      offWorkErrorThisCall = err;
+      this.lifecycleState = 'ERROR';
     }
 
     // 3. Espera acotada para que trabajos activos terminen (Graceful Drain)
@@ -287,11 +460,72 @@ export class ConversionWorker {
       await new Promise((resolve) => setTimeout(resolve, step));
     }
 
-    if (this.activeJobIds.size > 0) {
+    const drained = this.activeJobIds.size === 0;
+    const remainingJobsCount = this.activeJobIds.size;
+    if (remainingJobsCount > 0) {
       console.warn(
-        `[ConversionWorker] Graceful shutdown timeout (${timeoutMs}ms) alcanzado con ${this.activeJobIds.size} trabajo(s) aún en ejecución. Los arrendamientos expirarán para recuperación segura.`
+        `[ConversionWorker] Graceful shutdown timeout (${timeoutMs}ms) alcanzado con ${remainingJobsCount} trabajo(s) aún en ejecución. Los arrendamientos expirarán para recuperación segura.`
       );
     }
+
+    if (this.lastShutdownError || offWorkErrorThisCall) {
+      this.lifecycleState = 'ERROR';
+      const result: WorkerStopResult = {
+        success: false,
+        state: 'ERROR',
+        offWorkSettled: true,
+        activeJobsDrained: drained,
+        remainingJobsCount,
+        timedOut: false,
+        error: this.lastShutdownError ?? offWorkErrorThisCall,
+      };
+      if (throwOnError) {
+        throw new WorkerShutdownError(
+          'Error durante la desuscripción de la cola en stop()',
+          this.lastShutdownError ?? offWorkErrorThisCall
+        );
+      }
+      return result;
+    }
+
+    if (timedOutDuringOffWork) {
+      this.lifecycleState = 'STOPPING';
+      const result: WorkerStopResult = {
+        success: false,
+        state: 'STOPPING',
+        offWorkSettled: false,
+        activeJobsDrained: drained,
+        remainingJobsCount,
+        timedOut: true,
+      };
+      if (throwOnError) {
+        throw new WorkerShutdownError('Timeout durante la desuscripción de la cola');
+      }
+      return result;
+    }
+
+    if (!drained) {
+      this.lifecycleState = 'STOPPED';
+      const result: WorkerStopResult = {
+        success: false,
+        state: 'STOPPED',
+        offWorkSettled: true,
+        activeJobsDrained: false,
+        remainingJobsCount,
+        timedOut: true,
+      };
+      return result;
+    }
+
+    this.lifecycleState = 'STOPPED';
+    return {
+      success: true,
+      state: 'STOPPED',
+      offWorkSettled: true,
+      activeJobsDrained: true,
+      remainingJobsCount: 0,
+      timedOut: false,
+    };
   }
 
   /**

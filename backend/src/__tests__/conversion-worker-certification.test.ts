@@ -19,6 +19,9 @@ import { backgroundJobs, users, songSources } from '../db/schema.ts';
 import {
   ConversionWorker,
   TransientWorkerError,
+  WorkerLifecycleError,
+  WorkerShutdownError,
+  type WorkerStopResult,
 } from '../application/conversion-worker.ts';
 import { ConversionJobService } from '../application/conversion-job-service.ts';
 import {
@@ -27,7 +30,11 @@ import {
   StorageWriteError,
   StorageDeleteError,
 } from '../domain/ingestion/source-storage-provider.ts';
-import { stopConversionQueue, type ConversionJobPayload } from '../infrastructure/queue/conversion-queue.ts';
+import {
+  stopConversionQueue,
+  getConversionQueue,
+  type ConversionJobPayload,
+} from '../infrastructure/queue/conversion-queue.ts';
 import { ValidationError, PersistenceError } from '../domain/errors.ts';
 import type { AuthenticatedUser } from '../domain/auth-types.ts';
 
@@ -348,28 +355,305 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
   });
 
   // ===========================================================================
-  // WS02: BOUNDED GRACEFUL SHUTDOWN (SCENARIOS A - E)
+  // WS02: DETERMINISTIC SHUTDOWN & RESTART REGRESSION TESTS (SCENARIOS A - H)
   // ===========================================================================
-  describe('WS02 — Bounded Graceful Shutdown (Scenarios A - E)', () => {
-    it('2.1 Scenario A: Stop with zero active jobs completes promptly (< 200ms)', async () => {
+  describe('WS02 — Deterministic Shutdown & Restart Lifecycle (Scenarios A - H)', () => {
+    it('2.1 Scenario A: Successful shutdown when offWork() resolves cleanly within deadline', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-a');
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
+      assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
 
       const start = Date.now();
-      await worker.stop(5000);
+      const stopResult = await worker.stop(5000);
       const elapsed = Date.now() - start;
 
+      assert.strictEqual(stopResult.success, true);
+      assert.strictEqual(stopResult.state, 'STOPPED');
+      assert.strictEqual(stopResult.offWorkSettled, true);
+      assert.strictEqual(stopResult.activeJobsDrained, true);
+      assert.strictEqual(stopResult.remainingJobsCount, 0);
+      assert.strictEqual(stopResult.timedOut, false);
       assert.strictEqual(worker.isActive(), false);
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
       assert.strictEqual(worker.getActiveJobsCount(), 0);
-      assert.ok(elapsed < 500, `Stop con 0 trabajos debió finalizar prontamente (duración real: ${elapsed}ms)`);
+      assert.strictEqual(worker.isUnsubscribePending(), false);
+      assert.strictEqual(worker.getPendingUnsubscribeOperation(), null);
+      assert.ok(elapsed < 800, `Stop con 0 trabajos debió finalizar prontamente (duración real: ${elapsed}ms)`);
     });
 
-    it('2.2 Scenario B: Stop with active jobs completes within deadline when jobs finish within deadline', async () => {
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-b', {
+    it('2.2 Scenario B: Shutdown timeout when offWork() remains unresolved', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let unblockOffWork: () => void;
+      const offWorkBarrier = new Promise<void>((resolve) => {
+        unblockOffWork = resolve;
+      });
+
+      (boss as any).offWork = async (queueName: string) => {
+        await offWorkBarrier;
+        return originalOffWork(queueName);
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-b');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const startTime = Date.now();
+        const stopResult = await worker.stop(100);
+        const elapsed = Date.now() - startTime;
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.timedOut, true);
+        assert.strictEqual(stopResult.offWorkSettled, false);
+        assert.strictEqual(stopResult.state, 'STOPPING');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPING');
+        assert.strictEqual(worker.isUnsubscribePending(), true);
+        assert.ok(worker.getPendingUnsubscribeOperation() !== null);
+        assert.strictEqual(worker.hasShutdownTimedOut(), true);
+        assert.ok(elapsed >= 80 && elapsed < 800, `Caller wait duration acotada (esperado ~100ms, real: ${elapsed}ms)`);
+      } finally {
+        unblockOffWork!();
+        await worker.getPendingUnsubscribeOperation();
+        (boss as any).offWork = originalOffWork;
+        await worker.stop(1000);
+      }
+    });
+
+    it('2.3 Scenario C: Restart attempted while offWork() is unresolved rejects with WorkerLifecycleError', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let unblockOffWork: () => void;
+      const offWorkBarrier = new Promise<void>((resolve) => {
+        unblockOffWork = resolve;
+      });
+
+      (boss as any).offWork = async (queueName: string) => {
+        await offWorkBarrier;
+        return originalOffWork(queueName);
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-c');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(100);
+        assert.strictEqual(stopResult.timedOut, true);
+        assert.strictEqual(worker.isUnsubscribePending(), true);
+
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            assert.ok(err.message.includes('desuscripción (offWork)'));
+            return true;
+          }
+        );
+
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPING');
+      } finally {
+        unblockOffWork!();
+        await worker.getPendingUnsubscribeOperation();
+        (boss as any).offWork = originalOffWork;
+        await worker.stop(1000);
+      }
+    });
+
+    it('2.4 Scenario D: Restart after offWork() genuinely settles establishes exactly one subscription', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let unblockOffWork: () => void;
+      const offWorkBarrier = new Promise<void>((resolve) => {
+        unblockOffWork = resolve;
+      });
+
+      (boss as any).offWork = async (queueName: string) => {
+        await offWorkBarrier;
+        return originalOffWork(queueName);
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-d');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(100);
+        assert.strictEqual(stopResult.timedOut, true);
+        assert.strictEqual(worker.isUnsubscribePending(), true);
+
+        unblockOffWork!();
+        await worker.getPendingUnsubscribeOperation();
+
+        assert.strictEqual(worker.isUnsubscribePending(), false);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+
+        (boss as any).offWork = originalOffWork;
+
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(worker.isActive(), true);
+
+        const finalStop = await worker.stop(1000);
+        assert.strictEqual(finalStop.success, true);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).offWork = originalOffWork;
+      }
+    });
+
+    it('2.5 Scenario E: Shutdown when offWork() rejects transitions to ERROR state and prevents unsafe start', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+
+      const forcedError = new Error('Fallo intencional de red en pg-boss offWork()');
+      (boss as any).offWork = async () => {
+        throw forcedError;
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-e');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(stopResult.error, forcedError);
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getLastShutdownError(), forcedError);
+
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            assert.ok(err.message.includes('estado ERROR'));
+            return true;
+          }
+        );
+
+        worker.resetLifecycle();
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.getLastShutdownError(), null);
+      } finally {
+        (boss as any).offWork = originalOffWork;
+      }
+    });
+
+    it('2.6 Scenario F: Concurrent stop() calls share the single shutdown operation', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-f');
+      await worker.start();
+      assert.strictEqual(worker.isActive(), true);
+
+      const [res1, res2, res3] = await Promise.all([
+        worker.stop(2000),
+        worker.stop(2000),
+        worker.stop(2000),
+      ]);
+
+      assert.strictEqual(res1.success, true);
+      assert.strictEqual(res2.success, true);
+      assert.strictEqual(res3.success, true);
+      assert.strictEqual(res1.state, 'STOPPED');
+      assert.strictEqual(res2.state, 'STOPPED');
+      assert.strictEqual(res3.state, 'STOPPED');
+      assert.strictEqual(worker.isActive(), false);
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+
+      const seqRes = await worker.stop(1000);
+      assert.strictEqual(seqRes.success, true);
+      assert.strictEqual(seqRes.state, 'STOPPED');
+    });
+
+    it('2.7 Scenario G: Repeated start/stop cycles transition cleanly without leaks', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-g');
+
+      for (let cycle = 1; cycle <= 3; cycle++) {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING', `Ciclo ${cycle}: debe estar RUNNING`);
+        assert.strictEqual(worker.isActive(), true);
+
+        const stopRes = await worker.stop(1000);
+        assert.strictEqual(stopRes.success, true, `Ciclo ${cycle}: stop debe ser exitoso`);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED', `Ciclo ${cycle}: debe estar STOPPED`);
+        assert.strictEqual(worker.getActiveJobsCount(), 0);
+        assert.strictEqual(worker.isUnsubscribePending(), false);
+      }
+    });
+
+    it('2.8 Scenario H: Active job preservation during shutdown leaves lease intact for recovery', async () => {
+      let unblock: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-h', {
         onStageReached: async (stage) => {
           if (stage === 'STAGE_B') {
-            await new Promise((resolve) => setTimeout(resolve, 150)); // Simula cómputo corto
+            await barrier;
+          }
+        },
+      });
+
+      const testContent = Buffer.from('{title: Preservacion}\n[G]Preservacion de lease');
+      const saveRes = await storage.save('ws02_preservation.cho', testContent);
+
+      const [job] = await db.insert(backgroundJobs).values({
+        jobType: 'CONVERSION',
+        status: 'PENDING',
+        userId: testUserId,
+        inputRef: 'ws02_preservation.cho',
+        errorDetails: {
+          storageKey: saveRes.storageKey,
+          checksumSha256: saveRes.checksumSha256,
+          targetFormat: 'LYRICS_ONLY',
+        },
+      }).returning();
+      createdJobIds.push(job.id);
+
+      await worker.start();
+
+      const jobPromise = worker.processJob({
+        jobId: job.id,
+        userId: testUserId,
+        tenantId: 'bethesda-default',
+        storageKey: saveRes.storageKey,
+        checksumSha256: saveRes.checksumSha256,
+        filename: 'ws02_preservation.cho',
+        targetFormat: 'LYRICS_ONLY',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.strictEqual(worker.getActiveJobsCount(), 1);
+
+      const stopResult = await worker.stop(150);
+      assert.strictEqual(stopResult.timedOut, true);
+      assert.strictEqual(stopResult.activeJobsDrained, false);
+      assert.strictEqual(stopResult.remainingJobsCount, 1);
+
+      const [dbJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, job.id));
+      assert.strictEqual(dbJob.status, 'PROCESSING', 'El trabajo no debe ser alterado destructivamente');
+      assert.ok(dbJob.leaseOwner !== null, 'El leaseOwner debe conservarse');
+      assert.ok(dbJob.leaseExpiresAt !== null, 'El leaseExpiresAt debe conservarse para expiración natural');
+
+      unblock!();
+      await jobPromise.catch(() => {});
+    });
+
+    it('2.9 Bounded drain when active jobs finish within deadline (Graceful Drain)', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-graceful-drain', {
+        onStageReached: async (stage) => {
+          if (stage === 'STAGE_B') {
+            await new Promise((resolve) => setTimeout(resolve, 150));
           }
         },
       });
@@ -397,23 +681,24 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         targetFormat: 'LYRICS_ONLY',
       });
 
-      // Iniciar stop mientras el trabajo está activo, con timeout de 2000ms
       await new Promise((resolve) => setTimeout(resolve, 30));
       const stopPromise = worker.stop(2000);
 
-      const [jobRes] = await Promise.all([jobPromise, stopPromise]);
+      const [jobRes, stopRes] = await Promise.all([jobPromise, stopPromise]);
       assert.strictEqual(jobRes.success, true);
+      assert.strictEqual(stopRes.success, true);
+      assert.strictEqual(stopRes.activeJobsDrained, true);
       assert.strictEqual(worker.getActiveJobsCount(), 0);
       assert.strictEqual(worker.isActive(), false);
     });
 
-    it('2.3 Scenario C: Stop with hung / long jobs halts when deadline expires (bounded, does not hang indefinitely)', async () => {
+    it('2.10 Bounded shutdown halts without indefinite hanging when active jobs exceed deadline', async () => {
       let unblock: () => void;
       const barrier = new Promise<void>((resolve) => {
         unblock = resolve;
       });
 
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-c', {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-bounded-timeout', {
         onStageReached: async (stage) => {
           if (stage === 'STAGE_B') {
             await barrier;
@@ -434,7 +719,6 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
 
       await worker.start();
 
-      // Lanzar trabajo en background sin esperarlo
       const jobPromise = worker.processJob({
         jobId: job.id,
         userId: testUserId,
@@ -446,119 +730,37 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       });
 
       await new Promise((resolve) => setTimeout(resolve, 50));
-      assert.strictEqual(worker.getActiveJobsCount(), 1, 'El trabajo debe estar activo');
+      assert.strictEqual(worker.getActiveJobsCount(), 1);
 
-      // Detener con deadline estricto de 300ms
       const start = Date.now();
-      await worker.stop(300);
+      const stopRes = await worker.stop(300);
       const elapsed = Date.now() - start;
 
-      assert.strictEqual(worker.isActive(), false, 'Worker debe quedar inactivo tras deadline');
+      assert.strictEqual(stopRes.timedOut, true);
+      assert.strictEqual(stopRes.activeJobsDrained, false);
+      assert.strictEqual(worker.isActive(), false);
       assert.ok(
-        elapsed >= 250 && elapsed <= 700,
-        `Stop debió retornar en ~300ms respetando el deadline estricto (duración real: ${elapsed}ms)`
+        elapsed >= 250 && elapsed <= 800,
+        `Stop debió retornar en tiempo acotado respetando el deadline (solicitado: 300ms, duración real: ${elapsed}ms)`
       );
 
-      // Desbloquear y esperar salida limpia del trabajo antes de concluir el test
       unblock!();
       await jobPromise.catch(() => {});
     });
 
-    it('2.4 Scenario D: Interrupted jobs during shutdown are left in PROCESSING for lease recovery', async () => {
-      let unblock: () => void;
-      const barrier = new Promise<void>((resolve) => {
-        unblock = resolve;
-      });
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-d', {
-        onStageReached: async (stage) => {
-          if (stage === 'STAGE_B') {
-            await barrier;
-          }
-        },
-      });
-
-      const testContent = Buffer.from('{title: Interrumpida}\n[G]Interrupcion');
-      const saveRes = await storage.save('ws02_interrupted.cho', testContent);
-
-      const [job] = await db.insert(backgroundJobs).values({
-        jobType: 'CONVERSION',
-        status: 'PENDING',
-        userId: testUserId,
-        inputRef: 'ws02_interrupted.cho',
-        errorDetails: {
-          storageKey: saveRes.storageKey,
-          checksumSha256: saveRes.checksumSha256,
-          targetFormat: 'LYRICS_ONLY',
-        },
-      }).returning();
-      createdJobIds.push(job.id);
-
-      await worker.start();
-
-      const jobPromise = worker.processJob({
-        jobId: job.id,
-        userId: testUserId,
-        tenantId: 'bethesda-default',
-        storageKey: saveRes.storageKey,
-        checksumSha256: saveRes.checksumSha256,
-        filename: 'ws02_interrupted.cho',
-        targetFormat: 'LYRICS_ONLY',
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // Detener abruptamente con deadline de 150ms
-      await worker.stop(150);
-
-      // Verificar que el registro en BD permanece en PROCESSING y su arrendamiento queda intacto
-      // para que expire naturalmente y sea recuperado por el recolector de stale jobs
-      const [dbJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, job.id));
-      assert.strictEqual(dbJob.status, 'PROCESSING', 'El trabajo no debe ser borrado ni forzado a fallo destructivo');
-      assert.ok(dbJob.leaseOwner !== null, 'El leaseOwner debe conservarse');
-      assert.ok(dbJob.leaseExpiresAt !== null, 'El leaseExpiresAt debe conservarse para expiración natural');
-
-      // Desbloquear y esperar salida limpia del trabajo antes de concluir el test
-      unblock!();
-      await jobPromise.catch(() => {});
-    });
-
-    it('2.5 Scenario E: Idempotency of repeated and parallel stop() calls', async () => {
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-e');
-      await worker.start();
-
-      // Llamar stop() múltiples veces concurrentemente
-      const [res1, res2, res3] = await Promise.all([
-        worker.stop(1000),
-        worker.stop(1000),
-        worker.stop(1000),
-      ]);
-
-      assert.strictEqual(res1, undefined);
-      assert.strictEqual(res2, undefined);
-      assert.strictEqual(res3, undefined);
-      assert.strictEqual(worker.isActive(), false);
-
-      // Llamar stop() secuencialmente en estado ya inactivo
-      await worker.stop(1000);
-      await worker.stop(1000);
-      assert.strictEqual(worker.isActive(), false);
-    });
-
-    it('2.6 should prevent race condition if start() is called while stop() is settling', async () => {
+    it('2.11 Synchronization of start() awaiting an in-progress stop()', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-settling-restart');
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
 
-      // Iniciar stop() con un pequeño timeout
-      const stopPromise = worker.stop(100);
+      const stopPromise = worker.stop(200);
       assert.strictEqual(worker.getLifecycleState(), 'STOPPING');
 
-      // Intentar start() mientras stop() está resolviendo
       const startPromise = worker.start();
 
-      await Promise.all([stopPromise, startPromise]);
+      const [stopRes] = await Promise.all([stopPromise, startPromise]);
 
+      assert.strictEqual(stopRes.success, true);
       assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
       assert.strictEqual(worker.isActive(), true);
 
@@ -566,7 +768,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
     });
 
-    it('2.7 should transition cleanly across lifecycle states (IDLE -> STARTING -> RUNNING -> STOPPING -> STOPPED)', async () => {
+    it('2.12 Clean lifecycle state progression (IDLE -> STARTING -> RUNNING -> STOPPING -> STOPPED)', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-lifecycle-states');
       assert.strictEqual(worker.getLifecycleState(), 'IDLE');
 

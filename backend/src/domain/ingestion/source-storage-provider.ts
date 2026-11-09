@@ -116,10 +116,18 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
 
   public async getBuffer(storageKey: string): Promise<Buffer> {
     const filePath = this.resolveSafePath(storageKey);
-    if (!fs.existsSync(filePath)) {
-      throw new ValidationError(`Archivo fuente no encontrado en almacenamiento: ${storageKey}`);
+    try {
+      return await fs.promises.readFile(filePath);
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        throw new ValidationError(`Archivo fuente no encontrado en almacenamiento: ${storageKey}`);
+      }
+      throw new StorageReadError(
+        `Fallo al leer el archivo en almacenamiento "${filePath}": ${err?.message ?? String(err)}`,
+        err,
+        filePath
+      );
     }
-    return await fs.promises.readFile(filePath);
   }
 
   public async exists(storageKey: string): Promise<boolean> {
@@ -134,19 +142,18 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
   public async delete(storageKey: string): Promise<boolean> {
     try {
       const filePath = this.resolveSafePath(storageKey);
-      if (fs.existsSync(filePath)) {
-        await fs.promises.unlink(filePath);
-        return true;
+      await fs.promises.unlink(filePath);
+      return true;
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        return false;
       }
-      return false;
-    } catch {
       return false;
     }
   }
 
   public async listKeys(): Promise<string[]> {
     try {
-      if (!fs.existsSync(this.baseDir)) return [];
       const entries = await fs.promises.readdir(this.baseDir, { withFileTypes: true });
       return entries
         .filter((entry) => entry.isFile() && !entry.name.includes('.tmp.'))

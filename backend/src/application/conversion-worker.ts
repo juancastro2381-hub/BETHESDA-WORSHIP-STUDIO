@@ -38,8 +38,8 @@ export class TransientWorkerError extends Error {
 }
 
 export function isTransientError(err: any): boolean {
-  if (err instanceof TransientWorkerError) return true;
   if (!err) return false;
+  if (err instanceof TransientWorkerError || err?.name === 'TransientWorkerError') return true;
   const msg = String(err.message || '').toLowerCase();
   const code = String(err.code || '').toLowerCase();
   return (
@@ -54,6 +54,7 @@ export function isTransientError(err: any): boolean {
     msg.includes('timeout') ||
     msg.includes('network') ||
     msg.includes('transient') ||
+    msg.includes('transitorio') ||
     msg.includes('econnreset') ||
     msg.includes('deadlock')
   );
@@ -75,10 +76,14 @@ export class ConversionWorker {
   private readonly recoveryIntervalMs: number;
   private readonly onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
   private readonly activeJobIds = new Set<string>();
+  private readonly activeJobCounts = new Map<string, number>();
   private recoveryTimer: NodeJS.Timeout | null = null;
+  private recoveryCycleCount = 0;
   private isRecovering = false;
   private isWorking = false;
   private isStarted = false;
+  private isStopping = false;
+  private stoppingPromise: Promise<void> | null = null;
 
   public constructor(
     private readonly db: Database = defaultDb,
@@ -100,16 +105,55 @@ export class ConversionWorker {
     return this.isStarted && this.isWorking;
   }
 
+  public getActiveJobsCount(): number {
+    return this.activeJobIds.size;
+  }
+
+  public getActiveJobIds(): ReadonlySet<string> {
+    return new Set(this.activeJobIds);
+  }
+
+  public getRecoveryCycleCount(): number {
+    return this.recoveryCycleCount;
+  }
+
+  public isRecoveryActive(): boolean {
+    return this.isRecovering;
+  }
+
+  private markJobActive(jobId: string): void {
+    const current = this.activeJobCounts.get(jobId) ?? 0;
+    this.activeJobCounts.set(jobId, current + 1);
+    this.activeJobIds.add(jobId);
+  }
+
+  private markJobInactive(jobId: string): void {
+    const current = this.activeJobCounts.get(jobId) ?? 1;
+    if (current <= 1) {
+      this.activeJobCounts.delete(jobId);
+      this.activeJobIds.delete(jobId);
+    } else {
+      this.activeJobCounts.set(jobId, current - 1);
+    }
+  }
+
   /**
    * Inicia el worker y se suscribe autoritativamente a la cola pg-boss (CR-01).
    * Ejecuta además la recuperación segura y consciente de arrendamientos expirados (CR-04, WS03).
    * Idempotente ante llamadas repetidas de inicio.
    */
   public async start(): Promise<void> {
+    if (this.stoppingPromise) {
+      await this.stoppingPromise;
+    }
     if (this.isStarted) return;
 
-    // 1. Recuperar únicamente trabajos con arrendamiento expirado (CR-04)
-    await this.recoverStaleJobs();
+    // 1. Recuperar únicamente trabajos con arrendamiento expirado (CR-04, WS03)
+    try {
+      await this.recoverStaleJobs();
+    } catch (err) {
+      console.warn('[ConversionWorker] Error no fatal en recuperación inicial de stale jobs al arrancar:', err);
+    }
 
     // 2. Programar recuperación periódica recurrente y segura (WS03)
     if (!this.recoveryTimer && this.recoveryIntervalMs > 0) {
@@ -138,33 +182,73 @@ export class ConversionWorker {
   }
 
   /**
-   * Detiene el worker de forma segura, cancelando suscripciones y esperando trabajos activos (WS05).
+   * Detiene el worker de forma segura, acotada e idempotente (WS02):
+   * 1. Cómputo del plazo límite (deadline) inmediato previo a cualquier espera asíncrona.
+   * 2. Desactivación de banderas y cancelación inmediata de temporizador periódico (WS03).
+   * 3. Desuscripción de pg-boss acotada por el plazo restante.
+   * 4. Drenaje acotado de trabajos activos por el plazo restante.
+   * 5. Si expira el plazo, no se bloquea indefinidamente; los trabajos incompletos
+   *    permanecen en PROCESSING para que sus arrendamientos expiren y sean recuperados.
+   * 6. Idempotencia ante llamadas paralelas o secuenciales.
    */
   public async stop(timeoutMs: number = 5000): Promise<void> {
+    if (this.isStopping) {
+      return this.stoppingPromise ?? Promise.resolve();
+    }
+    if (!this.isStarted && !this.isWorking && this.activeJobIds.size === 0) {
+      if (this.recoveryTimer) {
+        clearInterval(this.recoveryTimer);
+        this.recoveryTimer = null;
+      }
+      return;
+    }
+
+    this.isStopping = true;
+    this.stoppingPromise = this.performStop(timeoutMs).finally(() => {
+      this.isStopping = false;
+      this.stoppingPromise = null;
+    });
+
+    return this.stoppingPromise;
+  }
+
+  private async performStop(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
     this.isWorking = false;
 
-    // 1. Detener ciclo recurrente de recuperación (WS03)
+    // 1. Detener ciclo recurrente de recuperación inmediatamente (WS02/WS03)
     if (this.recoveryTimer) {
       clearInterval(this.recoveryTimer);
       this.recoveryTimer = null;
     }
 
-    // 2. Cancelar suscripción a la cola en pg-boss (WS05)
+    // 2. Cancelar suscripción a la cola en pg-boss de forma acotada (WS02)
     if (this.isStarted) {
       try {
+        const remainingForOffWork = Math.max(0, deadline - Date.now());
         const boss = getConversionQueue();
-        await boss.offWork(CONVERSION_QUEUE_NAME);
+        if (remainingForOffWork > 0) {
+          await Promise.race([
+            boss.offWork(CONVERSION_QUEUE_NAME),
+            new Promise((resolve) => setTimeout(resolve, remainingForOffWork)),
+          ]);
+        }
       } catch {
         // Ignorar si la cola ya fue cerrada
       }
     }
 
-    // 3. Espera acotada para que trabajos activos terminen (Graceful Shutdown)
+    // 3. Espera acotada para que trabajos activos terminen (Graceful Drain)
+    while (this.activeJobIds.size > 0 && Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      const step = Math.min(50, Math.max(1, remaining));
+      await new Promise((resolve) => setTimeout(resolve, step));
+    }
+
     if (this.activeJobIds.size > 0) {
-      const startTime = Date.now();
-      while (this.activeJobIds.size > 0 && Date.now() - startTime < timeoutMs) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      console.warn(
+        `[ConversionWorker] Graceful shutdown timeout (${timeoutMs}ms) alcanzado con ${this.activeJobIds.size} trabajo(s) aún en ejecución. Los arrendamientos expirarán para recuperación segura.`
+      );
     }
 
     this.isStarted = false;
@@ -178,47 +262,48 @@ export class ConversionWorker {
     const { jobId, storageKey, checksumSha256, filename, targetFormat, options } = payload;
     const executionToken = crypto.randomUUID(); // Testigo de ejecución único (fencing token)
 
-    this.activeJobIds.add(jobId);
-
-    // =========================================================================
-    // 1. Adquisición atómica de procesamiento y arrendamiento (CR-02)
-    // =========================================================================
-    const acquiredJob = await this.acquireJob(jobId, executionToken);
-
-    if (!acquiredJob) {
-      // El trabajo ya fue adquirido por otro worker activo, o fue cancelado / completado previamente
-      return {
-        success: false,
-        targetFormat,
-        filename,
-        mimeType: 'text/plain',
-        content: '',
-        diagnostics: [
-          {
-            code: 'JOB_NOT_ACQUIRED',
-            severity: 'WARNING',
-            message: `El trabajo ${jobId} no pudo ser adquirido: se encuentra activo bajo otro arrendamiento o en estado terminal.`,
-          },
-        ],
-      };
-    }
-
-    // =========================================================================
-    // 2. Latido periódico de renovación de arrendamiento (Heartbeat)
-    // =========================================================================
-    let isCancelledOrSuperseded = false;
-    const heartbeatTimer = setInterval(async () => {
-      try {
-        const renewed = await this.renewHeartbeat(jobId, executionToken);
-        if (!renewed) {
-          isCancelledOrSuperseded = true;
-        }
-      } catch {
-        // Ignorar fallas transitorias de red en latidos individuales
-      }
-    }, ConversionWorker.HEARTBEAT_INTERVAL_MS);
+    this.markJobActive(jobId);
+    let heartbeatTimer: NodeJS.Timeout | null = null;
 
     try {
+      // =========================================================================
+      // 1. Adquisición atómica de procesamiento y arrendamiento (CR-02)
+      // =========================================================================
+      const acquiredJob = await this.acquireJob(jobId, executionToken);
+
+      if (!acquiredJob) {
+        // El trabajo ya fue adquirido por otro worker activo, o fue cancelado / completado previamente
+        return {
+          success: false,
+          targetFormat,
+          filename,
+          mimeType: 'text/plain',
+          content: '',
+          diagnostics: [
+            {
+              code: 'JOB_NOT_ACQUIRED',
+              severity: 'WARNING',
+              message: `El trabajo ${jobId} no pudo ser adquirido: se encuentra activo bajo otro arrendamiento o en estado terminal.`,
+            },
+          ],
+        };
+      }
+
+      // =========================================================================
+      // 2. Latido periódico de renovación de arrendamiento (Heartbeat)
+      // =========================================================================
+      let isCancelledOrSuperseded = false;
+      heartbeatTimer = setInterval(async () => {
+        try {
+          const renewed = await this.renewHeartbeat(jobId, executionToken);
+          if (!renewed) {
+            isCancelledOrSuperseded = true;
+          }
+        } catch {
+          // Ignorar fallas transitorias de red en latidos individuales
+        }
+      }, ConversionWorker.HEARTBEAT_INTERVAL_MS);
+
       // -----------------------------------------------------------------------
       // Etapa A (30%): Verificación de propiedad activa y lectura de fuente
       // -----------------------------------------------------------------------
@@ -485,8 +570,10 @@ export class ConversionWorker {
         ],
       };
     } finally {
-      clearInterval(heartbeatTimer);
-      this.activeJobIds.delete(jobId);
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+      this.markJobInactive(jobId);
     }
   }
 
@@ -500,6 +587,7 @@ export class ConversionWorker {
     this.isRecovering = true;
 
     try {
+      this.recoveryCycleCount++;
       const now = new Date();
       const expiredJobs = await this.db
         .select()

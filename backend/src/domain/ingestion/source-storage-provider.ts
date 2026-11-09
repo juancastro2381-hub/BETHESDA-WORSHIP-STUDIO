@@ -11,6 +11,17 @@ import crypto from 'node:crypto';
 import { MAX_OMR_FILE_SIZE_BYTES } from '../omr/types.ts';
 import { ValidationError } from '../errors.ts';
 
+export class StorageReadError extends Error {
+  public constructor(
+    message: string,
+    public readonly originalError?: unknown,
+    public readonly targetPath?: string
+  ) {
+    super(message);
+    this.name = 'StorageReadError';
+  }
+}
+
 export interface SourceStorageSaveResult {
   readonly storageKey: string;
   readonly checksumSha256: string;
@@ -140,8 +151,15 @@ export class LocalFileSystemSourceStorageProvider implements ISourceStorageProvi
       return entries
         .filter((entry) => entry.isFile() && !entry.name.includes('.tmp.'))
         .map((entry) => entry.name);
-    } catch {
-      return [];
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        return [];
+      }
+      throw new StorageReadError(
+        `Fallo al leer las claves del almacenamiento en "${this.baseDir}": ${err?.message ?? String(err)}`,
+        err,
+        this.baseDir
+      );
     }
   }
 }

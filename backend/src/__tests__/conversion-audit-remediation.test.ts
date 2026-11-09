@@ -22,9 +22,12 @@ import {
   TransientWorkerError,
   isTransientError,
 } from '../application/conversion-worker.ts';
-import { LocalFileSystemSourceStorageProvider } from '../domain/ingestion/source-storage-provider.ts';
+import {
+  LocalFileSystemSourceStorageProvider,
+  StorageReadError,
+} from '../domain/ingestion/source-storage-provider.ts';
 import { stopConversionQueue } from '../infrastructure/queue/conversion-queue.ts';
-import { ValidationError } from '../domain/errors.ts';
+import { ValidationError, PersistenceError } from '../domain/errors.ts';
 import type { AuthenticatedUser } from '../domain/auth-types.ts';
 
 describe('Phase 2A-R2.1 — Audit Remediation Verification Suite', () => {
@@ -244,6 +247,107 @@ describe('Phase 2A-R2.1 — Audit Remediation Verification Suite', () => {
     if (fs.existsSync(orphanPath)) {
       fs.unlinkSync(orphanPath);
     }
+  });
+
+  // 6. Storage reconciliation fail-safe and typed error propagation (WS04)
+  it('6. reconcileStorage should abort and throw PersistenceError on storage inspection failure rather than marking all files missing', async () => {
+    // 6.1 listKeys() retorna [] en directorio inexistente
+    const missingDirStorage = new LocalFileSystemSourceStorageProvider('storage/non-existent-dir-12345');
+    const resolvedMissingDir = missingDirStorage.resolveSafePath('dummy').replace(/[/\\]dummy$/, '');
+    if (fs.existsSync(resolvedMissingDir)) {
+      fs.rmdirSync(resolvedMissingDir);
+    }
+    const missingKeys = await missingDirStorage.listKeys();
+    assert.deepStrictEqual(missingKeys, [], 'Directorio inexistente debe retornar [] sin fallar');
+
+    // 6.2 listKeys() lanza StorageReadError cuando readdir falla por I/O o permiso
+    const failingStorage = new LocalFileSystemSourceStorageProvider('storage/test-audit-remediation');
+    failingStorage.listKeys = async () => {
+      throw new StorageReadError('Simulated EACCES: Permission denied accessing storage volume');
+    };
+
+    const failingService = new ConversionJobService(undefined, undefined, db, failingStorage);
+
+    // 6.3 reconcileStorage debe abortar de inmediato con PersistenceError
+    await assert.rejects(
+      async () => {
+        await failingService.reconcileStorage();
+      },
+      (err: any) => {
+        assert.ok(err instanceof PersistenceError, 'Debe lanzar PersistenceError');
+        assert.match(err.message, /Fallo al inspeccionar el almacenamiento físico durante la reconciliación/);
+        return true;
+      },
+      'reconcileStorage jamás debe tragar el fallo de almacenamiento ni marcar todos los archivos de BD como missing'
+    );
+  });
+
+  // 7. ConversionWorker Graceful Shutdown and Periodic Recovery Lifecycle (WS03 & WS05)
+  it('7. ConversionWorker should start periodic recovery, stop cleanly with bounded drain, and allow restart', async () => {
+    const worker = new ConversionWorker(db, storage, undefined, 'worker-shutdown-lifecycle', {
+      recoveryIntervalMs: 1000,
+    });
+
+    assert.strictEqual(worker.isActive(), false);
+    await worker.start();
+    assert.strictEqual(worker.isActive(), true);
+
+    // Detener con bounded timeout de 2000ms
+    await worker.stop(2000);
+    assert.strictEqual(worker.isActive(), false, 'Worker debe quedar inactivo tras stop');
+
+    // Reinicio idempotente limpio
+    await worker.start();
+    assert.strictEqual(worker.isActive(), true);
+    await worker.stop(2000);
+    assert.strictEqual(worker.isActive(), false);
+  });
+
+  // 8. Atomic Conditional Retry (WS06)
+  it('8. retryJob should reject retry on non-terminal or in-progress jobs with ValidationError', async () => {
+    const [activeJob] = await db.insert(backgroundJobs).values({
+      jobType: 'CONVERSION',
+      status: 'PROCESSING',
+      progress: 50,
+      userId: testUserId,
+      inputRef: 'active_job_retry_test.cho',
+      attempts: 1,
+    }).returning();
+    createdJobIds.push(activeJob.id);
+
+    // Intentar reintentar un trabajo en PROCESSING debe ser rechazado
+    await assert.rejects(
+      async () => {
+        await service.retryJob(activeJob.id, testUser);
+      },
+      (err: any) => {
+        assert.ok(err instanceof ValidationError);
+        assert.match(err.message, /Solo se pueden reintentar trabajos que se encuentren en estado FAILED o CANCELLED/);
+        return true;
+      }
+    );
+
+    // Intentar reintentar un trabajo en COMPLETED debe ser rechazado
+    const [completedJob] = await db.insert(backgroundJobs).values({
+      jobType: 'CONVERSION',
+      status: 'COMPLETED',
+      progress: 100,
+      userId: testUserId,
+      inputRef: 'completed_job_retry_test.cho',
+      attempts: 1,
+    }).returning();
+    createdJobIds.push(completedJob.id);
+
+    await assert.rejects(
+      async () => {
+        await service.retryJob(completedJob.id, testUser);
+      },
+      (err: any) => {
+        assert.ok(err instanceof ValidationError);
+        assert.match(err.message, /Solo se pueden reintentar trabajos que se encuentren en estado FAILED o CANCELLED/);
+        return true;
+      }
+    );
   });
 });
 

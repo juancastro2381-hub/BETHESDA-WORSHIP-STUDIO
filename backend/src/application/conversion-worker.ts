@@ -59,13 +59,24 @@ export function isTransientError(err: any): boolean {
   );
 }
 
+export interface ConversionWorkerOptions {
+  recoveryIntervalMs?: number;
+  onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
+}
+
 export class ConversionWorker {
   public static readonly LEASE_DURATION_MS = 60_000; // 60 segundos de validez de arrendamiento
   public static readonly HEARTBEAT_INTERVAL_MS = 15_000; // 15 segundos entre renovaciones de latido
+  public static readonly DEFAULT_RECOVERY_INTERVAL_MS = 60_000; // 60 segundos por defecto entre pasadas de recuperación (WS03)
 
   public readonly workerId: string;
   private readonly engine: ConversionEngine;
   private readonly storage: ISourceStorageProvider;
+  private readonly recoveryIntervalMs: number;
+  private readonly onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
+  private readonly activeJobIds = new Set<string>();
+  private recoveryTimer: NodeJS.Timeout | null = null;
+  private isRecovering = false;
   private isWorking = false;
   private isStarted = false;
 
@@ -73,13 +84,16 @@ export class ConversionWorker {
     private readonly db: Database = defaultDb,
     customStorage?: ISourceStorageProvider,
     customEngine?: ConversionEngine,
-    customWorkerId?: string
+    customWorkerId?: string,
+    options?: ConversionWorkerOptions
   ) {
     this.workerId =
       customWorkerId ??
       `worker_${process.pid}_${os.hostname()}_${crypto.randomUUID().slice(0, 8)}`;
     this.storage = customStorage ?? new LocalFileSystemSourceStorageProvider();
     this.engine = customEngine ?? new ConversionEngine();
+    this.recoveryIntervalMs = options?.recoveryIntervalMs ?? ConversionWorker.DEFAULT_RECOVERY_INTERVAL_MS;
+    this.onStageReached = options?.onStageReached;
   }
 
   public isActive(): boolean {
@@ -88,7 +102,7 @@ export class ConversionWorker {
 
   /**
    * Inicia el worker y se suscribe autoritativamente a la cola pg-boss (CR-01).
-   * Ejecuta además la recuperación segura y consciente de arrendamientos expirados (CR-04).
+   * Ejecuta además la recuperación segura y consciente de arrendamientos expirados (CR-04, WS03).
    * Idempotente ante llamadas repetidas de inicio.
    */
   public async start(): Promise<void> {
@@ -97,7 +111,21 @@ export class ConversionWorker {
     // 1. Recuperar únicamente trabajos con arrendamiento expirado (CR-04)
     await this.recoverStaleJobs();
 
-    // 2. Iniciar pg-boss y registrar handler de trabajo
+    // 2. Programar recuperación periódica recurrente y segura (WS03)
+    if (!this.recoveryTimer && this.recoveryIntervalMs > 0) {
+      this.recoveryTimer = setInterval(async () => {
+        try {
+          await this.recoverStaleJobs();
+        } catch (err) {
+          console.error('[ConversionWorker] Error en ciclo periódico de recuperación de stale jobs:', err);
+        }
+      }, this.recoveryIntervalMs);
+      if (this.recoveryTimer.unref) {
+        this.recoveryTimer.unref();
+      }
+    }
+
+    // 3. Iniciar pg-boss y registrar handler de trabajo
     const boss = await startConversionQueue();
     await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
       for (const job of jobs) {
@@ -110,10 +138,35 @@ export class ConversionWorker {
   }
 
   /**
-   * Detiene el worker de forma segura y desactiva suscripciones activas.
+   * Detiene el worker de forma segura, cancelando suscripciones y esperando trabajos activos (WS05).
    */
-  public async stop(): Promise<void> {
+  public async stop(timeoutMs: number = 5000): Promise<void> {
     this.isWorking = false;
+
+    // 1. Detener ciclo recurrente de recuperación (WS03)
+    if (this.recoveryTimer) {
+      clearInterval(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+
+    // 2. Cancelar suscripción a la cola en pg-boss (WS05)
+    if (this.isStarted) {
+      try {
+        const boss = getConversionQueue();
+        await boss.offWork(CONVERSION_QUEUE_NAME);
+      } catch {
+        // Ignorar si la cola ya fue cerrada
+      }
+    }
+
+    // 3. Espera acotada para que trabajos activos terminen (Graceful Shutdown)
+    if (this.activeJobIds.size > 0) {
+      const startTime = Date.now();
+      while (this.activeJobIds.size > 0 && Date.now() - startTime < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+
     this.isStarted = false;
   }
 
@@ -124,6 +177,8 @@ export class ConversionWorker {
   public async processJob(payload: ConversionJobPayload): Promise<ConversionExportResult> {
     const { jobId, storageKey, checksumSha256, filename, targetFormat, options } = payload;
     const executionToken = crypto.randomUUID(); // Testigo de ejecución único (fencing token)
+
+    this.activeJobIds.add(jobId);
 
     // =========================================================================
     // 1. Adquisición atómica de procesamiento y arrendamiento (CR-02)
@@ -171,6 +226,10 @@ export class ConversionWorker {
         return this.abortDueToCancellation(targetFormat, filename, jobId);
       }
 
+      if (this.onStageReached) {
+        await this.onStageReached('STAGE_A', jobId);
+      }
+
       const sourceBuffer = await this.storage.getBuffer(storageKey);
       const computedHash = crypto.createHash('sha256').update(sourceBuffer).digest('hex');
 
@@ -187,6 +246,10 @@ export class ConversionWorker {
       // -----------------------------------------------------------------------
       if (isCancelledOrSuperseded || !(await this.verifyOwnershipAndActive(jobId, executionToken))) {
         return this.abortDueToCancellation(targetFormat, filename, jobId);
+      }
+
+      if (this.onStageReached) {
+        await this.onStageReached('STAGE_B', jobId);
       }
 
       const sourceCategory = FormatCapabilitiesEvaluator.detectSourceCategory(filename, sourceBuffer);
@@ -275,6 +338,10 @@ export class ConversionWorker {
         return this.abortDueToCancellation(targetFormat, filename, jobId);
       }
 
+      if (this.onStageReached) {
+        await this.onStageReached('STAGE_C', jobId);
+      }
+
       const exportResult = this.engine.convertSource(contentString, filename, {
         targetFormat,
         transposeSemitones: options?.transposeSemitones,
@@ -290,6 +357,10 @@ export class ConversionWorker {
       // -----------------------------------------------------------------------
       if (isCancelledOrSuperseded || !(await this.verifyOwnershipAndActive(jobId, executionToken))) {
         return this.abortDueToCancellation(targetFormat, filename, jobId);
+      }
+
+      if (this.onStageReached) {
+        await this.onStageReached('STAGE_D', jobId);
       }
 
       if (!exportResult.success) {
@@ -389,7 +460,9 @@ export class ConversionWorker {
               eq(backgroundJobs.status, 'PROCESSING')
             )
           )
-          .catch(() => {});
+          .catch((dbErr) => {
+            console.error(`[ConversionWorker] Error al resetear arrendamiento para reintento de job ${jobId}:`, dbErr);
+          });
 
         throw err;
       }
@@ -413,6 +486,7 @@ export class ConversionWorker {
       };
     } finally {
       clearInterval(heartbeatTimer);
+      this.activeJobIds.delete(jobId);
     }
   }
 
@@ -422,92 +496,136 @@ export class ConversionWorker {
    * en pg-boss falla, el trabajo no quede en el limbo sino inmediatamente recoverable en la siguiente pasada.
    */
   public async recoverStaleJobs(): Promise<number> {
-    const now = new Date();
-    const expiredJobs = await this.db
-      .select()
-      .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.jobType, 'CONVERSION'),
-          eq(backgroundJobs.status, 'PROCESSING'),
-          lt(backgroundJobs.leaseExpiresAt, now)
-        )
-      );
+    if (this.isRecovering) return 0;
+    this.isRecovering = true;
 
-    let recoveredCount = 0;
-
-    for (const job of expiredJobs) {
-      if (job.attempts >= job.maxAttempts) {
-        // Excedió el límite de reintentos: marcar definitivamente como FAILED
-        await this.db
-          .update(backgroundJobs)
-          .set({
-            status: 'FAILED',
-            progress: 100,
-            errorCode: 'LEASE_EXPIRED_MAX_ATTEMPTS',
-            errorDetails: {
-              code: 'LEASE_EXPIRED_MAX_ATTEMPTS',
-              message: `El trabajo excedió el límite máximo de reintentos (${job.maxAttempts}) tras expiración de arrendamiento.`,
-              previousDetails: job.errorDetails,
-            },
-            completedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(backgroundJobs.id, job.id),
-              eq(backgroundJobs.status, 'PROCESSING'),
-              lt(backgroundJobs.leaseExpiresAt, now)
-            )
-          );
-        recoveredCount++;
-      } else {
-        // Reclamo atómico de recuperación con testigo y tiempo acotado
-        const recoveryToken = crypto.randomUUID();
-        const recoveryLeaseExpires = new Date(Date.now() + 30_000); // 30s de ventana
-
-        const [claimed] = await this.db
-          .update(backgroundJobs)
-          .set({
-            leaseOwner: `recovery_${this.workerId}`,
-            leaseToken: recoveryToken,
-            leaseExpiresAt: recoveryLeaseExpires,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(backgroundJobs.id, job.id),
-              eq(backgroundJobs.status, 'PROCESSING'),
-              lt(backgroundJobs.leaseExpiresAt, now)
-            )
+    try {
+      const now = new Date();
+      const expiredJobs = await this.db
+        .select()
+        .from(backgroundJobs)
+        .where(
+          and(
+            eq(backgroundJobs.jobType, 'CONVERSION'),
+            eq(backgroundJobs.status, 'PROCESSING'),
+            lt(backgroundJobs.leaseExpiresAt, now)
           )
-          .returning();
+        );
 
-        if (claimed) {
-          const details = job.errorDetails as any;
-          if (details?.storageKey && details?.checksumSha256) {
-            try {
-              await enqueueConversionJob({
-                jobId: job.id,
-                userId: job.userId ?? 'system',
-                tenantId: job.tenantId,
-                storageKey: details.storageKey,
-                checksumSha256: details.checksumSha256,
-                filename: job.inputRef,
-                targetFormat: details.targetFormat ?? 'CHORD_PRO',
-                options: details.options,
-              });
+      let recoveredCount = 0;
 
-              // Reencolado exitoso: resetear a PENDING y liberar arrendamiento
+      for (const job of expiredJobs) {
+        if (job.attempts >= job.maxAttempts) {
+          // Excedió el límite de reintentos: marcar definitivamente como FAILED
+          await this.db
+            .update(backgroundJobs)
+            .set({
+              status: 'FAILED',
+              progress: 100,
+              errorCode: 'LEASE_EXPIRED_MAX_ATTEMPTS',
+              errorDetails: {
+                code: 'LEASE_EXPIRED_MAX_ATTEMPTS',
+                message: `El trabajo excedió el límite máximo de reintentos (${job.maxAttempts}) tras expiración de arrendamiento.`,
+                previousDetails: job.errorDetails,
+              },
+              completedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(backgroundJobs.id, job.id),
+                eq(backgroundJobs.status, 'PROCESSING'),
+                lt(backgroundJobs.leaseExpiresAt, now)
+              )
+            );
+          recoveredCount++;
+        } else {
+          // Reclamo atómico de recuperación con testigo y tiempo acotado
+          const recoveryToken = crypto.randomUUID();
+          const recoveryLeaseExpires = new Date(Date.now() + 30_000); // 30s de ventana
+
+          const [claimed] = await this.db
+            .update(backgroundJobs)
+            .set({
+              leaseOwner: `recovery_${this.workerId}`,
+              leaseToken: recoveryToken,
+              leaseExpiresAt: recoveryLeaseExpires,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(backgroundJobs.id, job.id),
+                eq(backgroundJobs.status, 'PROCESSING'),
+                lt(backgroundJobs.leaseExpiresAt, now)
+              )
+            )
+            .returning();
+
+          if (claimed) {
+            const details = job.errorDetails as any;
+            if (details?.storageKey && details?.checksumSha256) {
+              try {
+                await enqueueConversionJob({
+                  jobId: job.id,
+                  userId: job.userId ?? 'system',
+                  tenantId: job.tenantId,
+                  storageKey: details.storageKey,
+                  checksumSha256: details.checksumSha256,
+                  filename: job.inputRef,
+                  targetFormat: details.targetFormat ?? 'CHORD_PRO',
+                  options: details.options,
+                });
+
+                // Reencolado exitoso: resetear a PENDING y liberar arrendamiento
+                await this.db
+                  .update(backgroundJobs)
+                  .set({
+                    status: 'PENDING',
+                    leaseOwner: null,
+                    leaseToken: null,
+                    leaseExpiresAt: null,
+                    heartbeatAt: null,
+                    progress: 0,
+                    updatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(backgroundJobs.id, job.id),
+                      eq(backgroundJobs.leaseToken, recoveryToken)
+                    )
+                  );
+                recoveredCount++;
+              } catch (reEnqueueErr) {
+                console.warn(`[ConversionWorker] Fallo al reencolar trabajo ${job.id}, liberando arrendamiento:`, reEnqueueErr);
+                // Si falla el reencolado, expirar de inmediato el arrendamiento para reintentarlo en el próximo ciclo
+                await this.db
+                  .update(backgroundJobs)
+                  .set({
+                    leaseOwner: null,
+                    leaseToken: null,
+                    leaseExpiresAt: new Date(Date.now() - 10_000),
+                    updatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(backgroundJobs.id, job.id),
+                      eq(backgroundJobs.leaseToken, recoveryToken)
+                    )
+                  );
+              }
+            } else {
+              // Metadatos insuficientes para reencolado
               await this.db
                 .update(backgroundJobs)
                 .set({
-                  status: 'PENDING',
-                  leaseOwner: null,
-                  leaseToken: null,
-                  leaseExpiresAt: null,
-                  heartbeatAt: null,
-                  progress: 0,
+                  status: 'FAILED',
+                  progress: 100,
+                  errorCode: 'RECOVERY_MISSING_METADATA',
+                  errorDetails: {
+                    code: 'RECOVERY_MISSING_METADATA',
+                    message: 'El trabajo no cuenta con storageKey o checksumSha256 para ser reencolado.',
+                  },
+                  completedAt: new Date(),
                   updatedAt: new Date(),
                 })
                 .where(
@@ -517,51 +635,15 @@ export class ConversionWorker {
                   )
                 );
               recoveredCount++;
-            } catch {
-              // Si falla el reencolado, expirar de inmediato el arrendamiento para reintentarlo en el próximo ciclo
-              await this.db
-                .update(backgroundJobs)
-                .set({
-                  leaseOwner: null,
-                  leaseToken: null,
-                  leaseExpiresAt: new Date(Date.now() - 10_000),
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(backgroundJobs.id, job.id),
-                    eq(backgroundJobs.leaseToken, recoveryToken)
-                  )
-                );
             }
-          } else {
-            // Metadatos insuficientes para reencolado
-            await this.db
-              .update(backgroundJobs)
-              .set({
-                status: 'FAILED',
-                progress: 100,
-                errorCode: 'RECOVERY_MISSING_METADATA',
-                errorDetails: {
-                  code: 'RECOVERY_MISSING_METADATA',
-                  message: 'El trabajo no cuenta con storageKey o checksumSha256 para ser reencolado.',
-                },
-                completedAt: new Date(),
-                updatedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(backgroundJobs.id, job.id),
-                  eq(backgroundJobs.leaseToken, recoveryToken)
-                )
-              );
-            recoveredCount++;
           }
         }
       }
-    }
 
-    return recoveredCount;
+      return recoveredCount;
+    } finally {
+      this.isRecovering = false;
+    }
   }
 
   /**

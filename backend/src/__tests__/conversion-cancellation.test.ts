@@ -18,12 +18,15 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { db, pool } from '../db/index.ts';
 import { backgroundJobs, users, songSources } from '../db/schema.ts';
 import { ConversionJobService } from '../application/conversion-job-service.ts';
 import { ConversionWorker } from '../application/conversion-worker.ts';
-import { stopConversionQueue } from '../infrastructure/queue/conversion-queue.ts';
+import { stopConversionQueue, type ConversionJobPayload } from '../infrastructure/queue/conversion-queue.ts';
+import { LocalFileSystemSourceStorageProvider } from '../domain/ingestion/source-storage-provider.ts';
 import { ValidationError } from '../domain/errors.ts';
 import type { AuthenticatedUser } from '../domain/auth-types.ts';
 
@@ -36,10 +39,17 @@ describe('CR-03 — Effective Cancellation and Terminal State Protection Suite (
   };
 
   let service: ConversionJobService;
+  let storage: LocalFileSystemSourceStorageProvider;
+  let testStorageDir: string;
   const createdJobIds: string[] = [];
 
   before(async () => {
-    service = new ConversionJobService();
+    testStorageDir = path.resolve(process.cwd(), 'storage/test-cancellation');
+    if (!fs.existsSync(testStorageDir)) {
+      fs.mkdirSync(testStorageDir, { recursive: true });
+    }
+    storage = new LocalFileSystemSourceStorageProvider('storage/test-cancellation');
+    service = new ConversionJobService(undefined, undefined, db, storage);
 
     await db.insert(users).values({
       id: testUserId,
@@ -59,6 +69,9 @@ describe('CR-03 — Effective Cancellation and Terminal State Protection Suite (
       await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
     }
     await stopConversionQueue();
+    if (fs.existsSync(testStorageDir)) {
+      fs.rmSync(testStorageDir, { recursive: true, force: true });
+    }
     await pool.end();
   });
 
@@ -288,68 +301,77 @@ describe('CR-03 — Effective Cancellation and Terminal State Protection Suite (
     );
   });
 
-  // Scenario I: Condición de carrera real concurrente
-  it('Scenario I: should safely resolve race condition between concurrent cancellation and worker finalization', async () => {
+  // Scenario I: Condición de carrera real concurrente con barrera de sincronización en processJob (WS01)
+  it('Scenario I: should safely resolve race condition between concurrent cancellation and worker finalization using real processJob and conditional SQL', async () => {
+    const testContent = Buffer.from('{title: Concurrency Real Test}\n[G]Dios es [D]bueno\n[Em]para [C]siempre\n');
+    const storageResult = await storage.save('scenario_i_real.cho', testContent);
+
     const [job] = await db.insert(backgroundJobs).values({
       jobType: 'CONVERSION',
       status: 'PENDING',
       progress: 0,
       userId: testUserId,
-      inputRef: 'scenario_i.cho',
+      inputRef: 'scenario_i_real.cho',
       attempts: 0,
+      errorDetails: {
+        storageKey: storageResult.storageKey,
+        checksumSha256: storageResult.checksumSha256,
+        targetFormat: 'LYRICS_ONLY',
+      },
     }).returning();
     createdJobIds.push(job.id);
 
-    const worker = new ConversionWorker(db, undefined, undefined, 'worker-scenario-i');
-    const token = crypto.randomUUID();
+    let stageReachedCalled = false;
+    let cancelJobResultStatus: string | null = null;
 
-    await worker.acquireJob(job.id, token);
+    // Configurar worker real con hook de sincronización en Stage D (justo antes de la actualización terminal en PostgreSQL)
+    const worker = new ConversionWorker(db, storage, undefined, 'worker-scenario-i-real', {
+      onStageReached: async (stage, reachedJobId) => {
+        if (stage === 'STAGE_D' && reachedJobId === job.id) {
+          stageReachedCalled = true;
+          // Disparar concurrentemente la cancelación real en PostgreSQL a través de ConversionJobService
+          const cancelled = await service.cancelJob(job.id, testUser);
+          cancelJobResultStatus = cancelled.status;
+        }
+      },
+    });
 
-    // Disparar concurrentemente la cancelación por el usuario y el intento de finalización del worker
-    const workerFinalize = async () => {
-      const [finalized] = await db
-        .update(backgroundJobs)
-        .set({
-          status: 'COMPLETED',
-          progress: 100,
-          outputRef: 'scenario_i_output.txt',
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(backgroundJobs.id, job.id),
-            eq(backgroundJobs.leaseToken, token),
-            eq(backgroundJobs.status, 'PROCESSING')
-          )
-        )
-        .returning();
-      return finalized ?? null;
+    const payload: ConversionJobPayload = {
+      jobId: job.id,
+      userId: testUserId,
+      tenantId: 'bethesda-default',
+      storageKey: storageResult.storageKey,
+      checksumSha256: storageResult.checksumSha256,
+      filename: 'scenario_i_real.cho',
+      targetFormat: 'LYRICS_ONLY',
     };
 
-    const results = await Promise.allSettled([
-      service.cancelJob(job.id, testUser),
-      workerFinalize(),
-    ]);
+    // Ejecutar el procesamiento real del worker
+    const exportResult = await worker.processJob(payload);
 
-    // Verificar en la BD el estado resultante
-    const [persisted] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, job.id));
+    // 1. Verificar que el hook determinista fue activado
+    assert.strictEqual(stageReachedCalled, true, 'El hook STAGE_D debió ser alcanzado antes de la finalización');
+    assert.strictEqual(cancelJobResultStatus, 'CANCELLED', 'cancelJob debió haber transicionado exitosamente a CANCELLED');
 
-    // El estado debe ser estrictamente COMPLETED o CANCELLED, nunca corrupto
-    assert.ok(
-      persisted.status === 'COMPLETED' || persisted.status === 'CANCELLED',
-      `El estado final debe ser COMPLETED o CANCELLED, obtenido: ${persisted.status}`
+    // 2. Verificar que processJob detectó la cancelación y abortó de forma segura
+    assert.strictEqual(exportResult.success, false, 'processJob debió reportar aborto seguro');
+    assert.strictEqual(
+      exportResult.diagnostics[0]?.code,
+      'JOB_CANCELLED_OR_LEASE_LOST',
+      'El diagnóstico debe reflejar cancelación o pérdida de arrendamiento'
     );
 
-    // Uno de los dos debió triunfar y el otro debió fallar o retornar null
-    if (persisted.status === 'CANCELLED') {
-      const cancelResult = results[0];
-      assert.strictEqual(cancelResult.status, 'fulfilled', 'cancelJob debió tener éxito');
-      const finalizeResult = results[1] as PromiseFulfilledResult<any>;
-      assert.strictEqual(finalizeResult.value, null, 'workerFinalize debió fallar condicionalmente');
-    } else {
-      const finalizeResult = results[1] as PromiseFulfilledResult<any>;
-      assert.ok(finalizeResult.value, 'workerFinalize debió tener éxito');
-    }
+    // 3. Verificar en la base de datos PostgreSQL real que el estado final permanece CANCELLED
+    const [persisted] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, job.id));
+    assert.strictEqual(
+      persisted.status,
+      'CANCELLED',
+      'El estado en PostgreSQL debe permanecer inmutablemente CANCELLED (no sobreescrito por COMPLETED)'
+    );
+    assert.notStrictEqual(
+      persisted.progress,
+      100,
+      'El progreso jamás debe alcanzar el 100% en un trabajo cancelado'
+    );
   });
 });

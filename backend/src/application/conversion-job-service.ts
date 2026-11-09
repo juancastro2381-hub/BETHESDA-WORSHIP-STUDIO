@@ -432,8 +432,8 @@ export class ConversionJobService {
       throw new Error('Violación de Integridad Criptográfica: El archivo físico fue alterado.');
     }
 
-    // Reiniciar trabajo a PENDING, progreso 0, y limpiar arrendamientos anteriores
-    await this.db
+    // Reiniciar trabajo a PENDING, progreso 0, y limpiar arrendamientos anteriores de forma atómica y condicional (WS06)
+    const [retriedJob] = await this.db
       .update(backgroundJobs)
       .set({
         status: 'PENDING',
@@ -445,7 +445,20 @@ export class ConversionJobService {
         completedAt: null,
         updatedAt: new Date(),
       })
-      .where(eq(backgroundJobs.id, jobId));
+      .where(
+        and(
+          eq(backgroundJobs.id, jobId),
+          or(
+            eq(backgroundJobs.status, 'FAILED'),
+            eq(backgroundJobs.status, 'CANCELLED')
+          )
+        )
+      )
+      .returning();
+
+    if (!retriedJob) {
+      throw new ValidationError('El trabajo ya no se encuentra en un estado reintentable (FAILED o CANCELLED).');
+    }
 
     const jobPayload: ConversionJobPayload = {
       jobId,
@@ -613,8 +626,16 @@ export class ConversionJobService {
     missingFiles: string[];
     healthyFilesCount: number;
   }> {
-    // 1. Obtener todas las claves físicas en disco
-    const diskKeys = this.storage.listKeys ? await this.storage.listKeys() : [];
+    // 1. Obtener todas las claves físicas en disco con protección fail-safe (WS04)
+    let diskKeys: string[];
+    try {
+      diskKeys = this.storage.listKeys ? await this.storage.listKeys() : [];
+    } catch (err: any) {
+      throw new PersistenceError(
+        `Fallo al inspeccionar el almacenamiento físico durante la reconciliación: ${err?.message ?? String(err)}`,
+        err
+      );
+    }
 
     // 2. Obtener todas las referencias registradas en song_sources
     const dbSources = await this.db.select({ storagePath: songSources.storagePath }).from(songSources);

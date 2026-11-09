@@ -123,13 +123,16 @@ export async function stopConversionQueue(): Promise<void> {
  * Encola un nuevo trabajo de conversión en pg-boss como mecanismo autoritativo (CR-01).
  * Si la cola no está disponible o el encolado falla, lanza PersistenceError sin bypass en memoria.
  */
-export async function enqueueConversionJob(payload: ConversionJobPayload): Promise<string> {
+export async function enqueueConversionJob(
+  payload: ConversionJobPayload,
+  sendOptions?: { retryLimit?: number; retryDelay?: number; expireInSeconds?: number }
+): Promise<string> {
   const boss = await startConversionQueue();
   try {
     const jobId = await boss.send(CONVERSION_QUEUE_NAME, payload, {
-      retryLimit: 2,
-      retryDelay: 5,
-      expireInSeconds: 300, // 5 minutos de tiempo límite por trabajo
+      retryLimit: sendOptions?.retryLimit ?? 2,
+      retryDelay: sendOptions?.retryDelay ?? 5,
+      expireInSeconds: sendOptions?.expireInSeconds ?? 300, // 5 minutos de tiempo límite por trabajo
     });
 
     if (!jobId) {

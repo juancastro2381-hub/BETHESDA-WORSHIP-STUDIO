@@ -761,6 +761,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
               state: 'active',
               count: 0,
               createdOn: Date.now(),
+              lastFetchedOn: null,
+              lastJobStartedOn: null,
+              lastJobEndedOn: null,
+              lastJobDuration: null,
+              lastError: null,
+              lastErrorOn: null,
             },
           ];
         };
@@ -1000,6 +1006,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
               state: 'active',
               count: 0,
               createdOn: Date.now(),
+              lastFetchedOn: null,
+              lastJobStartedOn: null,
+              lastJobEndedOn: null,
+              lastJobDuration: null,
+              lastError: null,
+              lastErrorOn: null,
             },
           ];
         }
@@ -1940,6 +1952,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: 0,
           createdOn: Date.now(),
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
         {
           id: 'id-beta',
@@ -1949,6 +1967,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: 0,
           createdOn: Date.now(),
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
       ];
 
@@ -2022,6 +2046,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: 0,
           createdOn: Date.now(),
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
         {
           id: 'shared-id',
@@ -2031,6 +2061,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: 0,
           createdOn: Date.now(),
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
       ];
 
@@ -2063,8 +2099,25 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     // ===========================================================================
     // R3.3.3: Strict pg-boss WIP Contract Hardening & Telemetry Suite (R333-01 to R333-20)
     // ===========================================================================
+    const baseWipRecord = {
+      id: 'w1',
+      workId: 'w1',
+      name: CONVERSION_QUEUE_NAME,
+      options: {},
+      state: 'active' as const,
+      count: 0,
+      createdOn: 1700000000000,
+      lastFetchedOn: null,
+      lastJobStartedOn: null,
+      lastJobEndedOn: null,
+      lastJobDuration: null,
+      lastError: null,
+      lastErrorOn: null,
+    };
+
     it('2.41 R333-01 [UNIT]: Missing count fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', createdOn: Date.now() };
+      const base: any = { ...baseWipRecord };
+      delete base.count;
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2076,7 +2129,8 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.42 R333-02 [UNIT]: Missing createdOn fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0 };
+      const base: any = { ...baseWipRecord };
+      delete base.createdOn;
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2088,7 +2142,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.43 R333-03 [UNIT]: NaN count fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: NaN, createdOn: Date.now() };
+      const base = { ...baseWipRecord, count: NaN };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2100,7 +2154,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.44 R333-04 [UNIT]: Infinity count fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: Infinity, createdOn: Date.now() };
+      const base = { ...baseWipRecord, count: Infinity };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2112,7 +2166,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.45 R333-05 [UNIT]: Negative count fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: -1, createdOn: Date.now() };
+      const base = { ...baseWipRecord, count: -1 };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2124,7 +2178,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.46 R333-06 [UNIT]: Fractional count fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 2.5, createdOn: Date.now() };
+      const base = { ...baseWipRecord, count: 2.5 };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2136,7 +2190,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.47 R333-07 [UNIT]: NaN createdOn fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: NaN };
+      const base = { ...baseWipRecord, createdOn: NaN };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2148,7 +2202,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     });
 
     it('2.48 R333-08 [UNIT]: Infinity createdOn fails closed with WorkerShutdownError', () => {
-      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Infinity };
+      const base = { ...baseWipRecord, createdOn: Infinity };
       assert.throws(
         () => ConversionWorker.validateWipData([base]),
         (err: any) => {
@@ -2162,7 +2216,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.49 R333-09 [UNIT]: Invalid lastFetchedOn fails closed with WorkerShutdownError', () => {
       const invalid = ['not-a-number', NaN, Infinity, -Infinity, {}];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastFetchedOn: val };
+        const base = { ...baseWipRecord, lastFetchedOn: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2177,7 +2231,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.50 R333-10 [UNIT]: Invalid lastJobStartedOn fails closed with WorkerShutdownError', () => {
       const invalid = ['invalid-ts', NaN, Infinity, {}];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobStartedOn: val };
+        const base = { ...baseWipRecord, lastJobStartedOn: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2192,7 +2246,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.51 R333-11 [UNIT]: Invalid lastJobEndedOn fails closed with WorkerShutdownError', () => {
       const invalid = ['invalid-ts', NaN, Infinity, {}];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobEndedOn: val };
+        const base = { ...baseWipRecord, lastJobEndedOn: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2207,7 +2261,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.52 R333-12 [UNIT]: Invalid lastJobDuration fails closed with WorkerShutdownError', () => {
       const invalid = ['invalid-duration', NaN, Infinity, {}];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobDuration: val };
+        const base = { ...baseWipRecord, lastJobDuration: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2222,7 +2276,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.53 R333-13 [UNIT]: Invalid lastError type fails closed with WorkerShutdownError', () => {
       const invalid = ['error-string', 500, true, [1, 2]];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastError: val };
+        const base = { ...baseWipRecord, lastError: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2237,7 +2291,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
     it('2.54 R333-14 [UNIT]: Invalid lastErrorOn fails closed with WorkerShutdownError', () => {
       const invalid = ['error-ts', NaN, Infinity, {}];
       for (const val of invalid) {
-        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastErrorOn: val };
+        const base = { ...baseWipRecord, lastErrorOn: val };
         assert.throws(
           () => ConversionWorker.validateWipData([base]),
           (err: any) => {
@@ -2255,7 +2309,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         workId: 'w1',
         name: CONVERSION_QUEUE_NAME,
         options: { workerInstanceId: 'inst-1' },
-        state: 'active',
+        state: 'active' as const,
         count: 3,
         createdOn: 1700000000000,
         lastFetchedOn: 1700000001000,
@@ -2277,7 +2331,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         workId: 'w2',
         name: CONVERSION_QUEUE_NAME,
         options: {},
-        state: 'active',
+        state: 'active' as const,
         count: 0,
         createdOn: 1700000000000,
         lastFetchedOn: null,
@@ -2303,23 +2357,15 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
 
     it('2.57 R333-17 [UNIT]: Any malformed record in a mixed array rejects the entire array', () => {
       const validRecord = {
+        ...baseWipRecord,
         id: 'w-valid',
         workId: 'w-valid',
-        name: CONVERSION_QUEUE_NAME,
-        options: {},
-        state: 'active',
-        count: 0,
-        createdOn: 1700000000000,
-        lastFetchedOn: null,
       };
       const malformedRecord = {
+        ...baseWipRecord,
         id: 'w-malformed',
         workId: 'w-malformed',
-        name: CONVERSION_QUEUE_NAME,
-        options: {},
-        state: 'active',
         count: NaN, // Invalid!
-        createdOn: 1700000000000,
       };
       assert.throws(
         () => ConversionWorker.validateWipData([validRecord, malformedRecord]),
@@ -2343,6 +2389,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: -5, // Negative count
           createdOn: Date.now(),
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
       ];
       const worker = new ConversionWorker(db, storage, undefined, 'cert-r333-18-stop-reject');
@@ -2370,6 +2422,12 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           state: 'active',
           count: 0,
           createdOn: Infinity, // Infinity createdOn
+          lastFetchedOn: null,
+          lastJobStartedOn: null,
+          lastJobEndedOn: null,
+          lastJobDuration: null,
+          lastError: null,
+          lastErrorOn: null,
         },
       ];
       const worker = new ConversionWorker(db, storage, undefined, 'cert-r333-19-removal-reject');
@@ -2409,6 +2467,341 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       } finally {
         await workerPeer.stop(1000).catch(() => {});
         await workerTarget.stop(1000).catch(() => {});
+      }
+    });
+
+    // ===========================================================================
+    // R3.3.4: Strict WIP Nullable Field Contract Suite (R334-01 to R334-20)
+    // ===========================================================================
+    it('2.61 R334-01 [UNIT]: Missing lastFetchedOn fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastFetchedOn;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastFetchedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.62 R334-02 [UNIT]: Missing lastJobStartedOn fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastJobStartedOn;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobStartedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.63 R334-03 [UNIT]: Missing lastJobEndedOn fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastJobEndedOn;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobEndedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.64 R334-04 [UNIT]: Missing lastJobDuration fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastJobDuration;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobDuration'));
+          return true;
+        }
+      );
+    });
+
+    it('2.65 R334-05 [UNIT]: Missing lastError fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastError;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastError'));
+          return true;
+        }
+      );
+    });
+
+    it('2.66 R334-06 [UNIT]: Missing lastErrorOn fails closed with WorkerShutdownError', () => {
+      const bad: any = { ...baseWipRecord };
+      delete bad.lastErrorOn;
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastErrorOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.67 R334-07 [UNIT]: Explicit undefined lastFetchedOn fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastFetchedOn: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastFetchedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.68 R334-08 [UNIT]: Explicit undefined lastJobStartedOn fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastJobStartedOn: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobStartedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.69 R334-09 [UNIT]: Explicit undefined lastJobEndedOn fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastJobEndedOn: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobEndedOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.70 R334-10 [UNIT]: Explicit undefined lastJobDuration fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastJobDuration: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobDuration'));
+          return true;
+        }
+      );
+    });
+
+    it('2.71 R334-11 [UNIT]: Explicit undefined lastError fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastError: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastError'));
+          return true;
+        }
+      );
+    });
+
+    it('2.72 R334-12 [UNIT]: Explicit undefined lastErrorOn fails closed with WorkerShutdownError', () => {
+      const bad = { ...baseWipRecord, lastErrorOn: undefined };
+      assert.throws(
+        () => ConversionWorker.validateWipData([bad]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastErrorOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.73 R334-13 [UNIT]: Explicit null for every nullable field is accepted and preserved without fabrication', () => {
+      const validNulls = {
+        ...baseWipRecord,
+        id: 'w-explicit-nulls',
+        workId: 'w-explicit-nulls',
+        lastFetchedOn: null,
+        lastJobStartedOn: null,
+        lastJobEndedOn: null,
+        lastJobDuration: null,
+        lastError: null,
+        lastErrorOn: null,
+      };
+      const [res] = ConversionWorker.validateWipData([validNulls]);
+      assert.strictEqual(res.lastFetchedOn, null);
+      assert.strictEqual(res.lastJobStartedOn, null);
+      assert.strictEqual(res.lastJobEndedOn, null);
+      assert.strictEqual(res.lastJobDuration, null);
+      assert.strictEqual(res.lastError, null);
+      assert.strictEqual(res.lastErrorOn, null);
+    });
+
+    it('2.74 R334-14 [UNIT]: Valid populated numeric telemetry is accepted and preserved without alteration', () => {
+      const validPopulated = {
+        ...baseWipRecord,
+        id: 'w-populated',
+        workId: 'w-populated',
+        lastFetchedOn: 1700000001000,
+        lastJobStartedOn: 1700000002000,
+        lastJobEndedOn: 1700000003000,
+        lastJobDuration: 1250,
+        lastError: { message: 'db partition disconnect', code: 'ETIMEDOUT' },
+        lastErrorOn: 1700000004000,
+      };
+      const [res] = ConversionWorker.validateWipData([validPopulated]);
+      assert.strictEqual(res.lastFetchedOn, 1700000001000);
+      assert.strictEqual(res.lastJobStartedOn, 1700000002000);
+      assert.strictEqual(res.lastJobEndedOn, 1700000003000);
+      assert.strictEqual(res.lastJobDuration, 1250);
+      assert.deepStrictEqual(res.lastError, { message: 'db partition disconnect', code: 'ETIMEDOUT' });
+      assert.strictEqual(res.lastErrorOn, 1700000004000);
+    });
+
+    it('2.75 R334-15 [UNIT]: Invalid numeric telemetry types (strings, booleans, objects, arrays, NaN, Infinity) fail closed', () => {
+      const numericFields = ['lastFetchedOn', 'lastJobStartedOn', 'lastJobEndedOn', 'lastJobDuration', 'lastErrorOn'];
+      const badValues = ['corrupt-string', true, false, {}, [], NaN, Infinity, -Infinity];
+
+      for (const field of numericFields) {
+        for (const badVal of badValues) {
+          const entry = { ...baseWipRecord, [field]: badVal };
+          assert.throws(
+            () => ConversionWorker.validateWipData([entry]),
+            (err: any) => {
+              assert.strictEqual(err.name, 'WorkerShutdownError');
+              assert.ok(err.message.includes(field));
+              return true;
+            }
+          );
+        }
+      }
+    });
+
+    it('2.76 R334-16 [UNIT]: Invalid lastError values (arrays, strings, numbers, booleans) fail closed', () => {
+      const badErrors = [[1, 2, 3], 'string-error', 500, true, false];
+      for (const badErr of badErrors) {
+        const entry = { ...baseWipRecord, lastError: badErr };
+        assert.throws(
+          () => ConversionWorker.validateWipData([entry]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastError'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.77 R334-17 [UNIT]: Mixed array where one record omits a nullable property rejects entire array', () => {
+      const valid = { ...baseWipRecord, id: 'w-valid-1', workId: 'w-valid-1' };
+      const missingProp: any = { ...baseWipRecord, id: 'w-missing-2', workId: 'w-missing-2' };
+      delete missingProp.lastJobDuration;
+
+      assert.throws(
+        () => ConversionWorker.validateWipData([valid, missingProp]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('lastJobDuration'));
+          return true;
+        }
+      );
+    });
+
+    it('2.78 R334-18 [CONTRACT]: Malformed nullable telemetry never produces STOPPED', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        {
+          ...baseWipRecord,
+          id: 'w-corrupt-telemetry',
+          workId: 'w-corrupt-telemetry',
+          lastFetchedOn: 'string-instead-of-number', // Corrupt!
+        },
+      ];
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r334-18-stop-reject');
+      try {
+        await worker.start();
+        const stopRes = await worker.stop(1000);
+        assert.strictEqual(stopRes.success, false);
+        assert.strictEqual(stopRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.79 R334-19 [CONTRACT]: Malformed nullable telemetry never produces REMOVAL_CONFIRMED', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      const badEntry: any = { ...baseWipRecord, id: 'w-missing-error', workId: 'w-missing-error' };
+      delete badEntry.lastError;
+
+      (boss as any).getWipData = () => [badEntry];
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r334-19-removal-reject');
+      try {
+        await worker.start();
+        await worker.stop(1000);
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.notStrictEqual(worker.getRegistrationState(), 'REMOVAL_CONFIRMED');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.80 R334-20 [INTEGRATION]: Real pg-boss 12.38.1 produces all 6 own nullable properties, validated and preserving peer isolation', async () => {
+      const boss = getConversionQueue();
+      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r334-20-peer');
+      const workerTarget = new ConversionWorker(db, storage, undefined, 'cert-r334-20-target');
+
+      try {
+        await workerPeer.start();
+        await workerTarget.start();
+
+        // 1. Obtener WIP directamente de pg-boss real
+        const realWip = (boss as any).getWipData();
+        assert.ok(Array.isArray(realWip));
+        assert.ok(realWip.length >= 2);
+
+        // 2. Verificar que cada entrada del getWipData real de pg-boss tiene las 6 propiedades como propiedades propias
+        const requiredNullableProps = [
+          'lastFetchedOn',
+          'lastJobStartedOn',
+          'lastJobEndedOn',
+          'lastJobDuration',
+          'lastError',
+          'lastErrorOn',
+        ];
+        for (const entry of realWip) {
+          for (const prop of requiredNullableProps) {
+            assert.ok(
+              Object.prototype.hasOwnProperty.call(entry, prop),
+              `La entrada real de pg-boss debe poseer la propiedad propia '${prop}'`
+            );
+          }
+        }
+
+        // 3. Validar con validateWipData autoritativo: debe tener éxito
+        const validated = ConversionWorker.validateWipData(realWip);
+        assert.strictEqual(validated.length, realWip.length);
+
+        // 4. Detener el worker target: aislamiento preservado
+        const stopRes = await workerTarget.stop(2000);
+        assert.strictEqual(stopRes.success, true);
+        assert.strictEqual(stopRes.state, 'STOPPED');
+        assert.strictEqual(workerTarget.getRegistrationState(), 'REMOVAL_CONFIRMED');
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+      } finally {
+        await workerPeer.stop(2000).catch(() => {});
+        await workerTarget.stop(2000).catch(() => {});
       }
     });
   });

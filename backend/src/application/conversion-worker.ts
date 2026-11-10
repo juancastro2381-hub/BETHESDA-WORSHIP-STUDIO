@@ -587,6 +587,9 @@ export class ConversionWorker {
     }
 
     const validated: ValidatedWipEntry[] = [];
+    const validStates = ['created', 'active', 'stopping', 'stopped'];
+    const hasOwn = (obj: object, prop: string): boolean =>
+      Object.prototype.hasOwnProperty.call(obj, prop);
 
     for (let idx = 0; idx < raw.length; idx++) {
       const entry = raw[idx];
@@ -596,129 +599,144 @@ export class ConversionWorker {
         );
       }
 
-      const { id, workId, name, options, state, count, createdOn } = entry as any;
+      const rec = entry as Record<string, unknown>;
 
-      if (typeof id !== 'string' || id.trim().length === 0) {
+      // 1. id (requerido, string no vacío)
+      if (!hasOwn(rec, 'id') || rec.id === undefined || typeof rec.id !== 'string' || rec.id.trim().length === 0) {
         throw new WorkerShutdownError(
           `Fallo de validación WIP: la entrada [${idx}] tiene un 'id' inválido o faltante.`
         );
       }
 
-      if (typeof workId !== 'string' || workId.trim().length === 0) {
+      // 2. workId (requerido, string no vacío)
+      if (!hasOwn(rec, 'workId') || rec.workId === undefined || typeof rec.workId !== 'string' || rec.workId.trim().length === 0) {
         throw new WorkerShutdownError(
           `Fallo de validación WIP: la entrada [${idx}] tiene un 'workId' inválido o faltante.`
         );
       }
 
-      if (typeof name !== 'string' || name.trim().length === 0) {
+      // 3. name (requerido, string no vacío)
+      if (!hasOwn(rec, 'name') || rec.name === undefined || typeof rec.name !== 'string' || rec.name.trim().length === 0) {
         throw new WorkerShutdownError(
           `Fallo de validación WIP: la entrada [${idx}] tiene un 'name' (cola) inválido o faltante.`
         );
       }
 
-      const validStates = ['created', 'active', 'stopping', 'stopped'];
-      if (typeof state !== 'string' || !validStates.includes(state)) {
+      // 4. state (requerido, WorkerState)
+      if (!hasOwn(rec, 'state') || rec.state === undefined || typeof rec.state !== 'string' || !validStates.includes(rec.state)) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene un estado de worker desconocido o inválido: '${state}'.`
+          `Fallo de validación WIP: la entrada [${idx}] tiene un estado de worker desconocido o inválido: '${rec.state}'.`
         );
       }
 
-      if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      // 5. options (requerido, objeto no arreglo)
+      if (!hasOwn(rec, 'options') || rec.options === undefined || rec.options === null || typeof rec.options !== 'object' || Array.isArray(rec.options)) {
         throw new WorkerShutdownError(
           `Fallo de validación WIP: la entrada [${idx}] tiene un objeto 'options' inválido o malformado.`
         );
       }
 
-      // Validación estricta de métricas requeridas (R3.3.3):
-      // 'count' es obligatorio, entero finito no negativo (prohibido missing, NaN, Infinity, -Infinity, negativo, fraccionario)
-      if (typeof count !== 'number' || !Number.isFinite(count) || !Number.isInteger(count) || count < 0) {
-        throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene un 'count' numérico inválido (debe ser un entero finito no negativo, recibido: ${count}).`
-        );
-      }
-
-      // 'createdOn' es obligatorio, número finito (prohibido missing, NaN, Infinity, -Infinity, Date.now() fallback)
-      if (typeof createdOn !== 'number' || !Number.isFinite(createdOn)) {
-        throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene un timestamp 'createdOn' inválido (debe ser un número finito, recibido: ${createdOn}).`
-        );
-      }
-
-      // Validación estricta de telemetría nullable según el contrato WipData de pg-boss:
+      // 6. count (requerido, entero finito no negativo - R3.3.3)
       if (
-        entry.lastFetchedOn !== undefined &&
-        entry.lastFetchedOn !== null &&
-        (typeof entry.lastFetchedOn !== 'number' || !Number.isFinite(entry.lastFetchedOn))
+        !hasOwn(rec, 'count') ||
+        rec.count === undefined ||
+        typeof rec.count !== 'number' ||
+        !Number.isFinite(rec.count) ||
+        !Number.isInteger(rec.count) ||
+        rec.count < 0
       ) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastFetchedOn' inválido (debe ser número finito o null).`
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'count' numérico inválido (debe ser un entero finito no negativo, recibido: ${rec.count}).`
         );
       }
 
+      // 7. createdOn (requerido, número finito - R3.3.3)
       if (
-        entry.lastJobStartedOn !== undefined &&
-        entry.lastJobStartedOn !== null &&
-        (typeof entry.lastJobStartedOn !== 'number' || !Number.isFinite(entry.lastJobStartedOn))
+        !hasOwn(rec, 'createdOn') ||
+        rec.createdOn === undefined ||
+        typeof rec.createdOn !== 'number' ||
+        !Number.isFinite(rec.createdOn)
       ) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobStartedOn' inválido (debe ser número finito o null).`
+          `Fallo de validación WIP: la entrada [${idx}] tiene un timestamp 'createdOn' inválido (debe ser un número finito, recibido: ${rec.createdOn}).`
         );
       }
 
-      if (
-        entry.lastJobEndedOn !== undefined &&
-        entry.lastJobEndedOn !== null &&
-        (typeof entry.lastJobEndedOn !== 'number' || !Number.isFinite(entry.lastJobEndedOn))
-      ) {
+      // Validación estricta de propiedades numéricas nullables requeridas por pg-boss 12.38.1 (R3.3.4):
+      const validateRequiredNullableNumber = (propName: string): number | null => {
+        if (!hasOwn(rec, propName)) {
+          throw new WorkerShutdownError(
+            `Fallo de validación WIP: la entrada [${idx}] carece de la propiedad requerida '${propName}'.`
+          );
+        }
+        const val = rec[propName];
+        if (val === undefined) {
+          throw new WorkerShutdownError(
+            `Fallo de validación WIP: la entrada [${idx}] tiene '${propName}' como undefined (debe ser número finito o null).`
+          );
+        }
+        if (val === null) {
+          return null;
+        }
+        if (typeof val !== 'number' || !Number.isFinite(val)) {
+          throw new WorkerShutdownError(
+            `Fallo de validación WIP: la entrada [${idx}] tiene '${propName}' inválido (debe ser número finito o null, recibido: ${val}).`
+          );
+        }
+        return val;
+      };
+
+      // 8. lastFetchedOn
+      const lastFetchedOn = validateRequiredNullableNumber('lastFetchedOn');
+
+      // 9. lastJobStartedOn
+      const lastJobStartedOn = validateRequiredNullableNumber('lastJobStartedOn');
+
+      // 10. lastJobEndedOn
+      const lastJobEndedOn = validateRequiredNullableNumber('lastJobEndedOn');
+
+      // 11. lastJobDuration
+      const lastJobDuration = validateRequiredNullableNumber('lastJobDuration');
+
+      // 12. lastErrorOn
+      const lastErrorOn = validateRequiredNullableNumber('lastErrorOn');
+
+      // 13. lastError (propiedad requerida, objeto no arreglo o null - R3.3.4)
+      if (!hasOwn(rec, 'lastError')) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobEndedOn' inválido (debe ser número finito o null).`
+          `Fallo de validación WIP: la entrada [${idx}] carece de la propiedad requerida 'lastError'.`
         );
       }
-
-      if (
-        entry.lastJobDuration !== undefined &&
-        entry.lastJobDuration !== null &&
-        (typeof entry.lastJobDuration !== 'number' || !Number.isFinite(entry.lastJobDuration))
-      ) {
+      const rawLastError = rec.lastError;
+      if (rawLastError === undefined) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobDuration' inválido (debe ser número finito o null).`
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastError' como undefined (debe ser objeto no arreglo o null).`
         );
       }
-
-      if (
-        entry.lastErrorOn !== undefined &&
-        entry.lastErrorOn !== null &&
-        (typeof entry.lastErrorOn !== 'number' || !Number.isFinite(entry.lastErrorOn))
-      ) {
-        throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastErrorOn' inválido (debe ser número finito o null).`
-        );
-      }
-
-      if (
-        entry.lastError !== undefined &&
-        entry.lastError !== null &&
-        (typeof entry.lastError !== 'object' || Array.isArray(entry.lastError))
-      ) {
-        throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastError' inválido (debe ser objeto no arreglo o null).`
-        );
+      let lastError: object | null = null;
+      if (rawLastError !== null) {
+        if (typeof rawLastError !== 'object' || Array.isArray(rawLastError)) {
+          throw new WorkerShutdownError(
+            `Fallo de validación WIP: la entrada [${idx}] tiene 'lastError' inválido (debe ser objeto no arreglo o null, recibido: ${typeof rawLastError}).`
+          );
+        }
+        lastError = rawLastError;
       }
 
       validated.push({
-        id: id.trim(),
-        workId: workId.trim(),
-        name: name.trim(),
-        options: options as Record<string, unknown>,
-        state: state as any,
-        count, // Exacto de la fuente, sin defaults
-        createdOn, // Exacto de la fuente, sin fabricar con Date.now()
-        lastFetchedOn: typeof entry.lastFetchedOn === 'number' ? entry.lastFetchedOn : null,
-        lastJobStartedOn: typeof entry.lastJobStartedOn === 'number' ? entry.lastJobStartedOn : null,
-        lastJobEndedOn: typeof entry.lastJobEndedOn === 'number' ? entry.lastJobEndedOn : null,
-        lastJobDuration: typeof entry.lastJobDuration === 'number' ? entry.lastJobDuration : null,
-        lastError: (entry.lastError !== null && typeof entry.lastError === 'object') ? entry.lastError : null,
-        lastErrorOn: typeof entry.lastErrorOn === 'number' ? entry.lastErrorOn : null,
+        id: (rec.id as string).trim(),
+        workId: (rec.workId as string).trim(),
+        name: (rec.name as string).trim(),
+        options: rec.options as Record<string, unknown>,
+        state: rec.state as 'created' | 'active' | 'stopping' | 'stopped',
+        count: rec.count as number,
+        createdOn: rec.createdOn as number,
+        lastFetchedOn,
+        lastJobStartedOn,
+        lastJobEndedOn,
+        lastJobDuration,
+        lastError,
+        lastErrorOn,
       });
     }
 

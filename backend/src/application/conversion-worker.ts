@@ -39,8 +39,11 @@ export class TransientWorkerError extends Error {
 
 export class WorkerLifecycleError extends Error {
   public constructor(message: string, public readonly originalError?: unknown) {
-    super(message);
+    super(message, originalError !== undefined ? { cause: originalError } : undefined);
     this.name = 'WorkerLifecycleError';
+    if (originalError !== undefined && !this.cause) {
+      (this as any).cause = originalError;
+    }
   }
 }
 
@@ -257,6 +260,13 @@ export class ConversionWorker {
       await this.stoppingPromise;
     }
 
+    // Invariante: STOPPING prohíbe terminantemente nuevas operaciones de inicio
+    if (this.lifecycleState === 'STOPPING') {
+      throw new WorkerLifecycleError(
+        'No se puede iniciar el worker: una operación previa de detención (stop) aún se encuentra en curso en estado STOPPING.'
+      );
+    }
+
     // Idempotencia ante llamadas repetidas en estado de ejecución activo
     if (this.lifecycleState === 'RUNNING') {
       return;
@@ -336,11 +346,31 @@ export class ConversionWorker {
         }
       });
 
-      this.subscriptionId = typeof subId === 'string' ? subId : null;
+      // R32-01: Validación estricta y obligatoria del identificador de suscripción retornado por boss.work()
+      if (typeof subId !== 'string' || subId.trim().length === 0) {
+        this.isQueueSubscribed = false;
+        this.subscriptionId = null;
+        this.lifecycleState = 'ERROR';
+        const subError = new WorkerLifecycleError(
+          `Fallo crítico de registro en pg-boss: boss.work() no retornó un identificador de suscripción válido (recibido: ${JSON.stringify(subId)}). ` +
+          'Se prohíbe el registro de un consumidor sin identidad autoritativa.'
+        );
+        this.lastShutdownError = subError;
+        if (this.recoveryTimer) {
+          clearInterval(this.recoveryTimer);
+          this.recoveryTimer = null;
+        }
+        throw subError;
+      }
+
+      this.subscriptionId = subId.trim();
       this.isQueueSubscribed = true;
       this.lifecycleState = 'RUNNING';
     } catch (err) {
-      this.lifecycleState = 'STOPPED';
+      this.isQueueSubscribed = false;
+      this.subscriptionId = null;
+      this.lifecycleState = 'ERROR';
+      this.lastShutdownError = err;
       if (this.recoveryTimer) {
         clearInterval(this.recoveryTimer);
         this.recoveryTimer = null;
@@ -447,110 +477,123 @@ export class ConversionWorker {
     try {
       const boss = getConversionQueue();
 
-      if (!this.pendingUnsubscribePromise) {
-        this.unsubscribeSettled = false;
-        this.lastShutdownError = null;
+      // R32-01 / AC-01 / AC-02: Desuscripción aislada y obligatoriamente dirigida
+      if (this.isQueueSubscribed || this.pendingUnsubscribePromise !== null) {
+        if (!this.pendingUnsubscribePromise) {
+          if (!this.subscriptionId) {
+            throw new WorkerShutdownError(
+              'Fallo crítico de seguridad en desuscripción: la suscripción figura activa pero el identificador de suscripción es nulo. ' +
+              'Se prohíbe terminantemente la invocación de offWork() global para preservar a otros consumidores en la cola.'
+            );
+          }
 
-        const unsubscribeTask = (async () => {
-          try {
-            // Invocar offWork dirigido específicamente a esta suscripción si se dispone de su id
-            if (this.subscriptionId) {
-              await boss.offWork(CONVERSION_QUEUE_NAME, { id: this.subscriptionId, wait: true });
-            } else {
-              await boss.offWork(CONVERSION_QUEUE_NAME, { wait: true });
-            }
+          const targetSubId = this.subscriptionId;
+          this.unsubscribeSettled = false;
+          this.lastShutdownError = null;
 
-            // Verificación autoritativa obligatoria de remoción de consumidor (FAIL-CLOSED)
-            // AC-01 / AC-02 / AC-03: La capacidad de verificación NO es opcional
-            if (typeof (boss as any).getWipData !== 'function') {
-              throw new WorkerShutdownError(
-                'Fallo autoritativo de verificación de shutdown: la instancia de pg-boss no implementa getWipData() para auditar el estado de los consumidores.'
-              );
-            }
+          const unsubscribeTask = (async () => {
+            try {
+              // Desuscripción dirigida exclusivamente a esta suscripción (NUNCA global)
+              await boss.offWork(CONVERSION_QUEUE_NAME, { id: targetSubId, wait: true });
 
-            const activeWorkers = (boss as any).getWipData();
-            if (!Array.isArray(activeWorkers)) {
-              throw new WorkerShutdownError(
-                'Fallo autoritativo de verificación de shutdown: getWipData() retornó una respuesta malformada o inesperada (no es un arreglo).'
-              );
-            }
-
-            // Verificar si el consumidor correspondiente a este worker aún permanece activo o no detenido en pg-boss
-            const isTargetWorkerStillActive = activeWorkers.some((w: any) => {
-              if (w.name !== CONVERSION_QUEUE_NAME) return false;
-              if (this.subscriptionId) {
-                return w.workId === this.subscriptionId || w.id === this.subscriptionId;
+              // Verificación autoritativa obligatoria de remoción de consumidor (FAIL-CLOSED)
+              // AC-01 / AC-02 / AC-03: La capacidad de verificación NO es opcional
+              if (typeof (boss as any).getWipData !== 'function') {
+                throw new WorkerShutdownError(
+                  'Fallo autoritativo de verificación de shutdown: la instancia de pg-boss no implementa getWipData() para auditar el estado de los consumidores.'
+                );
               }
-              return true;
+
+              const activeWorkers = (boss as any).getWipData();
+              if (!Array.isArray(activeWorkers)) {
+                throw new WorkerShutdownError(
+                  'Fallo autoritativo de verificación de shutdown: getWipData() retornó una respuesta malformada o inesperada (no es un arreglo).'
+                );
+              }
+
+              // R32-07: Verificar si el consumidor correspondiente a este worker aún permanece activo o no detenido en pg-boss
+              const isTargetWorkerStillActive = activeWorkers.some((w: any) => {
+                if (w.name !== CONVERSION_QUEUE_NAME) return false;
+                return w.workId === targetSubId || w.id === targetSubId;
+              });
+
+              if (isTargetWorkerStillActive) {
+                throw new WorkerShutdownError(
+                  `Fallo autoritativo de verificación de shutdown: pg-boss reporta que el consumidor (${targetSubId}) sigue activo o en estado no detenido tras offWork().`
+                );
+              }
+
+              // Si esta operación pertenece a una generación previa que ya fue superada por una nueva, descartar mutación
+              if (this.lifecycleGeneration !== operationGen) {
+                return;
+              }
+
+              this.subscriptionId = null;
+              this.isQueueSubscribed = false;
+              this.unsubscribeSettled = true;
+              this.pendingUnsubscribePromise = null;
+              this.lastShutdownError = null;
+              if (this.lifecycleState === 'STOPPING' || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
+                this.lifecycleState = 'STOPPED';
+              }
+            } catch (err) {
+              if (this.lifecycleGeneration !== operationGen) {
+                return;
+              }
+              this.isQueueSubscribed = true;
+              this.unsubscribeSettled = true;
+              this.pendingUnsubscribePromise = null;
+              this.lastShutdownError = err;
+              this.lifecycleState = 'ERROR';
+              throw err;
+            }
+          })();
+
+          this.pendingUnsubscribePromise = unsubscribeTask.catch(() => {});
+        }
+
+        const remainingForOffWork = Math.max(0, deadline - Date.now());
+        if (this.pendingUnsubscribePromise && !this.unsubscribeSettled) {
+          if (remainingForOffWork > 0) {
+            let offWorkTimer: NodeJS.Timeout | null = null;
+            const timeoutPromise = new Promise<'TIMED_OUT'>((resolve) => {
+              offWorkTimer = setTimeout(() => resolve('TIMED_OUT'), remainingForOffWork);
             });
 
-            if (isTargetWorkerStillActive) {
-              throw new WorkerShutdownError(
-                `Fallo autoritativo de verificación de shutdown: pg-boss reporta que el consumidor (${this.subscriptionId ?? 'global'}) sigue activo o en estado no detenido tras offWork().`
-              );
-            }
+            try {
+              const raceResult = await Promise.race([
+                this.pendingUnsubscribePromise.then(() => 'SETTLED'),
+                timeoutPromise,
+              ]);
 
-            // Si esta operación pertenece a una generación previa que ya fue superada por una nueva, descartar mutación
-            if (this.lifecycleGeneration !== operationGen) {
-              return;
+              if (raceResult === 'TIMED_OUT') {
+                timedOutDuringOffWork = true;
+                this.isShutdownTimedOut = true;
+              } else {
+                offWorkSettledThisCall = true;
+              }
+            } finally {
+              if (offWorkTimer) {
+                clearTimeout(offWorkTimer);
+                offWorkTimer = null;
+              }
             }
-
-            this.subscriptionId = null;
-            this.isQueueSubscribed = false;
-            this.unsubscribeSettled = true;
-            this.pendingUnsubscribePromise = null;
-            this.lastShutdownError = null;
-            if (this.lifecycleState === 'STOPPING' || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
-              this.lifecycleState = 'STOPPED';
-            }
-          } catch (err) {
-            if (this.lifecycleGeneration !== operationGen) {
-              return;
-            }
-            this.isQueueSubscribed = true;
-            this.unsubscribeSettled = true;
-            this.pendingUnsubscribePromise = null;
-            this.lastShutdownError = err;
-            this.lifecycleState = 'ERROR';
-            throw err;
-          }
-        })();
-
-        this.pendingUnsubscribePromise = unsubscribeTask.catch(() => {});
-      }
-
-      const remainingForOffWork = Math.max(0, deadline - Date.now());
-      if (this.pendingUnsubscribePromise && !this.unsubscribeSettled) {
-        if (remainingForOffWork > 0) {
-          let offWorkTimer: NodeJS.Timeout | null = null;
-          const timeoutPromise = new Promise<'TIMED_OUT'>((resolve) => {
-            offWorkTimer = setTimeout(() => resolve('TIMED_OUT'), remainingForOffWork);
-          });
-
-          try {
-            const raceResult = await Promise.race([
-              this.pendingUnsubscribePromise.then(() => 'SETTLED'),
-              timeoutPromise,
-            ]);
-
-            if (raceResult === 'TIMED_OUT') {
-              timedOutDuringOffWork = true;
-              this.isShutdownTimedOut = true;
-            } else {
-              offWorkSettledThisCall = true;
-            }
-          } finally {
-            if (offWorkTimer) {
-              clearTimeout(offWorkTimer);
-              offWorkTimer = null;
-            }
+          } else {
+            timedOutDuringOffWork = true;
+            this.isShutdownTimedOut = true;
           }
         } else {
-          timedOutDuringOffWork = true;
-          this.isShutdownTimedOut = true;
+          offWorkSettledThisCall = true;
         }
       } else {
+        // No hay suscripción activa ni operación pendiente: asentar limpiamente a STOPPED
         offWorkSettledThisCall = true;
+        this.unsubscribeSettled = true;
+        this.pendingUnsubscribePromise = null;
+        this.lastShutdownError = null;
+        if (this.lifecycleState === 'STOPPING' || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
+          this.lifecycleState = 'STOPPED';
+        }
       }
     } catch (err) {
       this.lastShutdownError = err;

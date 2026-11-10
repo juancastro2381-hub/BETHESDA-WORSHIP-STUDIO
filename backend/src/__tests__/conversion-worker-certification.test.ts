@@ -33,6 +33,7 @@ import {
 import {
   stopConversionQueue,
   getConversionQueue,
+  CONVERSION_QUEUE_NAME,
   type ConversionJobPayload,
 } from '../infrastructure/queue/conversion-queue.ts';
 import { ValidationError, PersistenceError } from '../domain/errors.ts';
@@ -355,11 +356,196 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
   });
 
   // ===========================================================================
-  // WS02: DETERMINISTIC SHUTDOWN & RESTART REGRESSION TESTS (SCENARIOS A - H)
+  // WS02: DETERMINISTIC SHUTDOWN, RESTART & LIFECYCLE CERTIFICATION (WS-R31-01 - 12)
   // ===========================================================================
-  describe('WS02 — Deterministic Shutdown & Restart Lifecycle (Scenarios A - H)', () => {
-    it('2.1 Scenario A: Normal shutdown resolves and transitions cleanly to STOPPED', async () => {
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-a');
+  describe('WS02 — Deterministic Shutdown & Restart Lifecycle (WS-R31-01 - WS-R31-12)', () => {
+    it('2.1 WS-R31-01: Missing verification capability (boss.getWipData is undefined) fails closed to ERROR and rejects restart', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = undefined;
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-01');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true, 'La suscripción no debe considerarse removida');
+        assert.ok(stopResult.error instanceof WorkerShutdownError);
+        assert.ok((stopResult.error as Error).message.includes('getWipData'));
+
+        // Intentar start() debe ser rechazado inmediatamente (fail closed)
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.2 WS-R31-02: Unexpected verification result (getWipData returns non-array or null) fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => null;
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-02');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true);
+        assert.ok(stopResult.error instanceof WorkerShutdownError);
+        assert.ok((stopResult.error as Error).message.includes('no es un arreglo'));
+
+        // start() rechazado
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.3 WS-R31-03: Verification exception (getWipData throws) fails closed to ERROR and records exception', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      const thrownErr = new Error('Fallo crítico de base de datos durante inspección getWipData()');
+      (boss as any).getWipData = () => {
+        throw thrownErr;
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-03');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true);
+        assert.strictEqual(worker.getLastShutdownError(), thrownErr);
+
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.4 WS-R31-04: Partial pg-boss shutdown failure (offWork resolves via Promise.allSettled but worker remains in getWipData)', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let mockActiveInWip = true;
+      let targetSubId: string | null = null;
+
+      // Reproduce el comportamiento de pg-boss manager.js donde Promise.allSettled absorbe
+      // el fallo del worker.stop() interno y offWork() resuelve limpiamente sin lanzar
+      (boss as any).offWork = async (queueName: string, ...rest: any[]) => {
+        return (originalOffWork as any)(queueName, ...rest);
+      };
+
+      (boss as any).getWipData = () => {
+        if (mockActiveInWip && targetSubId) {
+          return [
+            {
+              id: targetSubId,
+              workId: targetSubId,
+              name: CONVERSION_QUEUE_NAME,
+              state: 'active',
+            },
+          ];
+        }
+        return [];
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-04');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        targetSubId = worker.getSubscriptionId();
+        assert.ok(targetSubId !== null, 'El worker debe registrar un subscriptionId');
+
+        // 1. Invocar stop: offWork() resuelve sin excepción, pero getWipData() confirma que el consumidor sigue activo
+        const stopResult = await worker.stop(1000);
+
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true);
+        assert.ok(stopResult.error instanceof WorkerShutdownError);
+        assert.ok((stopResult.error as Error).message.includes('sigue activo o en estado no detenido'));
+
+        // 2. start() debe ser estrictamente rechazado (no permite suscripciones duplicadas)
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+
+        // 3. Simular que pg-boss finalmente limpia el consumidor
+        mockActiveInWip = false;
+
+        // 4. recover() debe reintentar la verificación y culminar en STOPPED confirmado
+        const recoveryResult = await worker.recover(1000);
+        assert.strictEqual(recoveryResult.success, true);
+        assert.strictEqual(recoveryResult.state, 'STOPPED');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.isSubscribed(), false);
+
+        // 5. Reinicio posterior permitido y verificado
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        const finalStop = await worker.stop(1000);
+        assert.strictEqual(finalStop.success, true);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        (boss as any).offWork = originalOffWork;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.5 WS-R31-05: Successful authoritative shutdown resolves, verifies removal, and permits restart', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-05');
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
       assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
@@ -382,168 +568,49 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       assert.strictEqual(worker.isUnsubscribePending(), false);
       assert.strictEqual(worker.getPendingUnsubscribeOperation(), null);
       assert.ok(elapsed < 800, `Stop con 0 trabajos debió finalizar prontamente (duración real: ${elapsed}ms)`);
+
+      // Reinicio verificado permitido
+      await worker.start();
+      assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+      const finalStop = await worker.stop(2000);
+      assert.strictEqual(finalStop.success, true);
+      assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
     });
 
-    it('2.2 Scenario B: Unsubscribe rejection transitions to ERROR and blocks new subscriptions', async () => {
+    it('2.6 WS-R31-06: Concurrent start calls share a single startup promise and create exactly one subscription', async () => {
       const boss = getConversionQueue();
-      const originalOffWork = boss.offWork.bind(boss);
       const originalWork = boss.work.bind(boss);
-
       let workCallCount = 0;
       (boss as any).work = async (...args: any[]) => {
         workCallCount++;
+        await new Promise((resolve) => setTimeout(resolve, 30));
         return (originalWork as any)(...args);
       };
 
-      const forcedError = new Error('Fallo intencional de red en pg-boss offWork()');
-      (boss as any).offWork = async () => {
-        throw forcedError;
-      };
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-b');
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-06');
       try {
-        await worker.start();
+        await Promise.all([
+          worker.start(),
+          worker.start(),
+          worker.start(),
+        ]);
+
         assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
-        assert.strictEqual(workCallCount, 1);
-
-        const stopResult = await worker.stop(1000);
-
-        assert.strictEqual(stopResult.success, false);
-        assert.strictEqual(stopResult.state, 'ERROR');
-        assert.strictEqual(stopResult.error, forcedError);
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.getLastShutdownError(), forcedError);
-        assert.strictEqual(worker.isSubscribed(), true, 'La suscripción debe permanecer marcada como potencialmente activa');
-
-        // Intentar start() debe ser rechazado inmediatamente (fail closed)
-        await assert.rejects(
-          async () => {
-            await worker.start();
-          },
-          (err: any) => {
-            assert.strictEqual(err.name, 'WorkerLifecycleError');
-            assert.ok(err.message.includes('ERROR') || err.message.includes('suscripción previa'));
-            return true;
-          }
-        );
-
-        // Verificar que bajo ninguna circunstancia se invocó boss.work() por segunda vez
-        assert.strictEqual(workCallCount, 1, 'No se debe haber creado una segunda suscripción a la cola');
-      } finally {
-        (boss as any).offWork = originalOffWork;
-        (boss as any).work = originalWork;
-        await worker.recover().catch(() => {});
-      }
-    });
-
-    it('2.3 Scenario C: Recovery attempt fails closed and preserves ERROR state if cleanup fails', async () => {
-      const boss = getConversionQueue();
-      const originalOffWork = boss.offWork.bind(boss);
-
-      let offWorkAttempts = 0;
-      const forcedError = new Error('Fallo recurrente de conexión en pg-boss offWork()');
-      (boss as any).offWork = async () => {
-        offWorkAttempts++;
-        throw forcedError;
-      };
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-c');
-      try {
-        await worker.start();
-        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
-
-        // Primer intento de stop falla
-        const stopResult = await worker.stop(1000);
-        assert.strictEqual(stopResult.state, 'ERROR');
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(offWorkAttempts, 1);
-
-        // Intento explícito de recuperación mediante recover() mientras offWork sigue fallando
-        const recoveryResult = await worker.recover(1000);
-
-        // La recuperación debe fallar de forma cerrada sin limpiar falsamente el estado de error
-        assert.strictEqual(recoveryResult.success, false);
-        assert.strictEqual(recoveryResult.state, 'ERROR');
-        assert.strictEqual(recoveryResult.error, forcedError);
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.getLastShutdownError(), forcedError);
+        assert.strictEqual(worker.isActive(), true);
         assert.strictEqual(worker.isSubscribed(), true);
-        assert.strictEqual(offWorkAttempts, 2, 'Debe haber reintentado la desuscripción exactamente una vez más');
+        assert.strictEqual(workCallCount, 1, 'Exactamente una suscripción pg-boss debe haberse creado');
 
-        // start() sigue estrictamente bloqueado
-        await assert.rejects(
-          async () => {
-            await worker.start();
-          },
-          (err: any) => {
-            assert.strictEqual(err.name, 'WorkerLifecycleError');
-            return true;
-          }
-        );
-      } finally {
-        (boss as any).offWork = originalOffWork;
-        await worker.recover().catch(() => {});
-      }
-    });
-
-    it('2.4 Scenario D: Successful recovery via documented retry permits exactly one subsequent subscription', async () => {
-      const boss = getConversionQueue();
-      const originalOffWork = boss.offWork.bind(boss);
-      const originalWork = boss.work.bind(boss);
-
-      let workCallCount = 0;
-      (boss as any).work = async (...args: any[]) => {
-        workCallCount++;
-        return (originalWork as any)(...args);
-      };
-
-      let shouldFail = true;
-      (boss as any).offWork = async (queueName: string, ...rest: any[]) => {
-        if (shouldFail) {
-          throw new Error('Fallo inicial transitorio en offWork');
-        }
-        return (originalOffWork as any)(queueName, ...rest);
-      };
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-d');
-      try {
-        await worker.start();
-        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
-        assert.strictEqual(workCallCount, 1);
-
-        // 1. Detención inicial falla
-        const stopResult = await worker.stop(1000);
-        assert.strictEqual(stopResult.state, 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), true);
-
-        // 2. Corregir condición de red / permitir éxito en reintento documentado
-        shouldFail = false;
-
-        // 3. Ejecutar recuperación segura
-        const recoveryResult = await worker.recover(1000);
-        assert.strictEqual(recoveryResult.success, true);
-        assert.strictEqual(recoveryResult.state, 'STOPPED');
-        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
-        assert.strictEqual(worker.isSubscribed(), false);
-        assert.strictEqual(worker.getLastShutdownError(), null);
-
-        // 4. Reinicio posterior debe tener éxito y establecer exactamente una nueva suscripción
-        await worker.start();
-        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
-        assert.strictEqual(worker.isSubscribed(), true);
-        assert.strictEqual(workCallCount, 2, 'Exactamente una suscripción previa (fallida) y una nueva tras recuperación');
-
-        const finalStop = await worker.stop(1000);
-        assert.strictEqual(finalStop.success, true);
+        const stopRes = await worker.stop(2000);
+        assert.strictEqual(stopRes.success, true);
         assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
       } finally {
-        (boss as any).offWork = originalOffWork;
         (boss as any).work = originalWork;
+        await worker.stop(1000).catch(() => {});
       }
     });
 
-    it('2.5 Scenario E: Concurrent stop() calls share the single shutdown operation', async () => {
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-e');
+    it('2.7 WS-R31-07: Concurrent stop() calls share the single shutdown operation and return consistent outcome', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-07');
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
 
@@ -568,37 +635,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       assert.strictEqual(seqRes.state, 'STOPPED');
     });
 
-    it('2.6 Scenario F: Repeated start/stop cycles transition cleanly without leaks or duplicate subscriptions', async () => {
-      const boss = getConversionQueue();
-      const originalWork = boss.work.bind(boss);
-      let workCallCount = 0;
-      (boss as any).work = async (...args: any[]) => {
-        workCallCount++;
-        return (originalWork as any)(...args);
-      };
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-f');
-      try {
-        for (let cycle = 1; cycle <= 3; cycle++) {
-          await worker.start();
-          assert.strictEqual(worker.getLifecycleState(), 'RUNNING', `Ciclo ${cycle}: debe estar RUNNING`);
-          assert.strictEqual(worker.isActive(), true);
-          assert.strictEqual(worker.isSubscribed(), true);
-
-          const stopRes = await worker.stop(1000);
-          assert.strictEqual(stopRes.success, true, `Ciclo ${cycle}: stop debe ser exitoso`);
-          assert.strictEqual(worker.getLifecycleState(), 'STOPPED', `Ciclo ${cycle}: debe estar STOPPED`);
-          assert.strictEqual(worker.getActiveJobsCount(), 0);
-          assert.strictEqual(worker.isSubscribed(), false);
-          assert.strictEqual(worker.isUnsubscribePending(), false);
-        }
-        assert.strictEqual(workCallCount, 3, 'Exactamente una suscripción por ciclo ejecutado');
-      } finally {
-        (boss as any).work = originalWork;
-      }
-    });
-
-    it('2.7 Scenario G: Timeout followed by eventual background settlement updates lifecycle truthfully', async () => {
+    it('2.8 WS-R31-08: Timeout followed by late completion transitions lifecycle truthfully', async () => {
       const boss = getConversionQueue();
       const originalOffWork = boss.offWork.bind(boss);
 
@@ -612,37 +649,50 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         return (originalOffWork as any)(queueName, ...rest);
       };
 
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-g');
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-08');
       try {
         await worker.start();
         assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
 
         const startTime = Date.now();
-        // Detener con plazo de 100ms mientras offWork está retenido
         const stopResult = await worker.stop(100);
         const elapsed = Date.now() - startTime;
 
-        // El llamador no se bloquea indefinidamente
         assert.strictEqual(stopResult.success, false);
         assert.strictEqual(stopResult.timedOut, true);
         assert.strictEqual(stopResult.offWorkSettled, false);
         assert.strictEqual(stopResult.state, 'STOPPING');
-        // El worker NO debe reportar falsamente STOPPED
         assert.strictEqual(worker.getLifecycleState(), 'STOPPING');
         assert.strictEqual(worker.isUnsubscribePending(), true);
         assert.strictEqual(worker.isSubscribed(), true);
         assert.ok(worker.getPendingUnsubscribeOperation() !== null);
         assert.strictEqual(worker.hasShutdownTimedOut(), true);
-        assert.ok(elapsed >= 80 && elapsed < 800, `Caller wait duration acotada (esperado ~100ms, real: ${elapsed}ms)`);
+        assert.ok(elapsed >= 80 && elapsed < 800, `Caller wait acotada (esperado ~100ms, real: ${elapsed}ms)`);
 
-        // Liberar barrera para permitir que la operación de fondo se asiente
+        // start() debe ser rechazado mientras la desuscripción siga pendiente
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+
+        // Liberar barrera y aguardar a que concluya en segundo plano
         unblockOffWork!();
         await worker.getPendingUnsubscribeOperation();
 
-        // El estado resultante debe reflejar la resolución veraz de la desuscripción
         assert.strictEqual(worker.isUnsubscribePending(), false);
         assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
         assert.strictEqual(worker.isSubscribed(), false);
+
+        // Ahora start() debe tener éxito
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        const finalStop = await worker.stop(1000);
+        assert.strictEqual(finalStop.success, true);
       } finally {
         unblockOffWork!();
         await worker.getPendingUnsubscribeOperation();
@@ -651,26 +701,29 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       }
     });
 
-    it('2.8 Scenario H: resetLifecycle() cannot bypass recovery guard after offWork() failure', async () => {
+    it('2.9 WS-R31-09: Recovery after failed shutdown retries offWork and fails closed if still bad without bypass', async () => {
       const boss = getConversionQueue();
       const originalOffWork = boss.offWork.bind(boss);
 
-      const forcedError = new Error('Fallo crítico de desuscripción');
+      let offWorkAttempts = 0;
+      const forcedError = new Error('Fallo recurrente de conexión en pg-boss offWork()');
       (boss as any).offWork = async () => {
+        offWorkAttempts++;
         throw forcedError;
       };
 
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-scenario-h');
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-09');
       try {
         await worker.start();
         assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
 
+        // 1. Primer intento de stop falla
         const stopResult = await worker.stop(1000);
         assert.strictEqual(stopResult.state, 'ERROR');
         assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), true);
+        assert.strictEqual(offWorkAttempts, 1);
 
-        // Llamar a resetLifecycle() NO DEBE eludir el fallo ni transicionar a STOPPED
+        // 2. resetLifecycle() NO DEBE eludir el fallo
         assert.throws(
           () => {
             worker.resetLifecycle();
@@ -682,12 +735,17 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           }
         );
 
-        // El estado permanece en ERROR y la suscripción sigue marcada como activa
+        // 3. Intento explícito de recuperación mediante recover() mientras offWork sigue fallando
+        const recoveryResult = await worker.recover(1000);
+        assert.strictEqual(recoveryResult.success, false);
+        assert.strictEqual(recoveryResult.state, 'ERROR');
+        assert.strictEqual(recoveryResult.error, forcedError);
         assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), true);
         assert.strictEqual(worker.getLastShutdownError(), forcedError);
+        assert.strictEqual(worker.isSubscribed(), true);
+        assert.strictEqual(offWorkAttempts, 2, 'Debe haber reintentado la desuscripción exactamente una vez más');
 
-        // start() permanece estrictamente bloqueado
+        // 4. start() sigue estrictamente bloqueado
         await assert.rejects(
           async () => {
             await worker.start();
@@ -703,7 +761,153 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       }
     });
 
-    it('2.9 Active job preservation during shutdown leaves lease intact for recovery', async () => {
+    it('2.10 WS-R31-10: Recovery after confirmed shutdown transitions to STOPPED and permits subsequent start', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+      const originalWork = boss.work.bind(boss);
+
+      let workCallCount = 0;
+      (boss as any).work = async (...args: any[]) => {
+        workCallCount++;
+        return (originalWork as any)(...args);
+      };
+
+      let shouldFail = true;
+      (boss as any).offWork = async (queueName: string, ...rest: any[]) => {
+        if (shouldFail) {
+          throw new Error('Fallo inicial transitorio en offWork');
+        }
+        return (originalOffWork as any)(queueName, ...rest);
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-10');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workCallCount, 1);
+
+        // 1. Detención inicial falla
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true);
+
+        // 2. Corregir condición de fallo
+        shouldFail = false;
+
+        // 3. Ejecutar recuperación segura
+        const recoveryResult = await worker.recover(1000);
+        assert.strictEqual(recoveryResult.success, true);
+        assert.strictEqual(recoveryResult.state, 'STOPPED');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.isSubscribed(), false);
+        assert.strictEqual(worker.getLastShutdownError(), null);
+
+        // 4. Reinicio posterior debe tener éxito y establecer exactamente una nueva suscripción
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(worker.isSubscribed(), true);
+        assert.strictEqual(workCallCount, 2, 'Exactamente una suscripción previa y una nueva tras recuperación');
+
+        const finalStop = await worker.stop(1000);
+        assert.strictEqual(finalStop.success, true);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).offWork = originalOffWork;
+        (boss as any).work = originalWork;
+      }
+    });
+
+    it('2.11 WS-R31-11: Targeted unsubscription isolates different worker instances on same queue', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+
+      const worker1 = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-11-worker1');
+      const worker2 = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-11-worker2');
+
+      try {
+        await worker1.start();
+        await worker2.start();
+
+        const subId1 = worker1.getSubscriptionId();
+        const subId2 = worker2.getSubscriptionId();
+
+        assert.ok(subId1 !== null, 'worker1 debe tener un subscriptionId');
+        assert.ok(subId2 !== null, 'worker2 debe tener un subscriptionId');
+        assert.notStrictEqual(subId1, subId2, 'Ambos workers deben tener subscriptionIds distintos');
+
+        // Simular que getWipData sigue conteniendo el consumidor de worker2
+        (boss as any).getWipData = () => {
+          return [
+            {
+              id: subId2,
+              workId: subId2,
+              name: CONVERSION_QUEUE_NAME,
+              state: 'active',
+            },
+          ];
+        };
+
+        // Detener worker1: debe filtrar por subId1 y NO fallar por la presencia de worker2 en la cola
+        const stop1 = await worker1.stop(2000);
+        assert.strictEqual(stop1.success, true);
+        assert.strictEqual(stop1.state, 'STOPPED');
+        assert.strictEqual(worker1.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker1.isSubscribed(), false);
+
+        // worker2 permanece ejecutándose
+        assert.strictEqual(worker2.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(worker2.isSubscribed(), true);
+
+        // Restaurar getWipData original y detener worker2
+        (boss as any).getWipData = originalGetWipData;
+        const stop2 = await worker2.stop(2000);
+        assert.strictEqual(stop2.success, true);
+        assert.strictEqual(worker2.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker1.stop(1000).catch(() => {});
+        await worker2.stop(1000).catch(() => {});
+      }
+    });
+
+    it('2.12 WS-R31-12: Shutdown failure cannot be hidden and records error truthfully', async () => {
+      const boss = getConversionQueue();
+      const originalOffWork = boss.offWork.bind(boss);
+      const forcedError = new Error('Fallo crítico forzado para comprobación WS-R31-12');
+      (boss as any).offWork = async () => {
+        throw forcedError;
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-ws-r31-12');
+      try {
+        await worker.start();
+
+        // 1. Con throwOnError: true, lanza WorkerShutdownError envolviendo el error original
+        await assert.rejects(
+          async () => {
+            await worker.stop({ timeoutMs: 1000, throwOnError: true });
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.strictEqual(err.cause, forcedError);
+            return true;
+          }
+        );
+
+        // 2. Con throwOnError: false (default), retorna resultado con error exacto
+        const stopResult = await worker.stop({ timeoutMs: 1000, throwOnError: false });
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(stopResult.error, forcedError);
+        assert.strictEqual(worker.getLastShutdownError(), forcedError);
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).offWork = originalOffWork;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.13 Active job preservation during shutdown leaves lease intact for recovery', async () => {
       let unblock: () => void;
       const barrier = new Promise<void>((resolve) => {
         unblock = resolve;
@@ -762,7 +966,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       await jobPromise.catch(() => {});
     });
 
-    it('2.10 Bounded drain when active jobs finish within deadline (Graceful Drain)', async () => {
+    it('2.14 Bounded drain when active jobs finish within deadline (Graceful Drain)', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-graceful-drain', {
         onStageReached: async (stage) => {
           if (stage === 'STAGE_B') {
@@ -805,7 +1009,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       assert.strictEqual(worker.isActive(), false);
     });
 
-    it('2.11 Bounded shutdown halts without indefinite hanging when active jobs exceed deadline', async () => {
+    it('2.15 Bounded shutdown halts without indefinite hanging when active jobs exceed deadline', async () => {
       let unblock: () => void;
       const barrier = new Promise<void>((resolve) => {
         unblock = resolve;
@@ -861,7 +1065,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       await jobPromise.catch(() => {});
     });
 
-    it('2.12 Synchronization of start() awaiting an in-progress stop()', async () => {
+    it('2.16 Synchronization of start() awaiting an in-progress stop()', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-settling-restart');
       await worker.start();
       assert.strictEqual(worker.isActive(), true);
@@ -881,7 +1085,7 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
     });
 
-    it('2.13 Clean lifecycle state progression (IDLE -> STARTING -> RUNNING -> STOPPING -> STOPPED)', async () => {
+    it('2.17 Clean lifecycle state progression (IDLE -> STARTING -> RUNNING -> STOPPING -> STOPPED)', async () => {
       const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-lifecycle-states');
       assert.strictEqual(worker.getLifecycleState(), 'IDLE');
 
@@ -892,6 +1096,36 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       const stopPromise = worker.stop(500);
       await stopPromise;
       assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+    });
+
+    it('2.18 Repeated start/stop cycles transition cleanly without leaks or duplicate subscriptions', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      let workCallCount = 0;
+      (boss as any).work = async (...args: any[]) => {
+        workCallCount++;
+        return (originalWork as any)(...args);
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-repeated-cycles');
+      try {
+        for (let cycle = 1; cycle <= 3; cycle++) {
+          await worker.start();
+          assert.strictEqual(worker.getLifecycleState(), 'RUNNING', `Ciclo ${cycle}: debe estar RUNNING`);
+          assert.strictEqual(worker.isActive(), true);
+          assert.strictEqual(worker.isSubscribed(), true);
+
+          const stopRes = await worker.stop(1000);
+          assert.strictEqual(stopRes.success, true, `Ciclo ${cycle}: stop debe ser exitoso`);
+          assert.strictEqual(worker.getLifecycleState(), 'STOPPED', `Ciclo ${cycle}: debe estar STOPPED`);
+          assert.strictEqual(worker.getActiveJobsCount(), 0);
+          assert.strictEqual(worker.isSubscribed(), false);
+          assert.strictEqual(worker.isUnsubscribePending(), false);
+        }
+        assert.strictEqual(workCallCount, 3, 'Exactamente una suscripción por ciclo ejecutado');
+      } finally {
+        (boss as any).work = originalWork;
+      }
     });
   });
 

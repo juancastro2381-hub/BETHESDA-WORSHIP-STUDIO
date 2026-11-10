@@ -556,20 +556,28 @@ export class ConversionWorker {
   }
 
   /**
-   * Validador estructural estricto para las respuestas de pg-boss.getWipData() (R3.3.2).
+   * Validador estructural estricto e infalsificable para las respuestas de pg-boss.getWipData() (R3.3.3).
    *
-   * Requisitos obligatorios:
-   * 1. La respuesta debe ser un arreglo real (Array.isArray).
-   * 2. Cada elemento debe ser un objeto válido (no null, no undefined, no primitivo, no arreglo).
-   * 3. 'id' debe ser string no vacío y no solo espacios en blanco.
-   * 4. 'workId' debe ser string no vacío y no solo espacios en blanco.
-   * 5. 'name' (nombre de cola) debe ser string no vacío y no solo espacios en blanco.
-   * 6. 'state' debe ser uno de los estados soportados por pg-boss: 'created', 'active', 'stopping', 'stopped'.
-   * 7. 'options' debe ser un objeto no nulo y no arreglo.
-   * 8. Si 'count' o 'createdOn' están presentes, deben ser números válidos.
+   * Cumple con el contrato oficial de tipos de pg-boss 12.38.1 (WipData en types.d.ts y worker.toWipData()).
    *
-   * Si cualquier entrada es inválida, malformada o incompleta, este método LANZA inmediatamente
-   * WorkerShutdownError. NUNCA descarta registros silenciosamente con filter().
+   * Campos requeridos obligatorios (prohibido defaults o invención de metadatos):
+   * 1. 'id': string no vacío y no solo espacios en blanco.
+   * 2. 'workId': string no vacío y no solo espacios en blanco.
+   * 3. 'name': nombre de cola no vacío y no solo espacios en blanco.
+   * 4. 'options': objeto válido no nulo y no arreglo.
+   * 5. 'state': estado soportado exacto ('created' | 'active' | 'stopping' | 'stopped').
+   * 6. 'count': entero finito no negativo (Number.isInteger(count) && count >= 0).
+   * 7. 'createdOn': timestamp numérico finito (Number.isFinite(createdOn)).
+   *
+   * Telemetría nullable (debe ser null, undefined si se omite en payload parcial, o el tipo estricto):
+   * - 'lastFetchedOn', 'lastJobStartedOn', 'lastJobEndedOn', 'lastJobDuration', 'lastErrorOn':
+   *   null o número finito (Number.isFinite).
+   * - 'lastError': null u objeto no nulo y no arreglo.
+   *
+   * Se rechaza terminantemente: NaN, Infinity, -Infinity, conteos negativos, conteos fraccionarios,
+   * campos requeridos faltantes o nulos, y telemetría malformada.
+   * Si cualquier registro en el arreglo es inválido, se RECHAZA EL ARREGLO COMPLETO lanzando WorkerShutdownError.
+   * Cero tolerancia a aceptación parcial.
    */
   public static validateWipData(raw: unknown): ValidatedWipEntry[] {
     if (!Array.isArray(raw)) {
@@ -621,15 +629,79 @@ export class ConversionWorker {
         );
       }
 
-      if (typeof count !== 'undefined' && (typeof count !== 'number' || isNaN(count) || count < 0)) {
+      // Validación estricta de métricas requeridas (R3.3.3):
+      // 'count' es obligatorio, entero finito no negativo (prohibido missing, NaN, Infinity, -Infinity, negativo, fraccionario)
+      if (typeof count !== 'number' || !Number.isFinite(count) || !Number.isInteger(count) || count < 0) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene un 'count' numérico inválido.`
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'count' numérico inválido (debe ser un entero finito no negativo, recibido: ${count}).`
         );
       }
 
-      if (typeof createdOn !== 'undefined' && (typeof createdOn !== 'number' || isNaN(createdOn))) {
+      // 'createdOn' es obligatorio, número finito (prohibido missing, NaN, Infinity, -Infinity, Date.now() fallback)
+      if (typeof createdOn !== 'number' || !Number.isFinite(createdOn)) {
         throw new WorkerShutdownError(
-          `Fallo de validación WIP: la entrada [${idx}] tiene un timestamp 'createdOn' inválido.`
+          `Fallo de validación WIP: la entrada [${idx}] tiene un timestamp 'createdOn' inválido (debe ser un número finito, recibido: ${createdOn}).`
+        );
+      }
+
+      // Validación estricta de telemetría nullable según el contrato WipData de pg-boss:
+      if (
+        entry.lastFetchedOn !== undefined &&
+        entry.lastFetchedOn !== null &&
+        (typeof entry.lastFetchedOn !== 'number' || !Number.isFinite(entry.lastFetchedOn))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastFetchedOn' inválido (debe ser número finito o null).`
+        );
+      }
+
+      if (
+        entry.lastJobStartedOn !== undefined &&
+        entry.lastJobStartedOn !== null &&
+        (typeof entry.lastJobStartedOn !== 'number' || !Number.isFinite(entry.lastJobStartedOn))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobStartedOn' inválido (debe ser número finito o null).`
+        );
+      }
+
+      if (
+        entry.lastJobEndedOn !== undefined &&
+        entry.lastJobEndedOn !== null &&
+        (typeof entry.lastJobEndedOn !== 'number' || !Number.isFinite(entry.lastJobEndedOn))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobEndedOn' inválido (debe ser número finito o null).`
+        );
+      }
+
+      if (
+        entry.lastJobDuration !== undefined &&
+        entry.lastJobDuration !== null &&
+        (typeof entry.lastJobDuration !== 'number' || !Number.isFinite(entry.lastJobDuration))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastJobDuration' inválido (debe ser número finito o null).`
+        );
+      }
+
+      if (
+        entry.lastErrorOn !== undefined &&
+        entry.lastErrorOn !== null &&
+        (typeof entry.lastErrorOn !== 'number' || !Number.isFinite(entry.lastErrorOn))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastErrorOn' inválido (debe ser número finito o null).`
+        );
+      }
+
+      if (
+        entry.lastError !== undefined &&
+        entry.lastError !== null &&
+        (typeof entry.lastError !== 'object' || Array.isArray(entry.lastError))
+      ) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene 'lastError' inválido (debe ser objeto no arreglo o null).`
         );
       }
 
@@ -639,14 +711,14 @@ export class ConversionWorker {
         name: name.trim(),
         options: options as Record<string, unknown>,
         state: state as any,
-        count: typeof count === 'number' ? count : 0,
-        createdOn: typeof createdOn === 'number' ? createdOn : Date.now(),
-        lastFetchedOn: entry.lastFetchedOn ?? null,
-        lastJobStartedOn: entry.lastJobStartedOn ?? null,
-        lastJobEndedOn: entry.lastJobEndedOn ?? null,
-        lastJobDuration: entry.lastJobDuration ?? null,
-        lastError: entry.lastError ?? null,
-        lastErrorOn: entry.lastErrorOn ?? null,
+        count, // Exacto de la fuente, sin defaults
+        createdOn, // Exacto de la fuente, sin fabricar con Date.now()
+        lastFetchedOn: typeof entry.lastFetchedOn === 'number' ? entry.lastFetchedOn : null,
+        lastJobStartedOn: typeof entry.lastJobStartedOn === 'number' ? entry.lastJobStartedOn : null,
+        lastJobEndedOn: typeof entry.lastJobEndedOn === 'number' ? entry.lastJobEndedOn : null,
+        lastJobDuration: typeof entry.lastJobDuration === 'number' ? entry.lastJobDuration : null,
+        lastError: (entry.lastError !== null && typeof entry.lastError === 'object') ? entry.lastError : null,
+        lastErrorOn: typeof entry.lastErrorOn === 'number' ? entry.lastErrorOn : null,
       });
     }
 

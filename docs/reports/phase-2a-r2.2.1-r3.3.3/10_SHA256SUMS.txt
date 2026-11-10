@@ -1,0 +1,17 @@
+94fa72a448c1370b1df797475315d663e4190f841c11a8a56089dfb44a2dbb2a  backend/src/application/conversion-worker.ts
+addc23e4dc0b8830902a347589ae5cc1c48b22dfd30fc3681a6ab8b278b6220f  backend/src/__tests__/conversion-worker-certification.test.ts
+30a7f9b0bfd2dc0d5d967dd416d27c0bd8b7c38f271dee299b68643e97e8723c  docs/reports/phase-2a-r2.2.1-r3.3.3/01_PREFLIGHT_AND_GIT_GOVERNANCE.md
+a0f42b030d46ac69477fa629f2494c20711605e62ebf6801e64b185911d3306e  docs/reports/phase-2a-r2.2.1-r3.3.3/02_ACTUAL_PG_BOSS_WIP_CONTRACT.md
+d1573b306488db96980dec57c17dcd427c4211ae26d36cdd384e835f7e7f822a  docs/reports/phase-2a-r2.2.1-r3.3.3/03_STRICT_WIP_VALIDATION_REMEDIATION.md
+973ad25920b344436c0a62f4c6a9e0cc12ebc16c68a41c76f78fcc9551ff182f  docs/reports/phase-2a-r2.2.1-r3.3.3/04_REGRESSION_TEST_EVIDENCE.md
+f67700abfa3aaaba7a235f594bc0893b4aa1e097ea600003d823ed2a32dd7e49  docs/reports/phase-2a-r2.2.1-r3.3.3/05_FULL_TEST_EXECUTION_EVIDENCE.md
+a5ada53e2e747134115aa7cefff5b697c65f01b4d32c96332f159bc60b703ddd  docs/reports/phase-2a-r2.2.1-r3.3.3/06_BACKWARD_COMPATIBILITY.md
+c7cbc80050e4d61e229310592eda3da81201ddaf276266f5ee297e42e52e4317  docs/reports/phase-2a-r2.2.1-r3.3.3/07_FINAL_PHASE_2A_REMEDIATION_REPORT.md
+f8ed207789caf1d3f8b969c5020d7812cdabd1e2afcae3f416ce8adb3364ba68  docs/reports/phase-2a-r2.2.1-r3.3.3/08_PHASE_2B_READINESS.md
+e37738b94318efd6f8a9894a69903b7c0949f279cd7b8c6cd3a66a1a6bf27631  docs/reports/phase-2a-r2.2.1-r3.3.3/09_REMAINING_RISKS.md
+a137e4a5a497023bee940192f8ab0d4a6fdf4c318d374979f0a4c83bf4682007  docs/reports/phase-2a-r2.2.1-r3.3.3/git_diff_phase_2a_r2.2.1_r3.3.3.patch
+a926eebac0889af96286923b8028fe584ec0fffd508b221f0b71aa980fdd3431  docs/reports/phase-2a-r2.2.1-r3.3.3/git_status_phase_2a_r2.2.1_r3.3.3.txt
+23e73275c52a6cc82e4ed68a7fbfc1be2f4423312324d6ab7e5a9b894fdfecd1  docs/reports/phase-2a-r2.2.1-r3.3.3/logs/all_conversion_suites.log
+bce5db58aa03b6cc7d8170474bdba9741a928f9456eab542ba48d5091f8b495f  docs/reports/phase-2a-r2.2.1-r3.3.3/logs/backend_build.log
+096c4f43d540eb528f038bb4c98cc93350e4a3ad7ddfdf6be46ab51d34cab5f0  docs/reports/phase-2a-r2.2.1-r3.3.3/logs/backend_typecheck.log
+63043cb6d33918128e7ce84fe874e1486e2eb8e79d5cec4a0aad8b90f0217b21  docs/reports/phase-2a-r2.2.1-r3.3.3/logs/certification_suite.log

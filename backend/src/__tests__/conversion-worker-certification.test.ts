@@ -2059,6 +2059,358 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         assert.ok((reconcileRes.error as Error).message.includes('inválido o está en blanco'));
       }
     });
+
+    // ===========================================================================
+    // R3.3.3: Strict pg-boss WIP Contract Hardening & Telemetry Suite (R333-01 to R333-20)
+    // ===========================================================================
+    it('2.41 R333-01 [UNIT]: Missing count fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', createdOn: Date.now() };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.42 R333-02 [UNIT]: Missing createdOn fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0 };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('createdOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.43 R333-03 [UNIT]: NaN count fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: NaN, createdOn: Date.now() };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.44 R333-04 [UNIT]: Infinity count fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: Infinity, createdOn: Date.now() };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.45 R333-05 [UNIT]: Negative count fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: -1, createdOn: Date.now() };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.46 R333-06 [UNIT]: Fractional count fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 2.5, createdOn: Date.now() };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.47 R333-07 [UNIT]: NaN createdOn fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: NaN };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('createdOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.48 R333-08 [UNIT]: Infinity createdOn fails closed with WorkerShutdownError', () => {
+      const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Infinity };
+      assert.throws(
+        () => ConversionWorker.validateWipData([base]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('createdOn'));
+          return true;
+        }
+      );
+    });
+
+    it('2.49 R333-09 [UNIT]: Invalid lastFetchedOn fails closed with WorkerShutdownError', () => {
+      const invalid = ['not-a-number', NaN, Infinity, -Infinity, {}];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastFetchedOn: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastFetchedOn'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.50 R333-10 [UNIT]: Invalid lastJobStartedOn fails closed with WorkerShutdownError', () => {
+      const invalid = ['invalid-ts', NaN, Infinity, {}];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobStartedOn: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastJobStartedOn'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.51 R333-11 [UNIT]: Invalid lastJobEndedOn fails closed with WorkerShutdownError', () => {
+      const invalid = ['invalid-ts', NaN, Infinity, {}];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobEndedOn: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastJobEndedOn'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.52 R333-12 [UNIT]: Invalid lastJobDuration fails closed with WorkerShutdownError', () => {
+      const invalid = ['invalid-duration', NaN, Infinity, {}];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastJobDuration: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastJobDuration'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.53 R333-13 [UNIT]: Invalid lastError type fails closed with WorkerShutdownError', () => {
+      const invalid = ['error-string', 500, true, [1, 2]];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastError: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastError'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.54 R333-14 [UNIT]: Invalid lastErrorOn fails closed with WorkerShutdownError', () => {
+      const invalid = ['error-ts', NaN, Infinity, {}];
+      for (const val of invalid) {
+        const base = { id: 'w1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active', count: 0, createdOn: Date.now(), lastErrorOn: val };
+        assert.throws(
+          () => ConversionWorker.validateWipData([base]),
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('lastErrorOn'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('2.55 R333-15 [UNIT]: Valid nullable telemetry values are accepted without fabrication', () => {
+      const validPopulated = {
+        id: 'w1',
+        workId: 'w1',
+        name: CONVERSION_QUEUE_NAME,
+        options: { workerInstanceId: 'inst-1' },
+        state: 'active',
+        count: 3,
+        createdOn: 1700000000000,
+        lastFetchedOn: 1700000001000,
+        lastJobStartedOn: 1700000002000,
+        lastJobEndedOn: 1700000003000,
+        lastJobDuration: 1000,
+        lastError: { message: 'db timeout', code: 'ETIMEDOUT' },
+        lastErrorOn: 1700000004000,
+      };
+      const res1 = ConversionWorker.validateWipData([validPopulated]);
+      assert.strictEqual(res1.length, 1);
+      assert.strictEqual(res1[0].count, 3);
+      assert.strictEqual(res1[0].createdOn, 1700000000000);
+      assert.strictEqual(res1[0].lastJobDuration, 1000);
+      assert.deepStrictEqual(res1[0].lastError, { message: 'db timeout', code: 'ETIMEDOUT' });
+
+      const validNulls = {
+        id: 'w2',
+        workId: 'w2',
+        name: CONVERSION_QUEUE_NAME,
+        options: {},
+        state: 'active',
+        count: 0,
+        createdOn: 1700000000000,
+        lastFetchedOn: null,
+        lastJobStartedOn: null,
+        lastJobEndedOn: null,
+        lastJobDuration: null,
+        lastError: null,
+        lastErrorOn: null,
+      };
+      const res2 = ConversionWorker.validateWipData([validNulls]);
+      assert.strictEqual(res2.length, 1);
+      assert.strictEqual(res2[0].lastFetchedOn, null);
+      assert.strictEqual(res2[0].lastError, null);
+    });
+
+    it('2.56 R333-16 [UNIT]: Valid complete WIP records from pg-boss 12.38.1 are accepted', () => {
+      const boss = getConversionQueue();
+      const wip = (boss as any).getWipData();
+      assert.ok(Array.isArray(wip));
+      const validated = ConversionWorker.validateWipData(wip);
+      assert.ok(Array.isArray(validated));
+    });
+
+    it('2.57 R333-17 [UNIT]: Any malformed record in a mixed array rejects the entire array', () => {
+      const validRecord = {
+        id: 'w-valid',
+        workId: 'w-valid',
+        name: CONVERSION_QUEUE_NAME,
+        options: {},
+        state: 'active',
+        count: 0,
+        createdOn: 1700000000000,
+        lastFetchedOn: null,
+      };
+      const malformedRecord = {
+        id: 'w-malformed',
+        workId: 'w-malformed',
+        name: CONVERSION_QUEUE_NAME,
+        options: {},
+        state: 'active',
+        count: NaN, // Invalid!
+        createdOn: 1700000000000,
+      };
+      assert.throws(
+        () => ConversionWorker.validateWipData([validRecord, malformedRecord]),
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerShutdownError');
+          assert.ok(err.message.includes('count'));
+          return true;
+        }
+      );
+    });
+
+    it('2.58 R333-18 [CONTRACT]: Malformed WIP metrics never transition worker to STOPPED', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        {
+          id: 'w1',
+          workId: 'w1',
+          name: CONVERSION_QUEUE_NAME,
+          options: {},
+          state: 'active',
+          count: -5, // Negative count
+          createdOn: Date.now(),
+        },
+      ];
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r333-18-stop-reject');
+      try {
+        await worker.start();
+        const stopRes = await worker.stop(1000);
+        assert.strictEqual(stopRes.success, false);
+        assert.strictEqual(stopRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.59 R333-19 [CONTRACT]: Malformed WIP metrics never set registrationState to REMOVAL_CONFIRMED', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        {
+          id: 'w1',
+          workId: 'w1',
+          name: CONVERSION_QUEUE_NAME,
+          options: {},
+          state: 'active',
+          count: 0,
+          createdOn: Infinity, // Infinity createdOn
+        },
+      ];
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r333-19-removal-reject');
+      try {
+        await worker.start();
+        await worker.stop(1000);
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.notStrictEqual(worker.getRegistrationState(), 'REMOVAL_CONFIRMED');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.60 R333-20 [INTEGRATION]: Valid complete WIP data preserves targeted recovery and peer isolation in real pg-boss', async () => {
+      const boss = getConversionQueue();
+      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r333-20-peer');
+      const workerTarget = new ConversionWorker(db, storage, undefined, 'cert-r333-20-target');
+
+      try {
+        await workerPeer.start();
+        await workerTarget.start();
+
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workerTarget.getLifecycleState(), 'RUNNING');
+
+        // Detener targeted workerTarget: getWipData real devuelve datos completos
+        const stopRes = await workerTarget.stop(2000);
+        assert.strictEqual(stopRes.success, true);
+        assert.strictEqual(stopRes.state, 'STOPPED');
+        assert.strictEqual(workerTarget.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(workerTarget.getRegistrationState(), 'REMOVAL_CONFIRMED');
+
+        // workerPeer continúa 100% activo y registrado en pg-boss
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workerPeer.isSubscribed(), true);
+      } finally {
+        await workerPeer.stop(1000).catch(() => {});
+        await workerTarget.stop(1000).catch(() => {});
+      }
+    });
   });
 
   // ===========================================================================

@@ -556,7 +556,7 @@ export class ConversionWorker {
   }
 
   /**
-   * Validador estructural estricto e infalsificable para las respuestas de pg-boss.getWipData() (R3.3.3).
+   * Validador estructural estricto e infalsificable para las respuestas de pg-boss.getWipData() (R3.3.3 & R3.3.4).
    *
    * Cumple con el contrato oficial de tipos de pg-boss 12.38.1 (WipData en types.d.ts y worker.toWipData()).
    *
@@ -569,13 +569,18 @@ export class ConversionWorker {
    * 6. 'count': entero finito no negativo (Number.isInteger(count) && count >= 0).
    * 7. 'createdOn': timestamp numérico finito (Number.isFinite(createdOn)).
    *
-   * Telemetría nullable (debe ser null, undefined si se omite en payload parcial, o el tipo estricto):
-   * - 'lastFetchedOn', 'lastJobStartedOn', 'lastJobEndedOn', 'lastJobDuration', 'lastErrorOn':
-   *   null o número finito (Number.isFinite).
-   * - 'lastError': null u objeto no nulo y no arreglo.
+   * Telemetría nullable requerida (las seis propiedades son propiedades propias obligatorias; prohibido omitirlas o asignarles undefined):
+   * - Las seis propiedades ('lastFetchedOn', 'lastJobStartedOn', 'lastJobEndedOn', 'lastJobDuration', 'lastError', 'lastErrorOn')
+   *   deben existir obligatoriamente como propiedades propias en cada entrada (Object.prototype.hasOwnProperty).
+   * - Se aceptan valores explícitos 'null'.
+   * - Se aceptan valores numéricos finitos para propiedades numéricas ('lastFetchedOn', 'lastJobStartedOn', 'lastJobEndedOn', 'lastJobDuration', 'lastErrorOn').
+   * - Se acepta un objeto no nulo y no arreglo o 'null' para 'lastError'.
+   * - Se rechazan terminantemente propiedades faltantes o ausentes (omisión).
+   * - Se rechaza terminantemente el valor explícito 'undefined'.
+   * - Prohibidos defaults o valores de telemetría fabricados.
    *
    * Se rechaza terminantemente: NaN, Infinity, -Infinity, conteos negativos, conteos fraccionarios,
-   * campos requeridos faltantes o nulos, y telemetría malformada.
+   * campos faltantes, undefined, y telemetría malformada.
    * Si cualquier registro en el arreglo es inválido, se RECHAZA EL ARREGLO COMPLETO lanzando WorkerShutdownError.
    * Cero tolerancia a aceptación parcial.
    */

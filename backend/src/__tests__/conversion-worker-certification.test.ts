@@ -481,104 +481,153 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       }
     });
 
-    it('2.3 R33-03: Residual consumer detection preserves ERROR while real consumer remains in pg-boss [Integration]', async () => {
-      const boss = getConversionQueue();
-      const workerActive = new ConversionWorker(db, storage, undefined, 'cert-r33-03-active');
-      const workerUncertain = new ConversionWorker(db, storage, undefined, 'cert-r33-03-uncertain');
-
-      try {
-        // Iniciar un worker real legítimo en pg-boss
-        await workerActive.start();
-        const activeSubId = workerActive.getSubscriptionId();
-        assert.ok(activeSubId !== null);
-
-        // Forzar workerUncertain a estado UNCERTAIN/ERROR
-        (workerUncertain as any).registrationState = 'UNCERTAIN';
-        (workerUncertain as any).lifecycleState = 'ERROR';
-        (workerUncertain as any).lastShutdownError = new WorkerLifecycleError('Fallo simulado de registro');
-
-        // Intentar reconciliar sin identificador específico
-        // Dado que existe workerActive en la cola, NO se puede probar ausencia total
-        const reconcileRes = await workerUncertain.reconcileRegistration(undefined, 1000, false);
-        assert.strictEqual(reconcileRes.success, false);
-        assert.strictEqual(reconcileRes.state, 'ERROR');
-        assert.strictEqual(workerUncertain.getLifecycleState(), 'ERROR');
-        assert.strictEqual(workerUncertain.getRegistrationState(), 'UNRESOLVED_ERROR');
-
-        // workerActive debe continuar 100% activo y sin perturbación
-        assert.strictEqual(workerActive.getLifecycleState(), 'RUNNING');
-        assert.strictEqual(workerActive.isSubscribed(), true);
-      } finally {
-        await workerActive.stop(2000).catch(() => {});
-      }
-    });
-
-    it('2.4 R33-04: Recovery after uncertain registration safely isolates and reconciles exact consumer', async () => {
+    it('2.3 R331-REAL-01 [INTEGRATION]: Real pg-boss registration identity loss safely detects residual consumer, recovers exact identity without fabrication, and settles cleanly to STOPPED', async () => {
       const boss = getConversionQueue();
       const originalWork = boss.work.bind(boss);
-      const originalGetWipData = (boss as any).getWipData;
-      const originalOffWork = boss.offWork.bind(boss);
 
-      const targetId = 'sub-reconciled-target-001';
-      let offWorkTargetCalled: any = null;
-
-      (boss as any).offWork = async (name: string, options: any) => {
-        offWorkTargetCalled = { name, options };
-        inWip = false; // offWork lo remueve de wip en pg-boss
-        return (originalOffWork as any)(name, options);
+      let realGeneratedSubId: string | null = null;
+      // Interceptar ÚNICAMENTE en el boundary de la aplicación el resultado retornado
+      // permitiendo que pg-boss registre el worker real en PostgreSQL y en su Manager interno
+      (boss as any).work = async (...args: any[]) => {
+        realGeneratedSubId = await (originalWork as any)(...args);
+        return null; // El boundary de la aplicación recibe null a pesar de que pg-boss registró el consumidor
       };
 
-      // Simular que boss.work falló retornando null, pero un consumidor con targetId existe en wip
-      (boss as any).work = async () => null;
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r331-real-01');
 
-      let inWip = true;
-      (boss as any).getWipData = () => {
-        if (inWip) {
-          return [
-            {
-              id: targetId,
-              workId: targetId,
-              name: CONVERSION_QUEUE_NAME,
-              state: 'active',
-            },
-          ];
-        }
-        return [];
-      };
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-r33-04-reconcile');
       try {
-        await assert.rejects(async () => {
-          await worker.start();
-        });
+        // 1. Iniciar worker: boss.work real se ejecuta, pero la respuesta interceptada es null
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
 
         assert.strictEqual(worker.getLifecycleState(), 'ERROR');
         assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+        assert.strictEqual(worker.isSubscribed(), false);
+        assert.strictEqual(worker.getSubscriptionId(), null);
 
-        // Iniciar recuperación especificando el identificador exacto de reconciliación
-        const recoverRes = await worker.recover({ reconciledSubscriptionId: targetId, timeoutMs: 2000 });
+        // 2. Inspeccionar el getWipData() REAL de pg-boss (sin ningún mock)
+        const realWip = (boss as any).getWipData();
+        const residual = realWip.find((w: any) => (w.options as any)?.workerInstanceId === worker.workerId);
+        assert.ok(residual !== undefined, 'El consumidor residual real DEBE existir en getWipData() de pg-boss');
+        assert.strictEqual(residual.workId, realGeneratedSubId, 'El workId en pg-boss debe coincidir con el generado internamente');
 
+        // 3. stop() ordinario no debe reportar éxito ni transition a STOPPED mientras siga UNCERTAIN
+        const stopRes = await worker.stop(1000);
+        assert.strictEqual(stopRes.success, false);
+        assert.strictEqual(stopRes.state, 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+
+        // 4. Disparar el mecanismo de producción (recover()) sin proveer ID fabricado
+        const recoverRes = await worker.recover(2000);
         assert.strictEqual(recoverRes.success, true);
         assert.strictEqual(recoverRes.state, 'STOPPED');
         assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
         assert.strictEqual(worker.getRegistrationState(), 'REMOVAL_CONFIRMED');
         assert.strictEqual(worker.isSubscribed(), false);
-        assert.strictEqual(offWorkTargetCalled?.options?.id, targetId);
 
-        // Reinicio posterior debe ser permitido tras reconciliación exitosa
+        // 5. Inspeccionar nuevamente el getWipData() REAL: el consumidor debe haber sido removido de forma dirigida
+        const realWipAfter = (boss as any).getWipData();
+        const residualAfter = realWipAfter.find((w: any) => (w.options as any)?.workerInstanceId === worker.workerId);
+        assert.strictEqual(residualAfter, undefined, 'El consumidor objetivo debe haber sido removido autoritativamente de pg-boss');
+
+        // 6. Reinicio limpio posterior permitido tras recuperación verificada
         (boss as any).work = originalWork;
         await worker.start();
         assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
         assert.strictEqual(worker.isSubscribed(), true);
 
-        const stopRes = await worker.stop(2000);
-        assert.strictEqual(stopRes.success, true);
+        const finalStop = await worker.stop(2000);
+        assert.strictEqual(finalStop.success, true);
         assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
       } finally {
         (boss as any).work = originalWork;
-        (boss as any).getWipData = originalGetWipData;
-        (boss as any).offWork = originalOffWork;
         await worker.stop(1000).catch(() => {});
+      }
+    });
+
+    it('2.4 R331-REAL-02 [INTEGRATION]: Multiple real consumers on same queue under registration uncertainty safely preserves peer consumer and avoids global offWork', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalOffWork = boss.offWork.bind(boss);
+
+      const offWorkCalls: any[] = [];
+      (boss as any).offWork = async (name: string, options: any) => {
+        offWorkCalls.push({ name, options });
+        return (originalOffWork as any)(name, options);
+      };
+
+      // Iniciar dos workers reales en la misma cola
+      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r331-real-02-peer');
+      const workerUncertain = new ConversionWorker(db, storage, undefined, 'cert-r331-real-02-uncertain');
+
+      try {
+        // 1. workerPeer inicia normalmente y obtiene su suscripción legítima
+        await workerPeer.start();
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+        const peerSubId = workerPeer.getSubscriptionId();
+        assert.ok(peerSubId !== null);
+
+        // 2. Interceptar workerUncertain en el boundary para que reciba whitespace
+        (boss as any).work = async (...args: any[]) => {
+          await (originalWork as any)(...args);
+          return '   '; // Espacio en blanco inválido
+        };
+
+        await assert.rejects(async () => {
+          await workerUncertain.start();
+        });
+        assert.strictEqual(workerUncertain.getLifecycleState(), 'ERROR');
+        assert.strictEqual(workerUncertain.getRegistrationState(), 'UNCERTAIN');
+
+        // 3. Inspeccionar getWipData() real: ambos consumidores existen en la cola
+        const wipBefore = (boss as any).getWipData();
+        const peerInWip = wipBefore.find((w: any) => w.workId === peerSubId);
+        const uncertainInWip = wipBefore.find((w: any) => (w.options as any)?.workerInstanceId === workerUncertain.workerId);
+        assert.ok(peerInWip !== undefined, 'workerPeer debe existir en pg-boss');
+        assert.ok(uncertainInWip !== undefined, 'workerUncertain debe existir residualmente en pg-boss');
+
+        // 4. stop() en workerUncertain falla y NO llama offWork global
+        const stopRes = await workerUncertain.stop(1000);
+        assert.strictEqual(stopRes.success, false);
+        assert.strictEqual(stopRes.state, 'ERROR');
+        assert.strictEqual(offWorkCalls.length, 0, 'No debe haberse invocado offWork()');
+
+        // 5. Reconciliar workerUncertain mediante recover()
+        const recoverRes = await workerUncertain.recover(2000);
+        assert.strictEqual(recoverRes.success, true);
+        assert.strictEqual(recoverRes.state, 'STOPPED');
+
+        // 6. Verificar que offWork fue DIRIGIDO exclusivamente al workId de workerUncertain
+        assert.strictEqual(offWorkCalls.length, 1);
+        assert.strictEqual(offWorkCalls[0].name, CONVERSION_QUEUE_NAME);
+        assert.strictEqual(offWorkCalls[0].options?.id, uncertainInWip.workId);
+        assert.strictEqual(offWorkCalls[0].options?.wait, true);
+
+        // 7. workerPeer DEBE continuar 100% activo en pg-boss y en memoria
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workerPeer.isSubscribed(), true);
+        const wipAfter = (boss as any).getWipData();
+        const peerStillInWip = wipAfter.find((w: any) => w.workId === peerSubId);
+        const uncertainGone = wipAfter.find((w: any) => (w.options as any)?.workerInstanceId === workerUncertain.workerId);
+        assert.ok(peerStillInWip !== undefined, 'workerPeer debe seguir activo y sin perturbación en pg-boss');
+        assert.strictEqual(uncertainGone, undefined, 'workerUncertain debe haber sido removido');
+
+        // 8. Detener workerPeer limpiamente
+        const stopPeer = await workerPeer.stop(2000);
+        assert.strictEqual(stopPeer.success, true);
+        assert.strictEqual(workerPeer.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).work = originalWork;
+        (boss as any).offWork = originalOffWork;
+        await workerPeer.stop(1000).catch(() => {});
+        await workerUncertain.stop(1000).catch(() => {});
       }
     });
 
@@ -1619,6 +1668,112 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
           return true;
         }
       );
+    });
+
+    it('2.29 R331-REAL-03 [INTEGRATION]: Real recovery failure under identity loss preserves ERROR and fail-closed state without corrupting peer consumers', async () => {
+      const { default: WorkerClass } = await import('../../node_modules/pg-boss/dist/worker.js');
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalWorkerStop = (WorkerClass as any).prototype.stop;
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r331-real-03-fail');
+
+      let targetSubId: string | null = null;
+      let injectFailure = false;
+
+      // Boundary interceptor para forzar pérdida de identidad en el arranque
+      (boss as any).work = async (...args: any[]) => {
+        targetSubId = await (originalWork as any)(...args);
+        return undefined; // Respuesta indefinida
+      };
+
+      try {
+        await assert.rejects(async () => {
+          await worker.start();
+        });
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+
+        // Confirmar que el consumidor existe en getWipData() real
+        const wip = (boss as any).getWipData();
+        const found = wip.find((w: any) => (w.options as any)?.workerInstanceId === worker.workerId);
+        assert.ok(found !== undefined, 'Consumidor debe existir en getWipData() real');
+
+        // Inyectar fallo interno en Worker.prototype.stop exclusivamente para este targetSubId
+        injectFailure = true;
+        (WorkerClass as any).prototype.stop = async function (...args: any[]) {
+          if (injectFailure && (this.workId === targetSubId || this.id === targetSubId)) {
+            throw new Error('Fallo simulado en Worker.stop() durante reconciliación');
+          }
+          return originalWorkerStop.apply(this, args);
+        };
+
+        // 1. Intento de recuperación mientras offWork falla internamente:
+        // Debe fallar de forma cerrada y preservar ERROR
+        const recoverFailed = await worker.recover(2000);
+        assert.strictEqual(recoverFailed.success, false);
+        assert.strictEqual(recoverFailed.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.isSubscribed(), true);
+
+        // 2. Intento de reinicio debe ser estrictamente rechazado
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+
+        // 3. Desactivar inyección de fallo y reintentar recuperación válida
+        injectFailure = false;
+        const recoverSuccess = await worker.recover(2000);
+        assert.strictEqual(recoverSuccess.success, true);
+        assert.strictEqual(recoverSuccess.state, 'STOPPED');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.isSubscribed(), false);
+
+        // 4. Verificar ausencia en getWipData() real
+        const wipAfter = (boss as any).getWipData();
+        const foundAfter = wipAfter.find((w: any) => (w.options as any)?.workerInstanceId === worker.workerId);
+        assert.strictEqual(foundAfter, undefined, 'El consumidor debe haber sido removido');
+      } finally {
+        injectFailure = false;
+        (WorkerClass as any).prototype.stop = originalWorkerStop;
+        (boss as any).work = originalWork;
+        await worker.stop(1000).catch(() => {});
+      }
+    });
+
+    it('2.30 Residual consumer detection with unrelated consumer preserves ERROR when no match found [Integration]', async () => {
+      const boss = getConversionQueue();
+      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r331-unrelated-peer');
+      const workerUnrelated = new ConversionWorker(db, storage, undefined, 'cert-r331-unrelated-target');
+
+      try {
+        await workerPeer.start();
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+
+        // workerUnrelated nunca inició en pg-boss, pero forzamos estado UNCERTAIN/ERROR
+        (workerUnrelated as any).registrationState = 'UNCERTAIN';
+        (workerUnrelated as any).lifecycleState = 'ERROR';
+
+        // Intentar reconciliar sin identificador y sin coincidencia de workerId:
+        // Dado que workerPeer está en la cola y no coincide con workerUnrelated, debe fallar de forma cerrada
+        const reconcileRes = await workerUnrelated.reconcileRegistration(undefined, 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(workerUnrelated.getLifecycleState(), 'ERROR');
+        assert.strictEqual(workerUnrelated.getRegistrationState(), 'UNRESOLVED_ERROR');
+
+        // workerPeer continúa 100% activo
+        assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workerPeer.isSubscribed(), true);
+      } finally {
+        await workerPeer.stop(1000).catch(() => {});
+      }
     });
   });
 

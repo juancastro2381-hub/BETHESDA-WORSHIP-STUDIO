@@ -378,16 +378,20 @@ export class ConversionWorker {
         }
       }
 
-      // 3. Iniciar pg-boss y registrar handler de trabajo
+      // 3. Iniciar pg-boss y registrar handler de trabajo con workerId en opciones para correlación autoritativa (R3.3.1)
       const boss = await startConversionQueue();
       this.registrationState = 'UNCERTAIN';
       let subId: unknown;
       try {
-        subId = await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
-          for (const job of jobs) {
-            await this.processJob(job.data);
+        subId = await boss.work<ConversionJobPayload>(
+          CONVERSION_QUEUE_NAME,
+          { workerInstanceId: this.workerId } as any,
+          async (jobs) => {
+            for (const job of jobs) {
+              await this.processJob(job.data);
+            }
           }
-        });
+        );
       } catch (err) {
         this.registrationState = 'UNCERTAIN';
         this.isQueueSubscribed = false;
@@ -513,7 +517,7 @@ export class ConversionWorker {
     const reconciledSubId = typeof options === 'object' ? options?.reconciledSubscriptionId : undefined;
     const throwOnError = typeof options === 'object' ? (options?.throwOnError ?? false) : false;
 
-    if (reconciledSubId) {
+    if (reconciledSubId || this.hasUnresolvedRegistration()) {
       return this.reconcileRegistration(reconciledSubId, timeoutMs, throwOnError);
     }
 
@@ -611,47 +615,24 @@ export class ConversionWorker {
 
     const queueWorkers = activeWorkers.filter((w: any) => w.name === CONVERSION_QUEUE_NAME);
 
-    // 1. Si se proveyó un identificador de reconciliación
+    // 1. Intentar correlación unívoca del consumidor (R3.3.1):
+    // a) Mediante reconciledSubscriptionId provisto explícitamente, o
+    // b) Mediante el workerId embebido en las opciones de registro en pg-boss
+    let matchingWorker: any = null;
+    let targetId: string | null = null;
+
     if (typeof reconciledSubscriptionId === 'string' && reconciledSubscriptionId.trim().length > 0) {
-      const targetId = reconciledSubscriptionId.trim();
-      const matchingWorker = queueWorkers.find((w: any) => w.workId === targetId || w.id === targetId);
-
-      if (!matchingWorker) {
-        if (queueWorkers.length === 0) {
-          // Evidencia autoritativa de ausencia: la cola está completamente vacía en pg-boss
-          this.registrationState = 'REMOVAL_CONFIRMED';
-          this.subscriptionId = null;
-          this.isQueueSubscribed = false;
-          this.lastShutdownError = null;
-          this.lifecycleState = 'STOPPED';
-          return {
-            success: true,
-            state: 'STOPPED',
-            offWorkSettled: true,
-            activeJobsDrained: true,
-            remainingJobsCount: 0,
-            timedOut: false,
-          };
-        }
-        const err = new WorkerShutdownError(
-          `Fallo autoritativo de reconciliación: el identificador provisto (${targetId}) no coincide con ningún consumidor activo en pg-boss.`
-        );
-        this.registrationState = 'UNRESOLVED_ERROR';
-        this.lifecycleState = 'ERROR';
-        this.lastShutdownError = err;
-        if (throwOnError) throw err;
-        return {
-          success: false,
-          state: 'ERROR',
-          offWorkSettled: false,
-          activeJobsDrained: false,
-          remainingJobsCount: this.activeJobIds.size,
-          timedOut: false,
-          error: err,
-        };
+      targetId = reconciledSubscriptionId.trim();
+      matchingWorker = queueWorkers.find((w: any) => w.workId === targetId || w.id === targetId);
+    } else {
+      matchingWorker = queueWorkers.find((w: any) => (w.options as any)?.workerInstanceId === this.workerId);
+      if (matchingWorker) {
+        targetId = matchingWorker.workId || matchingWorker.id;
       }
+    }
 
-      // Consumidor localizado de forma unívoca: adoptar identidad y ejecutar desuscripción dirigida
+    if (matchingWorker && targetId) {
+      // Consumidor localizado de forma unívoca y verificada: adoptar identidad y ejecutar desuscripción dirigida
       this.subscriptionId = targetId;
       this.registrationState = 'REGISTERED';
       this.isQueueSubscribed = true;
@@ -659,8 +640,8 @@ export class ConversionWorker {
       return this.performStop(timeoutMs, throwOnError);
     }
 
-    // 2. Si NO se proveyó identificador:
-    // Solo podemos confirmar STOPPED si la cola en pg-boss está 100% vacía (ausencia autoritativa)
+    // 2. Si no se localizó ningún consumidor correspondiente a este worker:
+    // Solo podemos confirmar STOPPED si la cola en pg-boss está 100% vacía (ausencia autoritativa de consumidores)
     if (queueWorkers.length === 0) {
       this.registrationState = 'REMOVAL_CONFIRMED';
       this.subscriptionId = null;
@@ -677,10 +658,10 @@ export class ConversionWorker {
       };
     }
 
-    // Existen otros workers en la cola y carecemos de identidad: fail-closed estricto
+    // 3. Existen otros workers en la cola y carecemos de identidad unívoca: fail-closed estricto
     const err = new WorkerShutdownError(
-      'Fallo autoritativo de reconciliación: existen consumidores en pg-boss pero se carece de identificador exacto de suscripción. ' +
-      'Se prohíbe la desuscripción global para preservar a otros consumidores. Especifique reconciledSubscriptionId.'
+      `Fallo autoritativo de reconciliación: existen consumidores en pg-boss pero ninguno coincide con este worker (${this.workerId}) ni con el identificador de suscripción provisto. ` +
+      'Se prohíbe la desuscripción global para preservar a otros consumidores en la cola.'
     );
     this.registrationState = 'UNRESOLVED_ERROR';
     this.lifecycleState = 'ERROR';

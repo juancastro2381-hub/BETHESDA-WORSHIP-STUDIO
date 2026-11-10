@@ -359,8 +359,231 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
   // WS02: DETERMINISTIC SHUTDOWN, RESTART & LIFECYCLE CERTIFICATION (R3.2 SUITE)
   // ===========================================================================
   describe('WS02 — Deterministic Shutdown, Subscription Isolation & Lifecycle Certification', () => {
-    it('2.1 R32-01: Valid subscription ID is captured on worker start', async () => {
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-r32-01');
+    it('2.1 R33-01: Invalid registration response (null, undefined, empty string, whitespace, malformed object) enters ERROR and prevents false STOPPED', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let offWorkCalled = false;
+      (boss as any).offWork = async (...args: any[]) => {
+        offWorkCalled = true;
+        return (originalOffWork as any)(...args);
+      };
+
+      const invalidValues: any[] = [null, undefined, '', '   ', { malformedResponse: 999 }];
+
+      try {
+        for (const invalidVal of invalidValues) {
+          (boss as any).work = async () => invalidVal;
+          const worker = new ConversionWorker(db, storage, undefined, `cert-r33-01-${String(invalidVal)}`);
+
+          await assert.rejects(
+            async () => {
+              await worker.start();
+            },
+            (err: any) => {
+              assert.strictEqual(err.name, 'WorkerLifecycleError');
+              assert.ok(err.message.includes('identificador de suscripción válido') || err.message.includes('UNCERTAIN'));
+              return true;
+            }
+          );
+
+          assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+          assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+          assert.strictEqual(worker.hasUnresolvedRegistration(), true);
+          assert.strictEqual(worker.isSubscribed(), false);
+          assert.strictEqual(worker.getSubscriptionId(), null);
+
+          // R33-01 / Blocker R33-01: stop() MUST NOT report STOPPED or success: true!
+          const stopRes = await worker.stop(1000);
+          assert.strictEqual(stopRes.success, false, 'stop() debe retornar success: false ante registro incierto');
+          assert.strictEqual(stopRes.state, 'ERROR', 'stop() debe preservar estado ERROR ante registro incierto');
+          assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+          assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+          assert.strictEqual(worker.hasUnresolvedRegistration(), true);
+
+          // resetLifecycle() no debe eludir el estado incierto
+          assert.throws(
+            () => {
+              worker.resetLifecycle();
+            },
+            (err: any) => {
+              assert.strictEqual(err.name, 'WorkerLifecycleError');
+              assert.ok(err.message.includes('UNCERTAIN') || err.message.includes('ERROR NO RESUELTO'));
+              return true;
+            }
+          );
+        }
+        assert.strictEqual(offWorkCalled, false, 'offWork() NUNCA debió ser invocado durante registros inválidos');
+      } finally {
+        (boss as any).work = originalWork;
+        (boss as any).offWork = originalOffWork;
+      }
+    });
+
+    it('2.2 R33-02: Registration uncertainty prevents false STOPPED, global offWork, and duplicate restart [Controlled Contract-Level Test]', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalOffWork = boss.offWork.bind(boss);
+
+      let offWorkCalls: any[] = [];
+      (boss as any).offWork = async (...args: any[]) => {
+        offWorkCalls.push(args);
+        return (originalOffWork as any)(...args);
+      };
+
+      (boss as any).work = async () => null;
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r33-02-uncertainty');
+      try {
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+
+        // Intento de stop() con throwOnError: true debe lanzar WorkerShutdownError fail-closed
+        await assert.rejects(
+          async () => {
+            await worker.stop({ timeoutMs: 1000, throwOnError: true });
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerShutdownError');
+            assert.ok(err.message.includes('UNCERTAIN') || err.message.includes('ERROR NO RESUELTO'));
+            return true;
+          }
+        );
+
+        // offWork NUNCA debe ser invocado
+        assert.strictEqual(offWorkCalls.length, 0, 'No debe invocarse offWork() de forma global');
+
+        // Intento de start() posterior debe ser bloqueado estrictamente
+        await assert.rejects(
+          async () => {
+            await worker.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            assert.ok(err.message.includes('UNCERTAIN') || err.message.includes('ERROR NO RESUELTO') || err.message.includes('estado ERROR'));
+            return true;
+          }
+        );
+      } finally {
+        (boss as any).work = originalWork;
+        (boss as any).offWork = originalOffWork;
+      }
+    });
+
+    it('2.3 R33-03: Residual consumer detection preserves ERROR while real consumer remains in pg-boss [Integration]', async () => {
+      const boss = getConversionQueue();
+      const workerActive = new ConversionWorker(db, storage, undefined, 'cert-r33-03-active');
+      const workerUncertain = new ConversionWorker(db, storage, undefined, 'cert-r33-03-uncertain');
+
+      try {
+        // Iniciar un worker real legítimo en pg-boss
+        await workerActive.start();
+        const activeSubId = workerActive.getSubscriptionId();
+        assert.ok(activeSubId !== null);
+
+        // Forzar workerUncertain a estado UNCERTAIN/ERROR
+        (workerUncertain as any).registrationState = 'UNCERTAIN';
+        (workerUncertain as any).lifecycleState = 'ERROR';
+        (workerUncertain as any).lastShutdownError = new WorkerLifecycleError('Fallo simulado de registro');
+
+        // Intentar reconciliar sin identificador específico
+        // Dado que existe workerActive en la cola, NO se puede probar ausencia total
+        const reconcileRes = await workerUncertain.reconcileRegistration(undefined, 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(workerUncertain.getLifecycleState(), 'ERROR');
+        assert.strictEqual(workerUncertain.getRegistrationState(), 'UNRESOLVED_ERROR');
+
+        // workerActive debe continuar 100% activo y sin perturbación
+        assert.strictEqual(workerActive.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(workerActive.isSubscribed(), true);
+      } finally {
+        await workerActive.stop(2000).catch(() => {});
+      }
+    });
+
+    it('2.4 R33-04: Recovery after uncertain registration safely isolates and reconciles exact consumer', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalGetWipData = (boss as any).getWipData;
+      const originalOffWork = boss.offWork.bind(boss);
+
+      const targetId = 'sub-reconciled-target-001';
+      let offWorkTargetCalled: any = null;
+
+      (boss as any).offWork = async (name: string, options: any) => {
+        offWorkTargetCalled = { name, options };
+        inWip = false; // offWork lo remueve de wip en pg-boss
+        return (originalOffWork as any)(name, options);
+      };
+
+      // Simular que boss.work falló retornando null, pero un consumidor con targetId existe en wip
+      (boss as any).work = async () => null;
+
+      let inWip = true;
+      (boss as any).getWipData = () => {
+        if (inWip) {
+          return [
+            {
+              id: targetId,
+              workId: targetId,
+              name: CONVERSION_QUEUE_NAME,
+              state: 'active',
+            },
+          ];
+        }
+        return [];
+      };
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r33-04-reconcile');
+      try {
+        await assert.rejects(async () => {
+          await worker.start();
+        });
+
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+
+        // Iniciar recuperación especificando el identificador exacto de reconciliación
+        const recoverRes = await worker.recover({ reconciledSubscriptionId: targetId, timeoutMs: 2000 });
+
+        assert.strictEqual(recoverRes.success, true);
+        assert.strictEqual(recoverRes.state, 'STOPPED');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.getRegistrationState(), 'REMOVAL_CONFIRMED');
+        assert.strictEqual(worker.isSubscribed(), false);
+        assert.strictEqual(offWorkTargetCalled?.options?.id, targetId);
+
+        // Reinicio posterior debe ser permitido tras reconciliación exitosa
+        (boss as any).work = originalWork;
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+        assert.strictEqual(worker.isSubscribed(), true);
+
+        const stopRes = await worker.stop(2000);
+        assert.strictEqual(stopRes.success, true);
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+      } finally {
+        (boss as any).work = originalWork;
+        (boss as any).getWipData = originalGetWipData;
+        (boss as any).offWork = originalOffWork;
+        await worker.stop(1000).catch(() => {});
+      }
+    });
+
+    it('2.5 Valid subscription ID is captured on worker start and cleanly removed', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-valid-start-clean-stop');
       try {
         await worker.start();
         assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
@@ -374,98 +597,6 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
         assert.strictEqual(worker.getSubscriptionId(), null);
       } finally {
         await worker.stop(1000).catch(() => {});
-      }
-    });
-
-    it('2.2 R32-02: Missing subscription ID is rejected safely without global unsubscription', async () => {
-      const boss = getConversionQueue();
-      const originalWork = boss.work.bind(boss);
-      const originalOffWork = boss.offWork.bind(boss);
-
-      let offWorkCalled = false;
-      (boss as any).offWork = async (...args: any[]) => {
-        offWorkCalled = true;
-        return (originalOffWork as any)(...args);
-      };
-
-      // Simular que boss.work retorna null
-      (boss as any).work = async () => null;
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-r32-02');
-      try {
-        await assert.rejects(
-          async () => {
-            await worker.start();
-          },
-          (err: any) => {
-            assert.strictEqual(err.name, 'WorkerLifecycleError');
-            assert.ok(err.message.includes('identificador de suscripción válido'));
-            return true;
-          }
-        );
-
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), false);
-        assert.strictEqual(worker.getSubscriptionId(), null);
-
-        // stop() o recover() no deben invocar offWork global bajo ninguna circunstancia
-        const stopRes = await worker.stop(1000);
-        assert.strictEqual(stopRes.success, true);
-        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
-        assert.strictEqual(offWorkCalled, false, 'No debe invocarse offWork() si la suscripción no fue registrada');
-      } finally {
-        (boss as any).work = originalWork;
-        (boss as any).offWork = originalOffWork;
-      }
-    });
-
-    it('2.3 R32-03: Empty subscription ID is rejected safely without claiming active subscription', async () => {
-      const boss = getConversionQueue();
-      const originalWork = boss.work.bind(boss);
-      (boss as any).work = async () => '   ';
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-r32-03');
-      try {
-        await assert.rejects(
-          async () => {
-            await worker.start();
-          },
-          (err: any) => {
-            assert.strictEqual(err.name, 'WorkerLifecycleError');
-            return true;
-          }
-        );
-
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), false);
-        assert.strictEqual(worker.getSubscriptionId(), null);
-      } finally {
-        (boss as any).work = originalWork;
-      }
-    });
-
-    it('2.4 R32-04: Malformed subscription ID is rejected safely and transitions to ERROR', async () => {
-      const boss = getConversionQueue();
-      const originalWork = boss.work.bind(boss);
-      (boss as any).work = async () => ({ unexpected: 12345 });
-
-      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-r32-04');
-      try {
-        await assert.rejects(
-          async () => {
-            await worker.start();
-          },
-          (err: any) => {
-            assert.strictEqual(err.name, 'WorkerLifecycleError');
-            return true;
-          }
-        );
-
-        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
-        assert.strictEqual(worker.isSubscribed(), false);
-        assert.strictEqual(worker.getSubscriptionId(), null);
-      } finally {
-        (boss as any).work = originalWork;
       }
     });
 
@@ -1429,6 +1560,65 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       } finally {
         (boss as any).work = originalWork;
       }
+    });
+
+    it('2.27 Authoritative absence reconciliation when queue is genuinely empty in pg-boss', async () => {
+      const boss = getConversionQueue();
+      const originalWork = boss.work.bind(boss);
+      const originalGetWipData = (boss as any).getWipData;
+
+      (boss as any).work = async () => null;
+      (boss as any).getWipData = () => []; // Cola 100% vacía en pg-boss
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-empty-queue-reconcile');
+      try {
+        await assert.rejects(async () => {
+          await worker.start();
+        });
+
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNCERTAIN');
+
+        // Reconciliación sin identificador: dado que la cola está vacía, se prueba ausencia autoritativa
+        const reconcileRes = await worker.reconcileRegistration(undefined, 1000, false);
+        assert.strictEqual(reconcileRes.success, true);
+        assert.strictEqual(reconcileRes.state, 'STOPPED');
+        assert.strictEqual(worker.getLifecycleState(), 'STOPPED');
+        assert.strictEqual(worker.getRegistrationState(), 'REMOVAL_CONFIRMED');
+        assert.strictEqual(worker.isSubscribed(), false);
+      } finally {
+        (boss as any).work = originalWork;
+        (boss as any).getWipData = originalGetWipData;
+      }
+    });
+
+    it('2.28 Direct verification that resetLifecycle blocks uncertain registration or unconfirmed state', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-ws02-reset-blocks');
+      (worker as any).registrationState = 'UNCERTAIN';
+      (worker as any).lifecycleState = 'ERROR';
+
+      assert.throws(
+        () => {
+          worker.resetLifecycle();
+        },
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerLifecycleError');
+          assert.ok(err.message.includes('UNCERTAIN') || err.message.includes('ERROR NO RESUELTO'));
+          return true;
+        }
+      );
+
+      (worker as any).registrationState = 'UNRESOLVED_ERROR';
+      assert.throws(
+        () => {
+          worker.resetLifecycle();
+        },
+        (err: any) => {
+          assert.strictEqual(err.name, 'WorkerLifecycleError');
+          assert.ok(err.message.includes('UNCERTAIN') || err.message.includes('ERROR NO RESUELTO'));
+          return true;
+        }
+      );
     });
   });
 

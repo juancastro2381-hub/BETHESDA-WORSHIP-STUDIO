@@ -88,8 +88,22 @@ export type WorkerLifecycleState =
   | 'STOPPED'
   | 'ERROR';
 
+export type WorkerRegistrationState =
+  | 'NEVER_ATTEMPTED'
+  | 'REGISTERED'
+  | 'UNCERTAIN'
+  | 'REMOVAL_PENDING'
+  | 'REMOVAL_CONFIRMED'
+  | 'UNRESOLVED_ERROR';
+
 export interface WorkerStopOptions {
   timeoutMs?: number;
+  throwOnError?: boolean;
+}
+
+export interface WorkerRecoverOptions {
+  timeoutMs?: number;
+  reconciledSubscriptionId?: string;
   throwOnError?: boolean;
 }
 
@@ -135,6 +149,7 @@ export class ConversionWorker {
   private isQueueSubscribed = false;
   private subscriptionId: string | null = null;
   private lifecycleGeneration = 0;
+  private registrationState: WorkerRegistrationState = 'NEVER_ATTEMPTED';
 
   public constructor(
     private readonly db: Database = defaultDb,
@@ -188,10 +203,24 @@ export class ConversionWorker {
     return this.lifecycleGeneration;
   }
 
+  public getRegistrationState(): WorkerRegistrationState {
+    return this.registrationState;
+  }
+
+  public hasUnresolvedRegistration(): boolean {
+    return this.registrationState === 'UNCERTAIN' || this.registrationState === 'UNRESOLVED_ERROR';
+  }
+
   public resetLifecycle(): void {
     if (this.pendingUnsubscribePromise !== null && !this.unsubscribeSettled) {
       throw new WorkerLifecycleError(
         'No se puede restablecer el ciclo de vida mientras exista una operación de desuscripción pendiente.'
+      );
+    }
+    if (this.hasUnresolvedRegistration()) {
+      throw new WorkerLifecycleError(
+        'No se puede restablecer el ciclo de vida mediante resetLifecycle(): el worker se encuentra en estado de registro INCIERTO (UNCERTAIN) o ERROR NO RESUELTO. ' +
+        'resetLifecycle() no puede eludir esta condición sin una reconciliación autoritativa.'
       );
     }
     if (this.isQueueSubscribed || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
@@ -201,6 +230,7 @@ export class ConversionWorker {
       );
     }
     this.lifecycleState = 'STOPPED';
+    this.registrationState = 'REMOVAL_CONFIRMED';
     this.lastShutdownError = null;
     this.isShutdownTimedOut = false;
   }
@@ -284,10 +314,19 @@ export class ConversionWorker {
       );
     }
 
-    // Si el worker quedó en estado ERROR por fallo de desuscripción
+    // Si el worker quedó en estado ERROR por fallo de desuscripción o registro
     if ((this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
       throw new WorkerLifecycleError(
-        'No se puede iniciar el worker: el worker se encuentra en estado ERROR debido a un fallo previo de desuscripción. Ejecute recover() o stop() para recuperar el estado antes de iniciar.',
+        'No se puede iniciar el worker: el worker se encuentra en estado ERROR debido a un fallo previo de desuscripción o registro. Ejecute recover() o stop() para recuperar el estado antes de iniciar.',
+        this.lastShutdownError
+      );
+    }
+
+    // R33-01 / R33-04: Si el worker tiene registro incierto o error no resuelto
+    if (this.hasUnresolvedRegistration()) {
+      throw new WorkerLifecycleError(
+        'No se puede iniciar el worker: el worker tiene un registro previo en estado INCIERTO (UNCERTAIN) o ERROR NO RESUELTO. ' +
+        'Debe reconciliar el estado mediante recover({ reconciledSubscriptionId }) antes de iniciar un nuevo consumidor.',
         this.lastShutdownError
       );
     }
@@ -314,6 +353,7 @@ export class ConversionWorker {
   }
 
   private async performStart(): Promise<void> {
+    ++this.lifecycleGeneration;
     try {
       // 1. Recuperar únicamente trabajos con arrendamiento expirado al arranque (CR-04, WS03)
       try {
@@ -340,20 +380,36 @@ export class ConversionWorker {
 
       // 3. Iniciar pg-boss y registrar handler de trabajo
       const boss = await startConversionQueue();
-      const subId = await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
-        for (const job of jobs) {
-          await this.processJob(job.data);
+      this.registrationState = 'UNCERTAIN';
+      let subId: unknown;
+      try {
+        subId = await boss.work<ConversionJobPayload>(CONVERSION_QUEUE_NAME, async (jobs) => {
+          for (const job of jobs) {
+            await this.processJob(job.data);
+          }
+        });
+      } catch (err) {
+        this.registrationState = 'UNCERTAIN';
+        this.isQueueSubscribed = false;
+        this.subscriptionId = null;
+        this.lifecycleState = 'ERROR';
+        this.lastShutdownError = err;
+        if (this.recoveryTimer) {
+          clearInterval(this.recoveryTimer);
+          this.recoveryTimer = null;
         }
-      });
+        throw err;
+      }
 
-      // R32-01: Validación estricta y obligatoria del identificador de suscripción retornado por boss.work()
+      // R32-01 / R33-01: Validación estricta y obligatoria del identificador de suscripción retornado por boss.work()
       if (typeof subId !== 'string' || subId.trim().length === 0) {
+        this.registrationState = 'UNCERTAIN';
         this.isQueueSubscribed = false;
         this.subscriptionId = null;
         this.lifecycleState = 'ERROR';
         const subError = new WorkerLifecycleError(
           `Fallo crítico de registro en pg-boss: boss.work() no retornó un identificador de suscripción válido (recibido: ${JSON.stringify(subId)}). ` +
-          'Se prohíbe el registro de un consumidor sin identidad autoritativa.'
+          'El resultado del registro permanece en estado INCIERTO (UNCERTAIN) y requiere reconciliación autoritativa.'
         );
         this.lastShutdownError = subError;
         if (this.recoveryTimer) {
@@ -365,6 +421,7 @@ export class ConversionWorker {
 
       this.subscriptionId = subId.trim();
       this.isQueueSubscribed = true;
+      this.registrationState = 'REGISTERED';
       this.lifecycleState = 'RUNNING';
     } catch (err) {
       this.isQueueSubscribed = false;
@@ -409,7 +466,12 @@ export class ConversionWorker {
 
     // Si ya está detenido y limpio, retornar éxito de inmediato
     if (this.lifecycleState === 'IDLE' || this.lifecycleState === 'STOPPED') {
-      if (this.activeJobIds.size === 0 && this.pendingUnsubscribePromise === null && !this.isQueueSubscribed) {
+      if (
+        this.activeJobIds.size === 0 &&
+        this.pendingUnsubscribePromise === null &&
+        !this.isQueueSubscribed &&
+        !this.hasUnresolvedRegistration()
+      ) {
         if (this.recoveryTimer) {
           clearInterval(this.recoveryTimer);
           this.recoveryTimer = null;
@@ -444,9 +506,23 @@ export class ConversionWorker {
    * Reintenta de forma autoritativa la desuscripción de pg-boss y la remoción del consumidor.
    * Si la desuscripción tiene éxito y se verifica la remoción, restablece el worker a 'STOPPED'.
    * Si la desuscripción falla, preserva estrictamente el estado 'ERROR'.
+   * Permite reconciliar un identificador de suscripción exacto si la instancia quedó en estado UNCERTAIN (R33-04).
    */
-  public async recover(timeoutMs: number = 5000): Promise<WorkerStopResult> {
-    if (this.lifecycleState === 'STOPPED' && !this.isQueueSubscribed && this.pendingUnsubscribePromise === null) {
+  public async recover(options?: number | WorkerRecoverOptions): Promise<WorkerStopResult> {
+    const timeoutMs = typeof options === 'number' ? options : (options?.timeoutMs ?? 5000);
+    const reconciledSubId = typeof options === 'object' ? options?.reconciledSubscriptionId : undefined;
+    const throwOnError = typeof options === 'object' ? (options?.throwOnError ?? false) : false;
+
+    if (reconciledSubId) {
+      return this.reconcileRegistration(reconciledSubId, timeoutMs, throwOnError);
+    }
+
+    if (
+      this.lifecycleState === 'STOPPED' &&
+      !this.isQueueSubscribed &&
+      this.pendingUnsubscribePromise === null &&
+      !this.hasUnresolvedRegistration()
+    ) {
       return {
         success: true,
         state: 'STOPPED',
@@ -456,12 +532,173 @@ export class ConversionWorker {
         timedOut: false,
       };
     }
-    return this.stop({ timeoutMs, throwOnError: false });
+    return this.stop({ timeoutMs, throwOnError });
+  }
+
+  /**
+   * Reconcilia autoritativamente un registro en estado INCIERTO (UNCERTAIN) o ERROR NO RESUELTO (R33-01, R33-04).
+   * Si se provee un identificador exacto, lo verifica contra pg-boss.getWipData() y ejecuta desuscripción dirigida.
+   * Si no se provee identificador pero la cola está vacía en pg-boss, certifica la ausencia del consumidor.
+   * Si existen consumidores no reconciliables, preserva el estado de error fail-closed.
+   */
+  public async reconcileRegistration(
+    reconciledSubscriptionId?: string,
+    timeoutMs: number = 5000,
+    throwOnError: boolean = false
+  ): Promise<WorkerStopResult> {
+    const boss = getConversionQueue();
+
+    if (typeof (boss as any).getWipData !== 'function') {
+      const err = new WorkerShutdownError(
+        'Fallo autoritativo de verificación de reconciliación: la instancia de pg-boss no implementa getWipData().'
+      );
+      this.registrationState = 'UNRESOLVED_ERROR';
+      this.lifecycleState = 'ERROR';
+      this.lastShutdownError = err;
+      if (throwOnError) throw err;
+      return {
+        success: false,
+        state: 'ERROR',
+        offWorkSettled: false,
+        activeJobsDrained: false,
+        remainingJobsCount: this.activeJobIds.size,
+        timedOut: false,
+        error: err,
+      };
+    }
+
+    let activeWorkers: any;
+    try {
+      activeWorkers = (boss as any).getWipData();
+    } catch (e) {
+      const err = new WorkerShutdownError(
+        'Fallo autoritativo de verificación de reconciliación: getWipData() lanzó una excepción.',
+        e
+      );
+      this.registrationState = 'UNRESOLVED_ERROR';
+      this.lifecycleState = 'ERROR';
+      this.lastShutdownError = err;
+      if (throwOnError) throw err;
+      return {
+        success: false,
+        state: 'ERROR',
+        offWorkSettled: false,
+        activeJobsDrained: false,
+        remainingJobsCount: this.activeJobIds.size,
+        timedOut: false,
+        error: err,
+      };
+    }
+
+    if (!Array.isArray(activeWorkers)) {
+      const err = new WorkerShutdownError(
+        'Fallo autoritativo de verificación de reconciliación: getWipData() retornó una respuesta malformada o inesperada.'
+      );
+      this.registrationState = 'UNRESOLVED_ERROR';
+      this.lifecycleState = 'ERROR';
+      this.lastShutdownError = err;
+      if (throwOnError) throw err;
+      return {
+        success: false,
+        state: 'ERROR',
+        offWorkSettled: false,
+        activeJobsDrained: false,
+        remainingJobsCount: this.activeJobIds.size,
+        timedOut: false,
+        error: err,
+      };
+    }
+
+    const queueWorkers = activeWorkers.filter((w: any) => w.name === CONVERSION_QUEUE_NAME);
+
+    // 1. Si se proveyó un identificador de reconciliación
+    if (typeof reconciledSubscriptionId === 'string' && reconciledSubscriptionId.trim().length > 0) {
+      const targetId = reconciledSubscriptionId.trim();
+      const matchingWorker = queueWorkers.find((w: any) => w.workId === targetId || w.id === targetId);
+
+      if (!matchingWorker) {
+        if (queueWorkers.length === 0) {
+          // Evidencia autoritativa de ausencia: la cola está completamente vacía en pg-boss
+          this.registrationState = 'REMOVAL_CONFIRMED';
+          this.subscriptionId = null;
+          this.isQueueSubscribed = false;
+          this.lastShutdownError = null;
+          this.lifecycleState = 'STOPPED';
+          return {
+            success: true,
+            state: 'STOPPED',
+            offWorkSettled: true,
+            activeJobsDrained: true,
+            remainingJobsCount: 0,
+            timedOut: false,
+          };
+        }
+        const err = new WorkerShutdownError(
+          `Fallo autoritativo de reconciliación: el identificador provisto (${targetId}) no coincide con ningún consumidor activo en pg-boss.`
+        );
+        this.registrationState = 'UNRESOLVED_ERROR';
+        this.lifecycleState = 'ERROR';
+        this.lastShutdownError = err;
+        if (throwOnError) throw err;
+        return {
+          success: false,
+          state: 'ERROR',
+          offWorkSettled: false,
+          activeJobsDrained: false,
+          remainingJobsCount: this.activeJobIds.size,
+          timedOut: false,
+          error: err,
+        };
+      }
+
+      // Consumidor localizado de forma unívoca: adoptar identidad y ejecutar desuscripción dirigida
+      this.subscriptionId = targetId;
+      this.registrationState = 'REGISTERED';
+      this.isQueueSubscribed = true;
+      this.lastShutdownError = null;
+      return this.performStop(timeoutMs, throwOnError);
+    }
+
+    // 2. Si NO se proveyó identificador:
+    // Solo podemos confirmar STOPPED si la cola en pg-boss está 100% vacía (ausencia autoritativa)
+    if (queueWorkers.length === 0) {
+      this.registrationState = 'REMOVAL_CONFIRMED';
+      this.subscriptionId = null;
+      this.isQueueSubscribed = false;
+      this.lastShutdownError = null;
+      this.lifecycleState = 'STOPPED';
+      return {
+        success: true,
+        state: 'STOPPED',
+        offWorkSettled: true,
+        activeJobsDrained: true,
+        remainingJobsCount: 0,
+        timedOut: false,
+      };
+    }
+
+    // Existen otros workers en la cola y carecemos de identidad: fail-closed estricto
+    const err = new WorkerShutdownError(
+      'Fallo autoritativo de reconciliación: existen consumidores en pg-boss pero se carece de identificador exacto de suscripción. ' +
+      'Se prohíbe la desuscripción global para preservar a otros consumidores. Especifique reconciledSubscriptionId.'
+    );
+    this.registrationState = 'UNRESOLVED_ERROR';
+    this.lifecycleState = 'ERROR';
+    this.lastShutdownError = err;
+    if (throwOnError) throw err;
+    return {
+      success: false,
+      state: 'ERROR',
+      offWorkSettled: false,
+      activeJobsDrained: false,
+      remainingJobsCount: this.activeJobIds.size,
+      timedOut: false,
+      error: err,
+    };
   }
 
   private async performStop(timeoutMs: number, throwOnError: boolean = false): Promise<WorkerStopResult> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    const operationGen = ++this.lifecycleGeneration;
 
     // 1. Detener ciclo recurrente de recuperación inmediatamente (WS02/WS03)
     if (this.recoveryTimer) {
@@ -488,6 +725,7 @@ export class ConversionWorker {
           }
 
           const targetSubId = this.subscriptionId;
+          const taskGen = ++this.lifecycleGeneration;
           this.unsubscribeSettled = false;
           this.lastShutdownError = null;
 
@@ -524,12 +762,13 @@ export class ConversionWorker {
               }
 
               // Si esta operación pertenece a una generación previa que ya fue superada por una nueva, descartar mutación
-              if (this.lifecycleGeneration !== operationGen) {
+              if (this.lifecycleGeneration !== taskGen) {
                 return;
               }
 
               this.subscriptionId = null;
               this.isQueueSubscribed = false;
+              this.registrationState = 'REMOVAL_CONFIRMED';
               this.unsubscribeSettled = true;
               this.pendingUnsubscribePromise = null;
               this.lastShutdownError = null;
@@ -537,10 +776,11 @@ export class ConversionWorker {
                 this.lifecycleState = 'STOPPED';
               }
             } catch (err) {
-              if (this.lifecycleGeneration !== operationGen) {
+              if (this.lifecycleGeneration !== taskGen) {
                 return;
               }
               this.isQueueSubscribed = true;
+              this.registrationState = 'UNRESOLVED_ERROR';
               this.unsubscribeSettled = true;
               this.pendingUnsubscribePromise = null;
               this.lastShutdownError = err;
@@ -585,8 +825,17 @@ export class ConversionWorker {
         } else {
           offWorkSettledThisCall = true;
         }
-      } else {
-        // No hay suscripción activa ni operación pendiente: asentar limpiamente a STOPPED
+      } else if (this.hasUnresolvedRegistration()) {
+        // R33-01 / R33-02: Registro en estado incierto o error no resuelto
+        // Se prohíbe la transición a STOPPED y la desuscripción global sin evidencia autoritativa
+        this.registrationState = 'UNRESOLVED_ERROR';
+        throw new WorkerShutdownError(
+          'Fallo autoritativo de shutdown: el worker se encuentra en estado de registro INCIERTO (UNCERTAIN) o ERROR NO RESUELTO. ' +
+          'Se prohíbe la transición a STOPPED y la desuscripción global sin evidencia autoritativa de ausencia. ' +
+          'Reconcilie la identidad exacta mediante recover({ reconciledSubscriptionId }) o reinicie el proceso.'
+        );
+      } else if (this.registrationState === 'NEVER_ATTEMPTED' || this.registrationState === 'REMOVAL_CONFIRMED') {
+        // Registro nunca intentado o previamente confirmado removido de forma autoritativa
         offWorkSettledThisCall = true;
         this.unsubscribeSettled = true;
         this.pendingUnsubscribePromise = null;
@@ -594,6 +843,10 @@ export class ConversionWorker {
         if (this.lifecycleState === 'STOPPING' || (this.lifecycleState as WorkerLifecycleState) === 'ERROR') {
           this.lifecycleState = 'STOPPED';
         }
+      } else {
+        throw new WorkerShutdownError(
+          `Fallo autoritativo de shutdown: estado de registro anómalo (${this.registrationState}) no permite transición a STOPPED.`
+        );
       }
     } catch (err) {
       this.lastShutdownError = err;
@@ -628,6 +881,9 @@ export class ConversionWorker {
         error: this.lastShutdownError ?? offWorkErrorThisCall,
       };
       if (throwOnError) {
+        if (this.lastShutdownError instanceof WorkerShutdownError) {
+          throw this.lastShutdownError;
+        }
         throw new WorkerShutdownError(
           'Error durante la desuscripción de la cola en stop()',
           this.lastShutdownError ?? offWorkErrorThisCall

@@ -757,7 +757,10 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
               id: sub2,
               workId: sub2,
               name: CONVERSION_QUEUE_NAME,
+              options: { workerInstanceId: worker2.workerId },
               state: 'active',
+              count: 0,
+              createdOn: Date.now(),
             },
           ];
         };
@@ -993,7 +996,10 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
               id: targetSubId,
               workId: targetSubId,
               name: CONVERSION_QUEUE_NAME,
+              options: { workerInstanceId: worker.workerId },
               state: 'active',
+              count: 0,
+              createdOn: Date.now(),
             },
           ];
         }
@@ -1747,32 +1753,310 @@ describe('Phase 2A-R2.2.1 — Final Certification Suite (WS01 - WS04)', { concur
       }
     });
 
-    it('2.30 Residual consumer detection with unrelated consumer preserves ERROR when no match found [Integration]', async () => {
+    it('2.30 R332-30 [INTEGRATION]: Real residual consumer detection with unrelated consumer preserves fail-closed ERROR when no match found', async () => {
       const boss = getConversionQueue();
-      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r331-unrelated-peer');
-      const workerUnrelated = new ConversionWorker(db, storage, undefined, 'cert-r331-unrelated-target');
+      const workerPeer = new ConversionWorker(db, storage, undefined, 'cert-r332-unrelated-peer');
+      const workerTarget = new ConversionWorker(db, storage, undefined, 'cert-r332-unrelated-target');
 
+      const originalWork = boss.work.bind(boss);
       try {
+        // Iniciar consumidor legítimo en la cola
         await workerPeer.start();
         assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
 
-        // workerUnrelated nunca inició en pg-boss, pero forzamos estado UNCERTAIN/ERROR
-        (workerUnrelated as any).registrationState = 'UNCERTAIN';
-        (workerUnrelated as any).lifecycleState = 'ERROR';
+        // Simular intento real de inicio de workerTarget donde boss.work registra pero retorna null
+        // provocando transición natural por código de producción a UNCERTAIN y ERROR
+        (boss as any).work = async (name: string, options: any, handler: any) => {
+          if ((options as any)?.workerInstanceId === workerTarget.workerId) {
+            return null;
+          }
+          return (originalWork as any)(name, options, handler);
+        };
 
-        // Intentar reconciliar sin identificador y sin coincidencia de workerId:
-        // Dado que workerPeer está en la cola y no coincide con workerUnrelated, debe fallar de forma cerrada
-        const reconcileRes = await workerUnrelated.reconcileRegistration(undefined, 1000, false);
+        await assert.rejects(
+          async () => {
+            await workerTarget.start();
+          },
+          (err: any) => {
+            assert.strictEqual(err.name, 'WorkerLifecycleError');
+            return true;
+          }
+        );
+
+        assert.strictEqual(workerTarget.getLifecycleState(), 'ERROR');
+        assert.strictEqual(workerTarget.getRegistrationState(), 'UNCERTAIN');
+
+        // Restaurar boss.work para consultas autoritativas
+        (boss as any).work = originalWork;
+
+        // Intentar reconciliar workerTarget:
+        // En pg-boss existe workerPeer en la cola CONVERSION_QUEUE_NAME, pero ninguno coincide con workerTarget.
+        // Dado que la cola NO está vacía, debe fallar de forma cerrada (ERROR, UNRESOLVED_ERROR)
+        // y NUNCA asumir STOPPED ni desregistrar a workerPeer
+        const reconcileRes = await workerTarget.reconcileRegistration(undefined, 1000, false);
         assert.strictEqual(reconcileRes.success, false);
         assert.strictEqual(reconcileRes.state, 'ERROR');
-        assert.strictEqual(workerUnrelated.getLifecycleState(), 'ERROR');
-        assert.strictEqual(workerUnrelated.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.strictEqual(workerTarget.getLifecycleState(), 'ERROR');
+        assert.strictEqual(workerTarget.getRegistrationState(), 'UNRESOLVED_ERROR');
 
-        // workerPeer continúa 100% activo
+        // workerPeer continúa 100% activo y registrado en pg-boss
         assert.strictEqual(workerPeer.getLifecycleState(), 'RUNNING');
         assert.strictEqual(workerPeer.isSubscribed(), true);
       } finally {
+        (boss as any).work = originalWork;
         await workerPeer.stop(1000).catch(() => {});
+        await workerTarget.recover().catch(() => {});
+      }
+    });
+
+    it('2.31 R332-05 [CONTRACT]: getWipData() returning array with empty object [{}] fails closed to ERROR and prevents false STOPPED', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [{}];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-05-empty-obj');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        // stop() debe fallar cerrado y no reportar éxito ni STOPPED
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.strictEqual(worker.isSubscribed(), true, 'isQueueSubscribed no debe reportar remoción falsamente');
+
+        // reconcileRegistration() tampoco debe asumir cola vacía
+        const reconcileRes = await worker.reconcileRegistration(undefined, 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.32 R332-06 [CONTRACT]: getWipData() returning array with null entry [null] fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [null];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-06-null-entry');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.33 R332-07 [CONTRACT]: getWipData() with missing worker ID fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        { workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active' },
+      ];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-07-missing-id');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.34 R332-08 [CONTRACT]: getWipData() with missing queue name fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        { id: 'id1', workId: 'w1', options: {}, state: 'active' },
+      ];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-08-missing-queue');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.35 R332-09 [CONTRACT]: getWipData() with invalid worker state fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        { id: 'id1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'corrupted_state' },
+      ];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-09-bad-state');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.36 R332-10 [CONTRACT]: Duplicate matching worker identities with conflicting workId rejects ambiguous target and fails closed', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-10-duplicate-matches');
+
+      (boss as any).getWipData = () => [
+        {
+          id: 'id-alpha',
+          workId: 'work-alpha',
+          name: CONVERSION_QUEUE_NAME,
+          options: { workerInstanceId: worker.workerId },
+          state: 'active',
+          count: 0,
+          createdOn: Date.now(),
+        },
+        {
+          id: 'id-beta',
+          workId: 'work-beta',
+          name: CONVERSION_QUEUE_NAME,
+          options: { workerInstanceId: worker.workerId },
+          state: 'active',
+          count: 0,
+          createdOn: Date.now(),
+        },
+      ];
+
+      try {
+        const reconcileRes = await worker.reconcileRegistration(undefined, 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.ok((reconcileRes.error as Error).message.includes('ambigua'));
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+      }
+    });
+
+    it('2.37 R332-11 [CONTRACT]: getWipData() with malformed options fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        { id: 'id1', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: 'invalid-options', state: 'active' },
+      ];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-11-bad-options');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.38 R332-12 [CONTRACT]: getWipData() with whitespace-only id or workId fails closed to ERROR', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      (boss as any).getWipData = () => [
+        { id: '   ', workId: 'w1', name: CONVERSION_QUEUE_NAME, options: {}, state: 'active' },
+      ];
+
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-12-whitespace-id');
+      try {
+        await worker.start();
+        assert.strictEqual(worker.getLifecycleState(), 'RUNNING');
+
+        const stopResult = await worker.stop(1000);
+        assert.strictEqual(stopResult.success, false);
+        assert.strictEqual(stopResult.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+        await worker.recover().catch(() => {});
+      }
+    });
+
+    it('2.39 R332-15 [CONTRACT]: reconcileRegistration() rejects ambiguous target subscription ID with divergent workId', async () => {
+      const boss = getConversionQueue();
+      const originalGetWipData = (boss as any).getWipData;
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-15-ambiguous-target');
+
+      (boss as any).getWipData = () => [
+        {
+          id: 'shared-id',
+          workId: 'work-1',
+          name: CONVERSION_QUEUE_NAME,
+          options: {},
+          state: 'active',
+          count: 0,
+          createdOn: Date.now(),
+        },
+        {
+          id: 'shared-id',
+          workId: 'work-2',
+          name: CONVERSION_QUEUE_NAME,
+          options: {},
+          state: 'active',
+          count: 0,
+          createdOn: Date.now(),
+        },
+      ];
+
+      try {
+        const reconcileRes = await worker.reconcileRegistration('shared-id', 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.ok((reconcileRes.error as Error).message.includes('ambiguo'));
+      } finally {
+        (boss as any).getWipData = originalGetWipData;
+      }
+    });
+
+    it('2.40 R332-17 [CONTRACT]: reconcileRegistration() rejects invalid or whitespace-only reconciledSubscriptionId', async () => {
+      const worker = new ConversionWorker(db, storage, undefined, 'cert-r332-17-invalid-id');
+
+      const invalidIds = ['', '   ', '   \t  '];
+      for (const badId of invalidIds) {
+        const reconcileRes = await worker.reconcileRegistration(badId, 1000, false);
+        assert.strictEqual(reconcileRes.success, false);
+        assert.strictEqual(reconcileRes.state, 'ERROR');
+        assert.strictEqual(worker.getLifecycleState(), 'ERROR');
+        assert.strictEqual(worker.getRegistrationState(), 'UNRESOLVED_ERROR');
+        assert.ok((reconcileRes.error as Error).message.includes('inválido o está en blanco'));
       }
     });
   });

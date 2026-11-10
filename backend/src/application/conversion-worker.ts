@@ -122,6 +122,22 @@ export interface ConversionWorkerOptions {
   onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
 }
 
+export interface ValidatedWipEntry {
+  id: string;
+  workId: string;
+  name: string;
+  options: Record<string, unknown>;
+  state: 'created' | 'active' | 'stopping' | 'stopped';
+  count: number;
+  createdOn: number;
+  lastFetchedOn: number | null;
+  lastJobStartedOn: number | null;
+  lastJobEndedOn: number | null;
+  lastJobDuration: number | null;
+  lastError: object | null;
+  lastErrorOn: number | null;
+}
+
 export class ConversionWorker {
   public static readonly LEASE_DURATION_MS = 60_000; // 60 segundos de validez de arrendamiento
   public static readonly HEARTBEAT_INTERVAL_MS = 15_000; // 15 segundos entre renovaciones de latido
@@ -540,7 +556,106 @@ export class ConversionWorker {
   }
 
   /**
-   * Reconcilia autoritativamente un registro en estado INCIERTO (UNCERTAIN) o ERROR NO RESUELTO (R33-01, R33-04).
+   * Validador estructural estricto para las respuestas de pg-boss.getWipData() (R3.3.2).
+   *
+   * Requisitos obligatorios:
+   * 1. La respuesta debe ser un arreglo real (Array.isArray).
+   * 2. Cada elemento debe ser un objeto válido (no null, no undefined, no primitivo, no arreglo).
+   * 3. 'id' debe ser string no vacío y no solo espacios en blanco.
+   * 4. 'workId' debe ser string no vacío y no solo espacios en blanco.
+   * 5. 'name' (nombre de cola) debe ser string no vacío y no solo espacios en blanco.
+   * 6. 'state' debe ser uno de los estados soportados por pg-boss: 'created', 'active', 'stopping', 'stopped'.
+   * 7. 'options' debe ser un objeto no nulo y no arreglo.
+   * 8. Si 'count' o 'createdOn' están presentes, deben ser números válidos.
+   *
+   * Si cualquier entrada es inválida, malformada o incompleta, este método LANZA inmediatamente
+   * WorkerShutdownError. NUNCA descarta registros silenciosamente con filter().
+   */
+  public static validateWipData(raw: unknown): ValidatedWipEntry[] {
+    if (!Array.isArray(raw)) {
+      throw new WorkerShutdownError(
+        'Fallo de validación WIP: la respuesta de getWipData() no es un arreglo.'
+      );
+    }
+
+    const validated: ValidatedWipEntry[] = [];
+
+    for (let idx = 0; idx < raw.length; idx++) {
+      const entry = raw[idx];
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] no es un objeto válido.`
+        );
+      }
+
+      const { id, workId, name, options, state, count, createdOn } = entry as any;
+
+      if (typeof id !== 'string' || id.trim().length === 0) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'id' inválido o faltante.`
+        );
+      }
+
+      if (typeof workId !== 'string' || workId.trim().length === 0) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'workId' inválido o faltante.`
+        );
+      }
+
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'name' (cola) inválido o faltante.`
+        );
+      }
+
+      const validStates = ['created', 'active', 'stopping', 'stopped'];
+      if (typeof state !== 'string' || !validStates.includes(state)) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un estado de worker desconocido o inválido: '${state}'.`
+        );
+      }
+
+      if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un objeto 'options' inválido o malformado.`
+        );
+      }
+
+      if (typeof count !== 'undefined' && (typeof count !== 'number' || isNaN(count) || count < 0)) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un 'count' numérico inválido.`
+        );
+      }
+
+      if (typeof createdOn !== 'undefined' && (typeof createdOn !== 'number' || isNaN(createdOn))) {
+        throw new WorkerShutdownError(
+          `Fallo de validación WIP: la entrada [${idx}] tiene un timestamp 'createdOn' inválido.`
+        );
+      }
+
+      validated.push({
+        id: id.trim(),
+        workId: workId.trim(),
+        name: name.trim(),
+        options: options as Record<string, unknown>,
+        state: state as any,
+        count: typeof count === 'number' ? count : 0,
+        createdOn: typeof createdOn === 'number' ? createdOn : Date.now(),
+        lastFetchedOn: entry.lastFetchedOn ?? null,
+        lastJobStartedOn: entry.lastJobStartedOn ?? null,
+        lastJobEndedOn: entry.lastJobEndedOn ?? null,
+        lastJobDuration: entry.lastJobDuration ?? null,
+        lastError: entry.lastError ?? null,
+        lastErrorOn: entry.lastErrorOn ?? null,
+      });
+    }
+
+    return validated;
+  }
+
+  /**
+   * Reconcilia autoritativamente un registro en estado INCIERTO (UNCERTAIN) o ERROR NO RESUELTO (R33-01, R33-04, R332).
+   * Valida estructuralmente la respuesta de getWipData() para evitar falsos STOPPED por registros malformados.
    * Si se provee un identificador exacto, lo verifica contra pg-boss.getWipData() y ejecuta desuscripción dirigida.
    * Si no se provee identificador pero la cola está vacía en pg-boss, certifica la ausencia del consumidor.
    * Si existen consumidores no reconciliables, preserva el estado de error fail-closed.
@@ -571,9 +686,9 @@ export class ConversionWorker {
       };
     }
 
-    let activeWorkers: any;
+    let rawWip: unknown;
     try {
-      activeWorkers = (boss as any).getWipData();
+      rawWip = (boss as any).getWipData();
     } catch (e) {
       const err = new WorkerShutdownError(
         'Fallo autoritativo de verificación de reconciliación: getWipData() lanzó una excepción.',
@@ -594,9 +709,13 @@ export class ConversionWorker {
       };
     }
 
-    if (!Array.isArray(activeWorkers)) {
-      const err = new WorkerShutdownError(
-        'Fallo autoritativo de verificación de reconciliación: getWipData() retornó una respuesta malformada o inesperada.'
+    let validatedWorkers: ValidatedWipEntry[];
+    try {
+      validatedWorkers = ConversionWorker.validateWipData(rawWip);
+    } catch (e) {
+      const err = e instanceof WorkerShutdownError ? e : new WorkerShutdownError(
+        'Fallo autoritativo de verificación de reconciliación: getWipData() retornó una respuesta malformada o inesperada.',
+        e
       );
       this.registrationState = 'UNRESOLVED_ERROR';
       this.lifecycleState = 'ERROR';
@@ -613,20 +732,96 @@ export class ConversionWorker {
       };
     }
 
-    const queueWorkers = activeWorkers.filter((w: any) => w.name === CONVERSION_QUEUE_NAME);
+    // Validación estricta si se proporcionó un reconciledSubscriptionId explícito (R332-17)
+    if (typeof reconciledSubscriptionId !== 'undefined') {
+      if (typeof reconciledSubscriptionId !== 'string' || reconciledSubscriptionId.trim().length === 0) {
+        const err = new WorkerShutdownError(
+          `Fallo autoritativo de reconciliación: el identificador provisto '${String(reconciledSubscriptionId)}' es inválido o está en blanco.`
+        );
+        this.registrationState = 'UNRESOLVED_ERROR';
+        this.lifecycleState = 'ERROR';
+        this.lastShutdownError = err;
+        if (throwOnError) throw err;
+        return {
+          success: false,
+          state: 'ERROR',
+          offWorkSettled: false,
+          activeJobsDrained: false,
+          remainingJobsCount: this.activeJobIds.size,
+          timedOut: false,
+          error: err,
+        };
+      }
+    }
 
-    // 1. Intentar correlación unívoca del consumidor (R3.3.1):
+    const queueWorkers = validatedWorkers.filter((w) => w.name === CONVERSION_QUEUE_NAME);
+
+    // 1. Intentar correlación unívoca del consumidor (R3.3.1 / R3.3.2):
     // a) Mediante reconciledSubscriptionId provisto explícitamente, o
     // b) Mediante el workerId embebido en las opciones de registro en pg-boss
-    let matchingWorker: any = null;
+    let matchingWorker: ValidatedWipEntry | null = null;
     let targetId: string | null = null;
 
     if (typeof reconciledSubscriptionId === 'string' && reconciledSubscriptionId.trim().length > 0) {
-      targetId = reconciledSubscriptionId.trim();
-      matchingWorker = queueWorkers.find((w: any) => w.workId === targetId || w.id === targetId);
+      const cleanId = reconciledSubscriptionId.trim();
+      const matches = queueWorkers.filter((w) => w.workId === cleanId || w.id === cleanId);
+
+      // R332-15: Rechazar coincidencias ambiguas o conflictivas
+      if (matches.length > 1) {
+        const distinctWorkIds = new Set(matches.map((m) => m.workId));
+        if (distinctWorkIds.size > 1) {
+          const err = new WorkerShutdownError(
+            `Fallo autoritativo de reconciliación: identificador ambiguo '${cleanId}'. Múltiples registros con workId divergente coinciden.`
+          );
+          this.registrationState = 'UNRESOLVED_ERROR';
+          this.lifecycleState = 'ERROR';
+          this.lastShutdownError = err;
+          if (throwOnError) throw err;
+          return {
+            success: false,
+            state: 'ERROR',
+            offWorkSettled: false,
+            activeJobsDrained: false,
+            remainingJobsCount: this.activeJobIds.size,
+            timedOut: false,
+            error: err,
+          };
+        }
+      }
+
+      if (matches.length > 0) {
+        matchingWorker = matches[0];
+        targetId = matchingWorker.workId || matchingWorker.id;
+      }
     } else {
-      matchingWorker = queueWorkers.find((w: any) => (w.options as any)?.workerInstanceId === this.workerId);
-      if (matchingWorker) {
+      // Recuperación autónoma infalsificable por workerInstanceId
+      const matches = queueWorkers.filter((w) => (w.options as any)?.workerInstanceId === this.workerId);
+
+      // R332-10 / R332-15: Rechazar coincidencias múltiples o ambiguas
+      if (matches.length > 1) {
+        const distinctWorkIds = new Set(matches.map((m) => m.workId));
+        if (distinctWorkIds.size > 1) {
+          const err = new WorkerShutdownError(
+            `Fallo autoritativo de reconciliación: múltiples registros distintos (${distinctWorkIds.size}) en pg-boss reclaman workerInstanceId '${this.workerId}'. Identidad ambigua.`
+          );
+          this.registrationState = 'UNRESOLVED_ERROR';
+          this.lifecycleState = 'ERROR';
+          this.lastShutdownError = err;
+          if (throwOnError) throw err;
+          return {
+            success: false,
+            state: 'ERROR',
+            offWorkSettled: false,
+            activeJobsDrained: false,
+            remainingJobsCount: this.activeJobIds.size,
+            timedOut: false,
+            error: err,
+          };
+        }
+      }
+
+      if (matches.length > 0) {
+        matchingWorker = matches[0];
         targetId = matchingWorker.workId || matchingWorker.id;
       }
     }
@@ -723,15 +918,11 @@ export class ConversionWorker {
                 );
               }
 
-              const activeWorkers = (boss as any).getWipData();
-              if (!Array.isArray(activeWorkers)) {
-                throw new WorkerShutdownError(
-                  'Fallo autoritativo de verificación de shutdown: getWipData() retornó una respuesta malformada o inesperada (no es un arreglo).'
-                );
-              }
+              const rawWip = (boss as any).getWipData();
+              const validatedWorkers = ConversionWorker.validateWipData(rawWip);
 
-              // R32-07: Verificar si el consumidor correspondiente a este worker aún permanece activo o no detenido en pg-boss
-              const isTargetWorkerStillActive = activeWorkers.some((w: any) => {
+              // R32-07 / R332-05: Verificar si el consumidor correspondiente a este worker aún permanece activo o no detenido en pg-boss
+              const isTargetWorkerStillActive = validatedWorkers.some((w) => {
                 if (w.name !== CONVERSION_QUEUE_NAME) return false;
                 return w.workId === targetSubId || w.id === targetSubId;
               });

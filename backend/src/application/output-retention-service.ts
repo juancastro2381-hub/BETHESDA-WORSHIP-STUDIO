@@ -29,6 +29,7 @@ export interface RetentionPruneItem {
   storageKey: string;
   checksumSha256: string | null;
   fileDeleted: boolean;
+  audited: boolean;
   sharedReferencesRemaining: number;
 }
 
@@ -49,6 +50,7 @@ export interface OrphanItem {
   byteLength: number;
   createdAt: Date;
   deleted: boolean;
+  audited: boolean;
   reason?: string;
 }
 
@@ -155,114 +157,135 @@ export class OutputRetentionService {
 
       try {
         let fileDeleted = false;
+        let audited = false;
         let otherRefCount = 0;
         let deletionError: string | null = null;
+        let auditError: string | null = null;
 
-        // FASE 1: Transición transaccional en Base de Datos PRIMERO
-        let transitioned = false;
         if (!dryRun) {
-          const [updated] = await this.db
-            .update(backgroundJobs)
-            .set({
-              prunedAt: now,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(backgroundJobs.id, job.id),
-                isNull(backgroundJobs.prunedAt),
-                lt(backgroundJobs.completedAt, cutoffDate),
-                or(
-                  isNull(backgroundJobs.leaseExpiresAt),
-                  lt(backgroundJobs.leaseExpiresAt, now)
+          await this.db.transaction(async (tx) => {
+            // Defect 1 Remediation: PostgreSQL Advisory Lock para serialización distribuida
+            // Bloquea deterministamente la clave CAS y la clave companion canónica
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${storageKey}))`);
+            const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${canonicalKey}))`);
+
+            // FASE 1: Transición transaccional en Base de Datos PRIMERO con bloqueo de fila (FOR UPDATE)
+            // Serializa limpiamente contra commitJobToCatalog concurrente (CR-05)
+            const [lockedJob] = await tx
+              .select({ id: backgroundJobs.id })
+              .from(backgroundJobs)
+              .where(
+                and(
+                  eq(backgroundJobs.id, job.id),
+                  isNull(backgroundJobs.prunedAt),
+                  lt(backgroundJobs.completedAt, cutoffDate),
+                  or(
+                    isNull(backgroundJobs.leaseExpiresAt),
+                    lt(backgroundJobs.leaseExpiresAt, now)
+                  )
                 )
               )
-            )
-            .returning({ id: backgroundJobs.id });
+              .for('update');
 
-          if (!updated) {
-            // El trabajo fue tomado por un worker concurrente o ya fue podado
-            continue;
-          }
-          transitioned = true;
-        } else {
-          transitioned = true;
-        }
+            if (!lockedJob) {
+              // El trabajo ya fue podado o tomado por un worker con lease activo
+              return;
+            }
 
-        // FASE 2: Comprobación de referencias compartidas (CAS Deduplication)
-        // Como el trabajo actual ya tiene pruned_at = now, no cuenta como referencia activa
-        const [activeOtherJobs] = await this.db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(backgroundJobs)
-          .where(
-            and(
-              eq(backgroundJobs.outputStorageKey, storageKey),
-              isNull(backgroundJobs.prunedAt),
-              not(eq(backgroundJobs.id, job.id))
-            )
-          );
+            const [updated] = await tx
+              .update(backgroundJobs)
+              .set({
+                prunedAt: now,
+                updatedAt: now,
+              })
+              .where(eq(backgroundJobs.id, job.id))
+              .returning({ id: backgroundJobs.id });
 
-        const [activeSources] = await this.db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(songSources)
-          .where(eq(songSources.storagePath, storageKey));
+            if (!updated) {
+              return;
+            }
 
-        otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
+            // FASE 2: Comprobación de referencias compartidas (CAS Deduplication) bajo advisory lock
+            const [activeOtherJobs] = await tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(backgroundJobs)
+              .where(
+                and(
+                  eq(backgroundJobs.outputStorageKey, storageKey),
+                  isNull(backgroundJobs.prunedAt),
+                  not(eq(backgroundJobs.id, job.id))
+                )
+              );
 
-        // FASE 3: Eliminación física idempotente (Solo si cero referencias activas)
-        if (otherRefCount === 0) {
-          if (!dryRun) {
-            try {
-              await this.outputStorage.delete(storageKey);
-              fileDeleted = true;
-              report.filesDeletedCount++;
+            const [activeSources] = await tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(songSources)
+              .where(eq(songSources.storagePath, storageKey));
 
-              // También eliminar el archivo canónico companion si existe
-              const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
-              if (await this.outputStorage.exists(canonicalKey)) {
-                await this.outputStorage.delete(canonicalKey).catch(() => {});
-              }
-            } catch (delErr: any) {
-              if (delErr instanceof StorageNotFoundError) {
-                fileDeleted = false; // Ya no existía en disco (idempotencia)
-              } else {
-                deletionError = delErr?.message ?? String(delErr);
-                // Fail-soft: La base de datos es consistente (pruned_at establecido).
-                // El archivo físico huérfano será limpiado por el recolector de huérfanos.
+            otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
+
+            // FASE 3: Eliminación física idempotente (Solo si cero referencias activas)
+            if (otherRefCount === 0) {
+              try {
+                const wasDeleted = await this.outputStorage.delete(storageKey);
+                if (wasDeleted) {
+                  fileDeleted = true;
+                }
+
+                if (await this.outputStorage.exists(canonicalKey)) {
+                  await this.outputStorage.delete(canonicalKey).catch(() => {});
+                }
+              } catch (delErr: any) {
+                if (delErr instanceof StorageNotFoundError) {
+                  fileDeleted = false; // Ya no existía en disco (idempotencia)
+                } else {
+                  deletionError = delErr?.message ?? String(delErr);
+                  // Fail-soft: La base de datos es consistente (pruned_at establecido).
+                }
               }
             }
-          } else {
-            fileDeleted = true;
-            report.filesDeletedCount++;
-          }
+
+            // FASE 4: Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
+            // Si la auditoría falla, la subtransacción se revierte pero la transacción principal persiste (pruned_at = now)
+            try {
+              await tx.transaction(async (subTx) => {
+                await subTx.insert(auditLogs).values({
+                  eventType: 'CONVERSION_OUTPUT_PRUNED',
+                  userId: options?.userId ?? null,
+                  resource: `background_jobs/${job.id}`,
+                  metadata: {
+                    jobId: job.id,
+                    storageKey,
+                    checksumSha256: job.outputChecksumSha256,
+                    fileDeleted,
+                    sharedReferencesRemaining: otherRefCount,
+                    retentionDays: days,
+                    completedAt: job.completedAt?.toISOString(),
+                    deletionError,
+                  },
+                });
+              });
+              audited = true;
+            } catch (aErr: any) {
+              audited = false;
+              auditError = aErr?.message ?? String(aErr);
+              report.errors.push({
+                jobId: job.id,
+                error: `Fallo al registrar auditoría de podado: ${auditError}`,
+              });
+            }
+          });
         } else {
-          report.filesRetainedDueToSharedRef++;
+          // Modo simulación (Dry Run)
+          fileDeleted = true;
+          audited = true;
         }
 
-        // FASE 4: Registro de auditoría
-        if (!dryRun && transitioned) {
-          try {
-            await this.db.insert(auditLogs).values({
-              eventType: 'CONVERSION_OUTPUT_PRUNED',
-              userId: options?.userId ?? null,
-              resource: `background_jobs/${job.id}`,
-              metadata: {
-                jobId: job.id,
-                storageKey,
-                checksumSha256: job.outputChecksumSha256,
-                fileDeleted,
-                sharedReferencesRemaining: otherRefCount,
-                retentionDays: days,
-                completedAt: job.completedAt?.toISOString(),
-                deletionError,
-              },
-            });
-          } catch (auditErr: any) {
-            report.errors.push({
-              jobId: job.id,
-              error: `Fallo al registrar auditoría de podado: ${auditErr?.message ?? String(auditErr)}`,
-            });
-          }
+        if (fileDeleted) {
+          report.filesDeletedCount++;
+        } else if (otherRefCount > 0) {
+          report.filesRetainedDueToSharedRef++;
         }
 
         report.prunedJobsCount++;
@@ -271,6 +294,7 @@ export class OutputRetentionService {
           storageKey,
           checksumSha256: job.outputChecksumSha256,
           fileDeleted,
+          audited,
           sharedReferencesRemaining: otherRefCount,
         });
       } catch (err: any) {
@@ -335,137 +359,157 @@ export class OutputRetentionService {
             continue;
           }
 
-          // 3. Verificar si es un archivo companion canónico (*.canonical.json)
-          if (key.endsWith('.canonical.json')) {
-            const baseHash = path.basename(key, '.canonical.json');
-            const [compJob] = await this.db
-              .select({ id: backgroundJobs.id })
-              .from(backgroundJobs)
-              .where(
-                and(
-                  eq(backgroundJobs.outputChecksumSha256, baseHash),
-                  isNull(backgroundJobs.prunedAt)
-                )
-              )
-              .limit(1);
-
-            const [compSource] = await this.db
-              .select({ id: songSources.id })
-              .from(songSources)
-              .where(eq(songSources.checksumSha256, baseHash))
-              .limit(1);
-
-            if (compJob || compSource) {
-              report.activeReferencesCount++;
-              continue;
-            }
-          }
-
-          // 4. Verificar referencias en background_jobs
-          const [jobRef] = await this.db
-            .select({ id: backgroundJobs.id })
-            .from(backgroundJobs)
-            .where(
-              and(
-                eq(backgroundJobs.outputStorageKey, key),
-                isNull(backgroundJobs.prunedAt)
-              )
-            )
-            .limit(1);
-
-          // 5. Verificar referencias en song_sources
-          const [sourceRef] = await this.db
-            .select({ id: songSources.id })
-            .from(songSources)
-            .where(eq(songSources.storagePath, key))
-            .limit(1);
-
-          if (jobRef || sourceRef) {
-            report.activeReferencesCount++;
-            continue;
-          }
-
-          // 6. Verificación inmediata pre-eliminación contra referencias concurrentes en vuelo (Defect 3 Remediation)
-          const [freshJobRef] = await this.db
-            .select({ id: backgroundJobs.id })
-            .from(backgroundJobs)
-            .where(
-              and(
-                or(
-                  eq(backgroundJobs.outputStorageKey, key),
-                  eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
-                ),
-                or(
-                  isNull(backgroundJobs.prunedAt),
-                  inArray(backgroundJobs.status, ['PENDING', 'PROCESSING'])
-                )
-              )
-            )
-            .limit(1);
-
-          const [freshSourceRef] = await this.db
-            .select({ id: songSources.id })
-            .from(songSources)
-            .where(
-              or(
-                eq(songSources.storagePath, key),
-                eq(songSources.checksumSha256, meta.checksumSha256)
-              )
-            )
-            .limit(1);
-
-          if (freshJobRef || freshSourceRef) {
-            report.activeReferencesCount++;
-            continue;
-          }
-
-          // 7. El archivo no tiene referencias en base de datos y superó la cuarentena: es un huérfano confirmado
           let deleted = false;
-          if (!dryRun) {
-            try {
-              await this.outputStorage.delete(key);
-              deleted = true;
-              report.orphansDeletedCount++;
-            } catch (delErr: any) {
-              if (delErr instanceof StorageNotFoundError) {
-                deleted = false;
-              } else {
-                throw delErr;
-              }
-            }
+          let audited = false;
 
-            // Registrar en auditoría
-            try {
-              await this.db.insert(auditLogs).values({
-                eventType: 'ORPHAN_OUTPUT_COLLECTED',
-                userId: options?.userId ?? null,
-                resource: `storage/${key}`,
-                metadata: {
+          if (!dryRun) {
+            await this.db.transaction(async (tx) => {
+              // Defect 1 Remediation: PostgreSQL Advisory Lock determinista sobre la clave huérfana
+              // Serializa contra la creación concurrente en worker y el podado de retención
+              await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+
+              // 3. Verificar si es un archivo companion canónico (*.canonical.json) bajo el lock
+              if (key.endsWith('.canonical.json')) {
+                const baseHash = path.basename(key, '.canonical.json');
+                const [compJob] = await tx
+                  .select({ id: backgroundJobs.id })
+                  .from(backgroundJobs)
+                  .where(
+                    and(
+                      eq(backgroundJobs.outputChecksumSha256, baseHash),
+                      isNull(backgroundJobs.prunedAt)
+                    )
+                  )
+                  .limit(1);
+
+                const [compSource] = await tx
+                  .select({ id: songSources.id })
+                  .from(songSources)
+                  .where(eq(songSources.checksumSha256, baseHash))
+                  .limit(1);
+
+                if (compJob || compSource) {
+                  report.activeReferencesCount++;
+                  return;
+                }
+              }
+
+              // 4. Verificar referencias en background_jobs bajo el lock
+              const [jobRef] = await tx
+                .select({ id: backgroundJobs.id })
+                .from(backgroundJobs)
+                .where(
+                  and(
+                    eq(backgroundJobs.outputStorageKey, key),
+                    isNull(backgroundJobs.prunedAt)
+                  )
+                )
+                .limit(1);
+
+              const [sourceRef] = await tx
+                .select({ id: songSources.id })
+                .from(songSources)
+                .where(eq(songSources.storagePath, key))
+                .limit(1);
+
+              if (jobRef || sourceRef) {
+                report.activeReferencesCount++;
+                return;
+              }
+
+              // 5. Verificación inmediata pre-eliminación contra referencias concurrentes en vuelo (Defect 3 Remediation)
+              const [freshJobRef] = await tx
+                .select({ id: backgroundJobs.id })
+                .from(backgroundJobs)
+                .where(
+                  and(
+                    or(
+                      eq(backgroundJobs.outputStorageKey, key),
+                      eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
+                    ),
+                    or(
+                      isNull(backgroundJobs.prunedAt),
+                      inArray(backgroundJobs.status, ['PENDING', 'PROCESSING'])
+                    )
+                  )
+                )
+                .limit(1);
+
+              const [freshSourceRef] = await tx
+                .select({ id: songSources.id })
+                .from(songSources)
+                .where(
+                  or(
+                    eq(songSources.storagePath, key),
+                    eq(songSources.checksumSha256, meta.checksumSha256)
+                  )
+                )
+                .limit(1);
+
+              if (freshJobRef || freshSourceRef) {
+                report.activeReferencesCount++;
+                return;
+              }
+
+              // 6. El archivo no tiene referencias en base de datos: eliminar físicamente bajo advisory lock
+              try {
+                const wasDeleted = await this.outputStorage.delete(key);
+                if (wasDeleted) {
+                  deleted = true;
+                  report.orphansDeletedCount++;
+                } else {
+                  deleted = false;
+                }
+              } catch (delErr: any) {
+                if (delErr instanceof StorageNotFoundError) {
+                  deleted = false;
+                } else {
+                  throw delErr;
+                }
+              }
+
+              // 7. Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
+              try {
+                await tx.transaction(async (subTx) => {
+                  await subTx.insert(auditLogs).values({
+                    eventType: 'ORPHAN_OUTPUT_COLLECTED',
+                    userId: options?.userId ?? null,
+                    resource: `storage/${key}`,
+                    metadata: {
+                      storageKey: key,
+                      byteLength: meta.byteLength,
+                      checksumSha256: meta.checksumSha256,
+                      fileCreatedAt: meta.createdAt.toISOString(),
+                      quarantineDays: days,
+                    },
+                  });
+                });
+                audited = true;
+              } catch (auditErr: any) {
+                audited = false;
+                report.errors.push({
                   storageKey: key,
-                  byteLength: meta.byteLength,
-                  checksumSha256: meta.checksumSha256,
-                  fileCreatedAt: meta.createdAt.toISOString(),
-                  quarantineDays: days,
-                },
-              });
-            } catch (auditErr: any) {
-              report.errors.push({
-                storageKey: key,
-                error: `Fallo al registrar auditoría de huérfano: ${auditErr?.message ?? String(auditErr)}`,
-              });
-            }
+                  error: `Fallo al registrar auditoría de huérfano: ${auditErr?.message ?? String(auditErr)}`,
+                });
+              }
+            });
           } else {
+            // Modo simulación (Dry Run)
             deleted = true;
+            audited = true;
             report.orphansDeletedCount++;
           }
 
-          report.orphanItems.push({
-            storageKey: key,
-            byteLength: meta.byteLength,
-            createdAt: meta.createdAt,
-            deleted,
-            reason: 'Unreferenced file past quarantine period',
-          });
+          if (deleted) {
+            report.orphanItems.push({
+              storageKey: key,
+              byteLength: meta.byteLength,
+              createdAt: meta.createdAt,
+              deleted,
+              audited,
+              reason: 'Unreferenced file past quarantine period',
+            });
+          }
         } catch (fileErr: any) {
           report.errors.push({
             storageKey: key,

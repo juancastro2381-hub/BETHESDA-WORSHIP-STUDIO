@@ -275,9 +275,16 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
           currentDir = parentDir;
         }
       }
-    } catch (realErr) {
+    } catch (realErr: any) {
       if (realErr instanceof StorageSecurityError) {
         throw realErr;
+      }
+      // Fail-closed: si ocurre un error al validar rutas canónicas y no es un ENOENT de ruta esperada
+      if (realErr?.code !== 'ENOENT') {
+        throw new StorageSecurityError(
+          `Violación de seguridad: Error al validar ruta canónica en "${storageKey}": ${realErr?.message ?? String(realErr)}`,
+          storageKey
+        );
       }
     }
 
@@ -376,7 +383,16 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
   ): Promise<Buffer> {
     const targetPath = this.resolveSafePath(storageKey);
     try {
-      const buffer = await fs.promises.readFile(targetPath);
+      // Symlink TOCTOU Protection: verificar la ruta canónica inmediatamente antes de la lectura
+      const canonicalBaseDir = fs.existsSync(this.baseDir) ? fs.realpathSync(this.baseDir) : this.baseDir;
+      const canonicalTarget = fs.realpathSync(targetPath);
+      if (!canonicalTarget.startsWith(canonicalBaseDir + path.sep) && canonicalTarget !== canonicalBaseDir) {
+        throw new StorageSecurityError(
+          `Violación de seguridad: Enlace simbólico fuera del directorio base detectado en: "${storageKey}"`,
+          storageKey
+        );
+      }
+      const buffer = await fs.promises.readFile(canonicalTarget);
       if (options?.expectedChecksumSha256 || options?.verifyChecksum) {
         const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
         if (options.expectedChecksumSha256 && options.expectedChecksumSha256 !== actualHash) {
@@ -410,11 +426,21 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
       throw new StorageNotFoundError(storageKey);
     }
 
+    // Symlink TOCTOU Protection: verificar la ruta canónica antes de abrir el flujo
+    const canonicalBaseDir = fs.existsSync(this.baseDir) ? fs.realpathSync(this.baseDir) : this.baseDir;
+    const canonicalTarget = fs.realpathSync(targetPath);
+    if (!canonicalTarget.startsWith(canonicalBaseDir + path.sep) && canonicalTarget !== canonicalBaseDir) {
+      throw new StorageSecurityError(
+        `Violación de seguridad: Enlace simbólico fuera del directorio base detectado en: "${storageKey}"`,
+        storageKey
+      );
+    }
+
     const options: { start?: number; end?: number } = {};
     if (typeof start === 'number') options.start = start;
     if (typeof end === 'number') options.end = end;
 
-    return fs.createReadStream(targetPath, options);
+    return fs.createReadStream(canonicalTarget, options);
   }
 
   public async exists(storageKey: string): Promise<boolean> {

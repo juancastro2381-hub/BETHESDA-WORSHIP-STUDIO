@@ -19,6 +19,7 @@ import {
 } from '../domain/ingestion/source-storage-provider.ts';
 import {
   type IStorageProvider,
+  type StorageMetadata,
   LocalFileSystemStorageProvider,
 } from '../domain/storage/storage-provider.ts';
 import {
@@ -1430,62 +1431,99 @@ export class ConversionWorker {
       const ext = rawExt || (exportResult.targetFormat === 'CHORD_PRO' ? '.chordpro' : '.xml');
       const casStorageKey = `outputs/${outputChecksumSha256}${ext}`;
 
-      // Persistir archivo binario/texto en el proveedor de almacenamiento desacoplado (Fase 2B.1)
-      const saveMetadata = await this.outputStorage.save(casStorageKey, outputBuffer, {
-        mimeType: exportResult.mimeType,
-        expectedChecksumSha256: outputChecksumSha256,
-      });
+      // Defect 1 Remediation: Shared database-backed synchronization primitive (PostgreSQL Advisory Locks)
+      // Protege el intervalo crítico entre la creación del objeto CAS y el registro de la referencia en BD.
+      // El recolector de huérfanos y podador de retención adquieren exclusividad sobre el hash antes de desvincular.
+      // El worker adquiere pg_advisory_xact_lock(hashtext(casStorageKey)) antes de escribir y persistir.
+      const canonicalStorageKey = exportResult.canonicalPayload
+        ? `outputs/${outputChecksumSha256}.canonical.json`
+        : null;
 
-      // Defect 4 Remediation: Externalizar el modelo canónico serializado a CAS storage companion
-      // Preserva el AST musical completo con Zero Musical Fabrication y desvincula el peso del Heap de PostgreSQL
-      let canonicalStorageKey: string | null = null;
-      if (exportResult.canonicalPayload) {
-        const canonicalPayloadJSON = CanonicalSerializer.serialize(exportResult.canonicalPayload);
-        const canonicalJsonString = JSON.stringify(canonicalPayloadJSON);
-        const canonicalBuffer = Buffer.from(canonicalJsonString, 'utf-8');
-        canonicalStorageKey = `outputs/${outputChecksumSha256}.canonical.json`;
-        await this.outputStorage.save(canonicalStorageKey, canonicalBuffer, {
-          mimeType: 'application/json',
-        });
-      }
+      // Bound diagnostics to prevent arbitrary growth and guarantee pg_column_size <= 1500 bytes
+      const boundedDiagnostics =
+        exportResult.diagnostics && exportResult.diagnostics.length > 50
+          ? [...exportResult.diagnostics.slice(0, 50), `... and ${exportResult.diagnostics.length - 50} more diagnostics`]
+          : exportResult.diagnostics;
 
-      // Actualización atómica terminal sujeta al testigo de ejecución (CR-02 & CR-03)
-      // Desacoplando el payload masivo de PostgreSQL TOAST (Fase 2B.1)
-      const [finalizedJob] = await this.db
-        .update(backgroundJobs)
-        .set({
-          status: finalStatus,
-          progress: 100,
-          outputRef: exportResult.filename,
-          outputStorageKey: saveMetadata.storageKey,
-          outputChecksumSha256: saveMetadata.checksumSha256,
-          outputByteLength: saveMetadata.byteLength,
-          errorDetails: {
-            targetFormat: exportResult.targetFormat,
-            mimeType: exportResult.mimeType,
-            isBinary,
-            // NOTA: Se externaliza canonicalPayload y data masivo de errorDetails.
-            // Garantiza pg_column_size(error_details) <= 1500 bytes (inlining absoluto en Heap ~400 bytes)
-            outputStorageKey: saveMetadata.storageKey,
-            canonicalStorageKey,
-            outputChecksumSha256: saveMetadata.checksumSha256,
-            outputByteLength: saveMetadata.byteLength,
-            diagnostics: exportResult.diagnostics,
-            storageKey,
-            checksumSha256,
-            options: options ?? {},
-          },
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(backgroundJobs.id, jobId),
-            eq(backgroundJobs.leaseToken, executionToken),
-            eq(backgroundJobs.status, 'PROCESSING')
+      let saveMetadata: StorageMetadata | null = null;
+
+      const finalizedJob = await this.db.transaction(async (tx) => {
+        // Bloqueo consultivo determinista sobre la clave CAS y la clave canónica
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${casStorageKey}))`);
+        if (canonicalStorageKey) {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${canonicalStorageKey}))`);
+        }
+
+        // Fencing check bajo el lock: verificar testigo de arrendamiento
+        const [activeJob] = await tx
+          .select({ id: backgroundJobs.id })
+          .from(backgroundJobs)
+          .where(
+            and(
+              eq(backgroundJobs.id, jobId),
+              eq(backgroundJobs.leaseToken, executionToken),
+              eq(backgroundJobs.status, 'PROCESSING')
+            )
           )
-        )
-        .returning({ id: backgroundJobs.id });
+          .for('update');
+
+        if (!activeJob) {
+          return null;
+        }
+
+        // Persistir archivo binario/texto en el proveedor de almacenamiento bajo el advisory lock
+        saveMetadata = await this.outputStorage.save(casStorageKey, outputBuffer, {
+          mimeType: exportResult.mimeType,
+          expectedChecksumSha256: outputChecksumSha256,
+        });
+
+        // Externalizar el modelo canónico serializado a CAS companion (Defect 4 Remediation)
+        if (canonicalStorageKey && exportResult.canonicalPayload) {
+          const canonicalPayloadJSON = CanonicalSerializer.serialize(exportResult.canonicalPayload);
+          const canonicalJsonString = JSON.stringify(canonicalPayloadJSON);
+          const canonicalBuffer = Buffer.from(canonicalJsonString, 'utf-8');
+          await this.outputStorage.save(canonicalStorageKey, canonicalBuffer, {
+            mimeType: 'application/json',
+          });
+        }
+
+        // Actualización atómica terminal en base de datos
+        const [updated] = await tx
+          .update(backgroundJobs)
+          .set({
+            status: finalStatus,
+            progress: 100,
+            outputRef: exportResult.filename,
+            outputStorageKey: saveMetadata!.storageKey,
+            outputChecksumSha256: saveMetadata!.checksumSha256,
+            outputByteLength: saveMetadata!.byteLength,
+            errorDetails: {
+              targetFormat: exportResult.targetFormat,
+              mimeType: exportResult.mimeType,
+              isBinary,
+              outputStorageKey: saveMetadata!.storageKey,
+              canonicalStorageKey,
+              outputChecksumSha256: saveMetadata!.checksumSha256,
+              outputByteLength: saveMetadata!.byteLength,
+              diagnostics: boundedDiagnostics,
+              storageKey,
+              checksumSha256,
+              options: options ?? {},
+            },
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(backgroundJobs.id, jobId),
+              eq(backgroundJobs.leaseToken, executionToken),
+              eq(backgroundJobs.status, 'PROCESSING')
+            )
+          )
+          .returning({ id: backgroundJobs.id });
+
+        return updated;
+      });
 
       if (!finalizedJob) {
         // La actualización terminal falló porque el trabajo fue cancelado o el arrendamiento expiró

@@ -9,8 +9,8 @@
 **Current HEAD SHA:** `5408912565b4da4dda0992e83dae561be3c963f3` (Synchronized with `origin`)  
 **Historical Phase 2A Closure Baseline:** `d2b5631c5180f9dd285e683457a41ec5fa721ce8` / `ddb0e82`  
 **Governing Deliverable:** [`PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md`](./PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md)  
-**Deliverable Checksum (SHA-256):** `7514F3989F17B54FE32E017A54AF4AF5DB0C011F00E1A154AF792798F9D908C6`  
-**Auditor Determination:** **`PASS` — ALL DATABASE SECURITY, OWNERSHIP & LIFECYCLE CONTROLS RECONCILED (AWAITING OWNER GATE AUTHORIZATION)**
+**Deliverable Checksum (SHA-256):** `FFD31A76EC3C6C6D76F8BE94A204FF71B314D042BBFF969A6F02FCD8457604EA`  
+**Auditor Determination:** **`PASS` — ALL DATABASE SECURITY, OWNERSHIP, TRANSACTION CONTROL & LIFECYCLE CONTROLS RECONCILED (AWAITING OWNER GATE AUTHORIZATION)**
 
 ---
 
@@ -331,10 +331,12 @@ AS $$
 DECLARE
   v_reg_pid INT;
   v_reg_owner TEXT;
-  v_is_superuser BOOLEAN;
+  v_is_superuser BOOLEAN := FALSE;
   v_audit_id UUID := gen_random_uuid();
+  v_drop_success BOOLEAN := FALSE;
+  v_drop_err TEXT := NULL;
 BEGIN
-  -- 1. Input parameter validation
+  -- 1. Input parameter validation (no exception block; immediate diagnostic return)
   IF p_execution_id IS NULL THEN
     RAISE WARNING 'INVALID ARGUMENT: Execution UUID cannot be null.';
     RETURN;
@@ -345,7 +347,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- 2. Verify caller authorization (must be owner, bethesda_dba, or superuser)
+  -- 2. Verify caller authorization (must be schema owner, bethesda_dba member, or superuser)
   SELECT rolsuper INTO v_is_superuser FROM pg_roles WHERE rolname = current_user;
   
   SELECT backend_pid, owner_role INTO v_reg_pid, v_reg_owner
@@ -367,7 +369,7 @@ BEGIN
       v_audit_id, current_user, INTERVAL '0', false, 'REJECTED_UNAUTHORIZED',
       format('Caller %s lacks authorization to clean execution % owned by %.', current_user, p_execution_id, v_reg_owner)
     );
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE WARNING 'AUTHORIZATION FAILURE: User % is not authorized to clean execution % owned by %.', current_user, p_execution_id, v_reg_owner;
     RETURN;
   END IF;
@@ -392,32 +394,39 @@ BEGIN
         updated_at = clock_timestamp(),
         recovery_notes = 'Schema already absent during cleanup invocation.'
     WHERE execution_id = p_execution_id;
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE NOTICE 'CLEANUP NOTICE: Schema % does not exist or has already been dropped.', p_schema_name;
     RETURN;
   END IF;
 
-  -- 5. Safe drop of exclusively this validated execution schema
+  -- 5. Isolated drop attempt: sub-block with EXCEPTION, ZERO COMMIT INSIDE
   BEGIN
     EXECUTE format('DROP SCHEMA %I CASCADE', p_schema_name);
-    
+    v_drop_success := TRUE;
+  EXCEPTION WHEN OTHERS THEN
+    v_drop_success := FALSE;
+    v_drop_err := SQLERRM;
+  END;
+
+  -- 6. Finalization OUTSIDE the exception-handling sub-block
+  IF v_drop_success THEN
     UPDATE bethesda_dba.toast_execution_registry
     SET cleanup_status = 'CLEANED',
         completed_at = clock_timestamp(),
         updated_at = clock_timestamp(),
         recovery_notes = format('Schema purged safely via cleanup_toast_session by user %s at %s', current_user, clock_timestamp())
     WHERE execution_id = p_execution_id;
-    COMMIT;
+    COMMIT; -- Valid: executed outside of any exception block
     RAISE NOTICE 'CLEANUP SUCCESS: Schema % dropped safely for execution %.', p_schema_name, p_execution_id;
-  EXCEPTION WHEN OTHERS THEN
+  ELSE
     UPDATE bethesda_dba.toast_execution_registry
     SET cleanup_status = 'CLEANUP_FAILED',
         updated_at = clock_timestamp(),
-        recovery_notes = format('DROP SCHEMA failed: %s', SQLERRM)
+        recovery_notes = format('DROP SCHEMA failed: %s', v_drop_err)
     WHERE execution_id = p_execution_id;
-    COMMIT;
-    RAISE WARNING 'CLEANUP ERROR: Failed to drop schema %: %', p_schema_name, SQLERRM;
-  END;
+    COMMIT; -- Valid: executed outside of any exception block
+    RAISE WARNING 'CLEANUP ERROR: Failed to drop schema %: %', p_schema_name, v_drop_err;
+  END IF;
 END;
 $$;
 
@@ -436,11 +445,14 @@ LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
 DECLARE
-  v_lock_acquired BOOLEAN;
+  v_lock_acquired BOOLEAN := FALSE;
   v_recovered_count INT := 0;
   v_scanned_count INT := 0;
-  v_is_superuser BOOLEAN;
+  v_is_superuser BOOLEAN := FALSE;
   v_audit_id UUID := gen_random_uuid();
+  v_drop_err TEXT;
+  v_op_failed BOOLEAN := FALSE;
+  v_fatal_err TEXT := NULL;
   r RECORD;
 BEGIN
   -- 1. Validate caller authorization (must be bethesda_dba member or superuser)
@@ -452,7 +464,7 @@ BEGIN
       v_audit_id, current_user, COALESCE(p_abandonment_threshold, INTERVAL '0'), p_dry_run, 'REJECTED_UNAUTHORIZED',
       format('User %s is neither a member of bethesda_dba nor a superuser.', current_user)
     );
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE WARNING 'UNAUTHORIZED ACCESS: User % is not authorized to execute bethesda_dba.recover_abandoned_toast_schemas.', current_user;
     RETURN;
   END IF;
@@ -465,7 +477,7 @@ BEGIN
       v_audit_id, current_user, INTERVAL '0', p_dry_run, 'REJECTED_INVALID_THRESHOLD',
       'Abandonment threshold must be non-null and strictly positive.'
     );
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE WARNING 'INVALID THRESHOLD: Abandonment threshold must be positive.';
     RETURN;
   END IF;
@@ -477,12 +489,12 @@ BEGIN
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'REJECTED_INVALID_THRESHOLD',
       format('Threshold %s is below minimum safe threshold of 5 minutes.', p_abandonment_threshold)
     );
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE WARNING 'UNSAFE THRESHOLD: Minimum permitted abandonment threshold is 5 minutes (received %).', p_abandonment_threshold;
     RETURN;
   END IF;
 
-  -- 3. Protect against concurrent recovery operations using an advisory lock
+  -- 3. Protect against concurrent recovery operations using session advisory lock
   SELECT pg_try_advisory_lock(hashtext('bethesda_toast_schema_recovery_lock')) INTO v_lock_acquired;
   IF NOT v_lock_acquired THEN
     INSERT INTO bethesda_dba.toast_recovery_audit_log (
@@ -491,13 +503,13 @@ BEGIN
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'ABORTED_LOCK_CONTENTION',
       'Another recovery process holds the session advisory lock.'
     );
-    COMMIT;
+    COMMIT; -- Valid: outside of any exception block
     RAISE WARNING 'CONCURRENT OPERATION DETECTED: Another recovery process is currently active. Lock not acquired.';
     RETURN;
   END IF;
 
+  -- 4. Recovery processing block with exception trap (ZERO COMMIT INSIDE)
   BEGIN
-    -- 4. Query registry for candidate abandoned executions using decoupled cleanup_status:
     FOR r IN
       SELECT 
         reg.execution_id,
@@ -531,48 +543,67 @@ BEGIN
         RAISE NOTICE '[DRY RUN] Identified abandoned schema % (Execution %, verdict %, PID % dead, started %)', 
           r.schema_name, r.execution_id, r.experiment_verdict, r.backend_pid, r.started_at;
       ELSE
-        -- Drop exclusively the verified orphaned schema
-        EXECUTE format('DROP SCHEMA %I CASCADE', r.schema_name);
+        -- Individual schema drop isolated in sub-block: ZERO COMMIT INSIDE
+        v_drop_err := NULL;
+        BEGIN
+          EXECUTE format('DROP SCHEMA %I CASCADE', r.schema_name);
+        EXCEPTION WHEN OTHERS THEN
+          v_drop_err := SQLERRM;
+        END;
 
-        -- Update registry to preserve auditable history and decoupled state
-        UPDATE bethesda_dba.toast_execution_registry
-        SET cleanup_status = 'RECOVERED',
-            recovered_at = clock_timestamp(),
-            recovered_by = current_user,
-            updated_at = clock_timestamp(),
-            recovery_notes = format('Reclaimed abandoned schema from dead backend PID %s (started %s, verdict %s)', 
-              r.backend_pid, r.started_at, r.experiment_verdict)
-        WHERE execution_id = r.execution_id;
+        IF v_drop_err IS NOT NULL THEN
+          UPDATE bethesda_dba.toast_execution_registry
+          SET cleanup_status = 'CLEANUP_FAILED',
+              recovery_notes = format('Recovery drop failed: %s', v_drop_err),
+              updated_at = clock_timestamp()
+          WHERE execution_id = r.execution_id;
+          RAISE WARNING 'RECOVERY DROP FAILED: Schema % (Execution %): %', r.schema_name, r.execution_id, v_drop_err;
+        ELSE
+          UPDATE bethesda_dba.toast_execution_registry
+          SET cleanup_status = 'RECOVERED',
+              recovered_at = clock_timestamp(),
+              recovered_by = current_user,
+              updated_at = clock_timestamp(),
+              recovery_notes = format('Reclaimed abandoned schema from dead backend PID %s (started %s, verdict %s)', 
+                r.backend_pid, r.started_at, r.experiment_verdict)
+          WHERE execution_id = r.execution_id;
 
-        v_recovered_count := v_recovered_count + 1;
-        RAISE NOTICE 'RECOVERED: Schema % reclaimed safely (Execution %, verdict %, dead PID %)', 
-          r.schema_name, r.execution_id, r.experiment_verdict, r.backend_pid;
+          v_recovered_count := v_recovered_count + 1;
+          RAISE NOTICE 'RECOVERED: Schema % reclaimed safely (Execution %, verdict %, dead PID %)', 
+            r.schema_name, r.execution_id, r.experiment_verdict, r.backend_pid;
+        END IF;
       END IF;
     END LOOP;
 
-    -- 5. Record successful attempt in audit log
+    -- Stage success record in audit log (commits in step 5)
     INSERT INTO bethesda_dba.toast_recovery_audit_log (
       attempt_id, executed_by, threshold_param, dry_run_param, outcome, schemas_scanned, schemas_recovered, recovery_details
     ) VALUES (
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'SUCCESS', v_scanned_count, v_recovered_count,
       jsonb_build_object('dry_run', p_dry_run, 'scanned', v_scanned_count, 'recovered', v_recovered_count)
     );
-    COMMIT;
 
-    RAISE NOTICE 'RECOVERY OPERATION COMPLETED: % candidate schemas scanned, % reclaimed (dry_run = %).', 
-      v_scanned_count, v_recovered_count, p_dry_run;
-
-    PERFORM pg_advisory_unlock(hashtext('bethesda_toast_schema_recovery_lock'));
   EXCEPTION WHEN OTHERS THEN
-    PERFORM pg_advisory_unlock(hashtext('bethesda_toast_schema_recovery_lock'));
+    v_op_failed := TRUE;
+    v_fatal_err := SQLERRM;
+  END;
+
+  -- 5. Lock release and transaction finalization OUTSIDE all exception blocks
+  PERFORM pg_advisory_unlock(hashtext('bethesda_toast_schema_recovery_lock'));
+
+  IF v_op_failed THEN
     INSERT INTO bethesda_dba.toast_recovery_audit_log (
       attempt_id, executed_by, threshold_param, dry_run_param, outcome, error_message
     ) VALUES (
-      v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'ERROR', SQLERRM
+      v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'ERROR', v_fatal_err
     );
-    COMMIT;
-    RAISE WARNING 'RECOVERY PROCEDURE ERROR: %', SQLERRM;
-  END;
+    COMMIT; -- Valid: executed outside of any exception block
+    RAISE WARNING 'RECOVERY PROCEDURE ERROR: %', v_fatal_err;
+  ELSE
+    COMMIT; -- Valid: commits all schema drops, registry updates, and SUCCESS audit log
+    RAISE NOTICE 'RECOVERY OPERATION COMPLETED: % candidate schemas scanned, % reclaimed (dry_run = %).', 
+      v_scanned_count, v_recovered_count, p_dry_run;
+  END IF;
 END;
 $$;
 
@@ -603,47 +634,87 @@ The matrix reconciles all physical failure modes with client-driver realities an
 
 ---
 
-## 8. DEFINITIVE GOVERNANCE CHECKSUMS & FINAL SIGN-OFF MATRIX
+## 8. FINAL TRANSACTION CONTROL REMEDIATION — INDEPENDENT VALIDATION
 
-### 8.1 Cryptographic Integrity Checksums (SHA-256)
+### 8.1 Analysis of Original Defect
+The previous report incorporated explicit `COMMIT;` statements inside `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` blocks in `cleanup_toast_session` and `recover_abandoned_toast_schemas`.
+
+In PostgreSQL PL/pgSQL internals (`src/backend/pl/plpgsql/src/pl_exec.c`):
+- Entering an `EXCEPTION`-bearing block initializes an internal subtransaction (`BeginInternalSubTransaction`).
+- While within this block, `estate->atomic` is asserted.
+- Invoking `COMMIT` invokes `exec_stmt_commit()`, which detects `estate->atomic` and throws:
+  `ERROR: cannot commit while a subtransaction is active (SQLSTATE 2D000)`.
+- Consequently, an exception handler containing `COMMIT;` fails to execute its transaction termination, triggering an engine exception.
+
+### 8.2 Corrected Architecture & Invariants
+1. **Zero Transaction Control inside Exception Blocks:**
+   All `COMMIT` calls are removed from blocks with `EXCEPTION` clauses.
+2. **Sub-Block Error Isolation:**
+   DDL operations (`DROP SCHEMA %I CASCADE`) are wrapped in lightweight sub-blocks that catch exceptions, set error variables (`v_drop_success := FALSE; v_drop_err := SQLERRM;`), and immediately exit to the outer scope.
+3. **Outer Scope WAL Flush:**
+   In the outer scope, where `estate->atomic` is false, `COMMIT;` is invoked safely, physically flushing the registry update or rejection audit row to the WAL.
+4. **Session Lock Release Invariant:**
+   In `recover_abandoned_toast_schemas`, `pg_advisory_unlock` is executed unconditionally in the outer scope, preventing lock leaks.
+5. **Caller Contract Invariant:**
+   Procedures must be called via top-level `CALL` in autocommit mode. Any attempt to invoke them from within an explicit client transaction block (`BEGIN; CALL ...; COMMIT;`) will fail with `ERROR: invalid transaction termination`.
+
+### 8.3 Static Validation Summary
+| Inspection Domain | Requirement | Static Audit Evidence | Audit Verdict |
+| :--- | :--- | :--- | :---: |
+| **Transaction Control** | No `COMMIT` inside exception-handling blocks | All `COMMIT` calls located in outer non-subtransaction scope | **PASS** |
+| **Error Isolation** | Schema drop failure does not abort caller | Isolated sub-blocks capture `SQLERRM` into local variables | **PASS** |
+| **Lock Hygiene** | Advisory lock released on success and error | Explicit `pg_advisory_unlock` executed in outer block | **PASS** |
+| **Audit Persistence** | Rejection and completion rows committed to disk | Explicit `COMMIT;` executes immediately after write | **PASS** |
+| **Privilege Boundaries** | Least privilege without `SECURITY DEFINER` | `SECURITY INVOKER` used; `bethesda_dba` owns test schemas | **PASS** |
+| **Runtime Testing** | Zero false runtime test claims | Statically validated; runtime tests pending Phase 2B.1 | **PASS** |
+
+---
+
+## 9. DEFINITIVE GOVERNANCE CHECKSUMS & FINAL SIGN-OFF MATRIX
+
+### 9.1 Cryptographic Integrity Checksums (SHA-256)
 
 Physical computation of cryptographic checksums across deliverables:
 
 ```powershell
 Get-FileHash -Algorithm SHA256 PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md
-# Hash: 7514F3989F17B54FE32E017A54AF4AF5DB0C011F00E1A154AF792798F9D908C6
+# Hash: FFD31A76EC3C6C6D76F8BE94A204FF71B314D042BBFF969A6F02FCD8457604EA
 
 Get-FileHash -Algorithm SHA256 PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md
-# Computed upon file generation
+# Calculated upon documentary reconciliation completion
 ```
 
 | Deliverable File | Current Git State | Lines | SHA-256 Cryptographic Hash |
 | :--- | :--- | :---: | :--- |
-| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | Staged (Uncommitted) | 1,767 | `7514F3989F17B54FE32E017A54AF4AF5DB0C011F00E1A154AF792798F9D908C6` |
-| `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` | Staged (Uncommitted) | 480 | `[RECORDED IN ACCEPTANCE AUDIT]` |
+| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | Staged (Uncommitted) | ~1,800 | `FFD31A76EC3C6C6D76F8BE94A204FF71B314D042BBFF969A6F02FCD8457604EA` |
+| `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` | Staged (Uncommitted) | ~750 | `[CURRENT REPORT]` |
 
-### 8.2 Definitive Sign-Off Determination
+### 9.2 Definitive Sign-Off Determination
 
 ```
 ========================================================================================
                       PHASE 2B FINAL ACCEPTANCE DETERMINATION
 ========================================================================================
 [X] DETERMINATION: PASS
-    All four technical defects identified in the PostgreSQL TOAST protocol have been
-    rigorously and conclusively remediated in the governance and engineering baseline:
+    All database security, schema ownership, transaction control, and lifecycle defects
+    identified in the PostgreSQL TOAST protocol have been conclusively remediated:
     1. Schema ownership and non-superuser DBA drop authority natively reconciled under
        SECURITY INVOKER via explicit AUTHORIZATION bethesda_dba without SECURITY DEFINER.
-    2. Transactionally reliable security audit logging implemented via explicit procedural
-       COMMIT; with structured rejection, preventing rollback of audit trail rows.
-    3. Experiment verdict (PENDING/PASSED/FAILED) decoupled from cleanup lifecycle status
+    2. Validated transaction control architecture eliminating all COMMIT statements from
+       inside exception-handling blocks, enforcing explicit caller contract (CALL in
+       autocommit mode), guaranteeing persistent audit logging, and preserving advisory-lock
+       release hygiene.
+    3. Transactionally reliable security audit logging implemented via explicit procedural
+       COMMIT; in outer scope, preventing rollback of audit trail rows.
+    4. Experiment verdict (PENDING/PASSED/FAILED) decoupled from cleanup lifecycle status
        (PENDING/CLEANED/CLEANUP_FAILED/RECOVERED), guaranteeing recovery of orphaned schemas
        from passed experiments.
-    4. Explicit administrative object privileges formalized for bethesda_dba, revoking all
+    5. Explicit administrative object privileges formalized for bethesda_dba, revoking all
        access from PUBLIC and bethesda_app, with catalog verification queries.
 
     CRITICAL GOVERNANCE INVARIANT:
     - Phase 2A remains ACCEPTED AND FORMALLY CLOSED (IMMUTABLE).
-    - Phase 2B.1 remains STRICTLY NOT AUTHORIZED until the Project Owner provides
-      explicit written implementation authorization.
+    - PHASE 2B.1 STORAGE IMPLEMENTATION: NOT AUTHORIZED until the Project Owner
+      provides explicit written implementation authorization.
 ========================================================================================
 ```

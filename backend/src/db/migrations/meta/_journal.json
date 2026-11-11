@@ -120,6 +120,13 @@
       "when": 1794100000000,
       "tag": "0016_conversion_leases_and_concurrency",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1794200000000,
+      "tag": "0017_phase2b1_output_storage",
+      "breakpoints": true
     }
   ]
 }

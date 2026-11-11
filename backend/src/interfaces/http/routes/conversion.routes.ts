@@ -22,6 +22,10 @@ import { DrizzleSongVersionRepository } from '../../../repositories/version-repo
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
 import { SongService } from '../../../application/song-service.ts';
 import { ConversionJobService } from '../../../application/conversion-job-service.ts';
+import {
+  LocalFileSystemStorageProvider,
+  StorageNotFoundError,
+} from '../../../domain/storage/storage-provider.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { UnauthorizedError, ValidationError } from '../../../domain/errors.ts';
@@ -92,7 +96,15 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   const songRepo = new DrizzleSongRepository();
   const versionRepo = new DrizzleSongVersionRepository();
   const songService = new SongService(songRepo, versionRepo);
-  const conversionService = new ConversionJobService(songService);
+  const outputStorage = new LocalFileSystemStorageProvider('storage/outputs');
+  const conversionService = new ConversionJobService(
+    songService,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    outputStorage
+  );
 
   // 1. POST /api/v1/conversion/validate
   fastify.post('/validate', async (request, reply) => {
@@ -205,23 +217,63 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
     const { jobId } = request.params as { jobId: string };
     const job = await conversionService.getJob(jobId, user);
 
-    const details = job.errorDetails as any;
-    if (!details || !details.data) {
-      throw new ValidationError('El trabajo de conversión aún no cuenta con un archivo generado para descargar.');
+    // Verificación de política de ciclo de vida (Fase 2B.1 / CR-04)
+    if (job.prunedAt) {
+      return reply.status(410).send({
+        error: {
+          code: 'OUTPUT_PRUNED',
+          message:
+            'El archivo de salida ha sido podado según la política de retención. Los metadatos de la conversión y el historial continúan preservados.',
+        },
+      });
     }
 
+    const details = (job.errorDetails as any) || {};
     const filename = job.outputRef || 'conversion.txt';
-    const mimeType = details.mimeType || 'text/plain';
+    const mimeType = details.mimeType || 'application/octet-stream';
 
-    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-    reply.header('Content-Type', mimeType);
-
-    if (details.isBinary) {
-      const buffer = Buffer.from(details.data, 'base64');
-      return reply.status(200).send(buffer);
-    } else {
-      return reply.status(200).send(details.data);
+    // Modo 1 (Fase 2B.1): Descarga desde almacenamiento externo desacoplado
+    if (job.outputStorageKey) {
+      try {
+        const stream = await outputStorage.getStream(job.outputStorageKey);
+        reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+        reply.header('Content-Type', mimeType);
+        if (job.outputByteLength) {
+          reply.header('Content-Length', job.outputByteLength);
+        }
+        if (job.outputChecksumSha256) {
+          reply.header('ETag', `"${job.outputChecksumSha256}"`);
+        }
+        return reply.status(200).send(stream);
+      } catch (storageErr) {
+        if (storageErr instanceof StorageNotFoundError) {
+          return reply.status(404).send({
+            error: {
+              code: 'OUTPUT_FILE_NOT_FOUND',
+              message: 'El archivo generado no se encuentra en el almacenamiento de salidas.',
+            },
+          });
+        }
+        throw storageErr;
+      }
     }
+
+    // Modo 2 (Compatibilidad histórica Fase 2A): Carga en línea en errorDetails.data
+    if (details && details.data) {
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      reply.header('Content-Type', mimeType);
+
+      if (details.isBinary) {
+        const buffer = Buffer.from(details.data, 'base64');
+        return reply.status(200).send(buffer);
+      } else {
+        return reply.status(200).send(details.data);
+      }
+    }
+
+    throw new ValidationError(
+      'El trabajo de conversión aún no cuenta con un archivo generado para descargar.'
+    );
   });
 
   // 9. POST /api/v1/conversion/jobs/:jobId/commit

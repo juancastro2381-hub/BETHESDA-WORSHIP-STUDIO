@@ -227,6 +227,7 @@ export class ConversionEngine {
     }
 
     return {
+      canonicalPayload: transformedPayload,
       ...result,
       diagnostics: [...transformDiagnostics, ...result.diagnostics],
     };

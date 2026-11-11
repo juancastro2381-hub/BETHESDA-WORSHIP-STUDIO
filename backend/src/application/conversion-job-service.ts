@@ -24,6 +24,7 @@ import {
   type IBackgroundJobRepository,
   DrizzleBackgroundJobRepository,
 } from '../repositories/background-job-repository.ts';
+import path from 'node:path';
 import {
   ConversionEngine,
   FormatCapabilitiesEvaluator,
@@ -37,6 +38,10 @@ import {
   LocalFileSystemSourceStorageProvider,
   type ISourceStorageProvider,
 } from '../domain/ingestion/source-storage-provider.ts';
+import {
+  type IStorageProvider,
+  LocalFileSystemStorageProvider,
+} from '../domain/storage/storage-provider.ts';
 import {
   enqueueConversionJob,
   type ConversionJobPayload,
@@ -87,6 +92,7 @@ export class ConversionJobService {
   private readonly engine: ConversionEngine;
   private readonly jobRepo: IBackgroundJobRepository;
   private readonly storage: ISourceStorageProvider;
+  private readonly outputStorage: IStorageProvider;
   private readonly worker: ConversionWorker;
 
   public constructor(
@@ -94,12 +100,19 @@ export class ConversionJobService {
     jobRepository?: IBackgroundJobRepository,
     private readonly db: Database = defaultDb,
     customStorage?: ISourceStorageProvider,
-    customWorker?: ConversionWorker
+    customWorker?: ConversionWorker,
+    customOutputStorage?: IStorageProvider
   ) {
     this.engine = new ConversionEngine();
     this.jobRepo = jobRepository ?? new DrizzleBackgroundJobRepository(this.db);
     this.storage = customStorage ?? new LocalFileSystemSourceStorageProvider();
-    this.worker = customWorker ?? new ConversionWorker(this.db, this.storage, this.engine);
+    this.outputStorage =
+      customOutputStorage ?? new LocalFileSystemStorageProvider('storage/outputs');
+    this.worker =
+      customWorker ??
+      new ConversionWorker(this.db, this.storage, this.engine, undefined, {
+        outputStorage: this.outputStorage,
+      });
   }
 
   /**
@@ -565,6 +578,20 @@ export class ConversionJobService {
           : 'Autor Desconocido');
 
       // 5. Persistir en el catálogo canónico mediante SongService
+      let rawContentToPersist: string | null = null;
+      if (job.outputStorageKey && this.outputStorage) {
+        try {
+          const buf = await this.outputStorage.getBuffer(job.outputStorageKey);
+          if (!details?.isBinary) {
+            rawContentToPersist = buf.toString('utf-8');
+          }
+        } catch {
+          // No fatal si no se recupera el archivo en bruto; el grafo canónico ya reside en canonicalPayload
+        }
+      } else if (details?.data && !details?.isBinary) {
+        rawContentToPersist = details.data;
+      }
+
       const song = await songService.createSong({
         title,
         artist,
@@ -574,7 +601,7 @@ export class ConversionJobService {
           userId: user.id,
           sourceType: this.mapCategoryToFormat(details.targetFormat),
           filename: job.outputRef || job.inputRef,
-          rawContent: details?.data ? (details.isBinary ? null : details.data) : null,
+          rawContent: rawContentToPersist ?? undefined,
           importerName: 'ConversionJobService',
           importerVersion: '2.0.0',
         },
@@ -596,14 +623,22 @@ export class ConversionJobService {
           })
           .where(eq(songSources.id, sources[0].id));
       } else {
+        const sourceByteLength =
+          job.outputByteLength ?? (details?.data ? Buffer.byteLength(details.data) : 0);
+        const sourceChecksum =
+          job.outputChecksumSha256 ??
+          (details?.data
+            ? crypto.createHash('sha256').update(details.data).digest('hex')
+            : 'no-checksum');
+
         await tx.insert(songSources).values({
           userId: user.id,
           sourceType: this.mapCategoryToFormat(details.targetFormat),
           filename: job.outputRef || job.inputRef,
-          storagePath: details?.storageKey || 'conversion-result',
+          storagePath: job.outputStorageKey || details?.storageKey || 'conversion-result',
           mimeType: details?.mimeType || 'text/plain',
-          fileSizeBytes: Buffer.byteLength(details?.data || ''),
-          checksumSha256: crypto.createHash('sha256').update(details?.data || '').digest('hex'),
+          fileSizeBytes: sourceByteLength,
+          checksumSha256: sourceChecksum,
           jobId: job.id,
           songId: song.song.id,
           versionId: song.version.id,

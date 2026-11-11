@@ -9,6 +9,7 @@
 
 import crypto from 'node:crypto';
 import os from 'node:os';
+import path from 'node:path';
 import { and, eq, lt, or, sql } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
 import { backgroundJobs, type BackgroundJobRow } from '../db/schema.ts';
@@ -16,6 +17,10 @@ import {
   LocalFileSystemSourceStorageProvider,
   type ISourceStorageProvider,
 } from '../domain/ingestion/source-storage-provider.ts';
+import {
+  type IStorageProvider,
+  LocalFileSystemStorageProvider,
+} from '../domain/storage/storage-provider.ts';
 import {
   CONVERSION_QUEUE_NAME,
   type ConversionJobPayload,
@@ -120,6 +125,7 @@ export interface WorkerStopResult {
 export interface ConversionWorkerOptions {
   recoveryIntervalMs?: number;
   onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
+  outputStorage?: IStorageProvider;
 }
 
 export interface ValidatedWipEntry {
@@ -146,6 +152,7 @@ export class ConversionWorker {
   public readonly workerId: string;
   private readonly engine: ConversionEngine;
   private readonly storage: ISourceStorageProvider;
+  private readonly outputStorage: IStorageProvider;
   private readonly recoveryIntervalMs: number;
   private readonly onStageReached?: (stage: 'STAGE_A' | 'STAGE_B' | 'STAGE_C' | 'STAGE_D', jobId: string) => Promise<void> | void;
   private readonly activeJobIds = new Set<string>();
@@ -178,6 +185,9 @@ export class ConversionWorker {
       customWorkerId ??
       `worker_${process.pid}_${os.hostname()}_${crypto.randomUUID().slice(0, 8)}`;
     this.storage = customStorage ?? new LocalFileSystemSourceStorageProvider();
+    this.outputStorage =
+      options?.outputStorage ??
+      new LocalFileSystemStorageProvider('storage/outputs');
     this.engine = customEngine ?? new ConversionEngine();
     this.recoveryIntervalMs = options?.recoveryIntervalMs ?? ConversionWorker.DEFAULT_RECOVERY_INTERVAL_MS;
     this.onStageReached = options?.onStageReached;
@@ -1408,26 +1418,47 @@ export class ConversionWorker {
       const finalStatus = hasWarnings ? 'REVIEW_REQUIRED' : 'COMPLETED';
 
       const isBinary = exportResult.content instanceof Uint8Array;
-      const dataStr = isBinary
-        ? Buffer.from(exportResult.content as Uint8Array).toString('base64')
-        : (exportResult.content as string);
+      const outputBuffer = isBinary
+        ? Buffer.from(exportResult.content as Uint8Array)
+        : Buffer.from(exportResult.content as string, 'utf-8');
+
+      const outputChecksumSha256 = crypto.createHash('sha256').update(outputBuffer).digest('hex');
+      const outputByteLength = outputBuffer.byteLength;
+
+      // Determinación de extensión canónica para el archivo de salida
+      const rawExt = path.extname(exportResult.filename);
+      const ext = rawExt || (exportResult.targetFormat === 'CHORD_PRO' ? '.chordpro' : '.xml');
+      const casStorageKey = `outputs/${outputChecksumSha256}${ext}`;
+
+      // Persistir archivo binario/texto en el proveedor de almacenamiento desacoplado (Fase 2B.1)
+      const saveMetadata = await this.outputStorage.save(casStorageKey, outputBuffer, {
+        mimeType: exportResult.mimeType,
+        expectedChecksumSha256: outputChecksumSha256,
+      });
 
       const canonicalPayloadJSON = exportResult.canonicalPayload
         ? CanonicalSerializer.serialize(exportResult.canonicalPayload)
         : null;
 
       // Actualización atómica terminal sujeta al testigo de ejecución (CR-02 & CR-03)
+      // Desacoplando el payload masivo de PostgreSQL TOAST (Fase 2B.1)
       const [finalizedJob] = await this.db
         .update(backgroundJobs)
         .set({
           status: finalStatus,
           progress: 100,
           outputRef: exportResult.filename,
+          outputStorageKey: saveMetadata.storageKey,
+          outputChecksumSha256: saveMetadata.checksumSha256,
+          outputByteLength: saveMetadata.byteLength,
           errorDetails: {
             targetFormat: exportResult.targetFormat,
             mimeType: exportResult.mimeType,
             isBinary,
-            data: dataStr,
+            // NOTA: Se elimina 'data' masivo de errorDetails para mantener la tupla < 1500 bytes (Inlining en Heap)
+            outputStorageKey: saveMetadata.storageKey,
+            outputChecksumSha256: saveMetadata.checksumSha256,
+            outputByteLength: saveMetadata.byteLength,
             diagnostics: exportResult.diagnostics,
             canonicalPayload: canonicalPayloadJSON, // CR-06
             storageKey,

@@ -790,6 +790,11 @@ export const backgroundJobs = pgTable(
     leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
     heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
     committedSongId: uuid('committed_song_id').references(() => songs.id, { onDelete: 'set null' }),
+    // Fase 2B.1: Desacoplamiento de TOAST y almacenamiento externo de salidas
+    outputStorageKey: varchar('output_storage_key', { length: 512 }),
+    outputChecksumSha256: varchar('output_checksum_sha256', { length: 64 }),
+    outputByteLength: integer('output_byte_length'),
+    prunedAt: timestamp('pruned_at', { withTimezone: true }),
   },
   (table) => [
     index('idx_background_jobs_job_type').on(table.jobType),
@@ -800,6 +805,9 @@ export const backgroundJobs = pgTable(
     index('idx_background_jobs_lease_expires').on(table.leaseExpiresAt),
     index('idx_background_jobs_lease_token').on(table.leaseToken),
     uniqueIndex('idx_background_jobs_committed_song_id').on(table.committedSongId),
+    index('idx_background_jobs_output_storage_key').on(table.outputStorageKey),
+    index('idx_background_jobs_output_checksum').on(table.outputChecksumSha256),
+    index('idx_background_jobs_pruned_at').on(table.prunedAt),
   ]
 );
 

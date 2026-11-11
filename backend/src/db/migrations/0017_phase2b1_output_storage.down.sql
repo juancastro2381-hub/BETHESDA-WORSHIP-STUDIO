@@ -9,3 +9,4 @@ ALTER TABLE background_jobs
   DROP COLUMN IF EXISTS output_byte_length,
   DROP COLUMN IF EXISTS output_checksum_sha256,
   DROP COLUMN IF EXISTS output_storage_key;
+

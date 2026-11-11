@@ -12,3 +12,4 @@ ALTER TABLE background_jobs
 CREATE INDEX IF NOT EXISTS idx_background_jobs_output_storage_key ON background_jobs (output_storage_key);
 CREATE INDEX IF NOT EXISTS idx_background_jobs_output_checksum ON background_jobs (output_checksum_sha256);
 CREATE INDEX IF NOT EXISTS idx_background_jobs_pruned_at ON background_jobs (pruned_at);
+

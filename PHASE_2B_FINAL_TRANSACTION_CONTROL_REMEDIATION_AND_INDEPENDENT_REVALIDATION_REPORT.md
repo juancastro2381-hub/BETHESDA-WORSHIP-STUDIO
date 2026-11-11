@@ -8,7 +8,8 @@
 **Previous Verified Baseline SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d`  
 **Technical Transaction Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` (Subject: `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`, 2026-11-11 04:28:30 -0500)  
 **Initial Governance Closure Commit SHA:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (Subject: `PHASE 2B — FINAL TRANSACTION CONTROL REMEDIATION, INDEPENDENT VALIDATION & GOVERNANCE CLOSURE`, 2026-11-11 04:49:04 -0500)  
-**Pre-Patch Verified HEAD SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (Subject: `PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION`, 2026-11-11 04:57:58 -0500)  
+**Documentation Traceability Patch SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (Subject: `PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION`, 2026-11-11 04:57:58 -0500)  
+**Pre-Correction Verified HEAD SHA:** `35a9b81b67d607334c3640dae31a8fa51c73e2e4` (Subject: `PHASE 2B — FINAL DOCUMENTATION ACCURACY PATCH — NO ARCHITECTURAL REDESIGN`, 2026-11-11 05:05:11 -0500)  
 **Preflight Verification Status:** Clean working tree; tracking branch confirmed fully synchronized with `origin/feature/phase-1a-core-foundation`  
 **Audit Evaluation:** **PASS** *(Technical Transaction Architecture & Static PL/pgSQL Governance)*  
 **Empirical Gate Evaluation:** **CONDITIONAL PASS** *(Runtime Testing Pending Phase 2B.1 Staging Environment)*  
@@ -29,14 +30,14 @@ Your branch is up to date with 'origin/feature/phase-1a-core-foundation'.
 nothing to commit, working tree clean
 
 > git branch -vv
-* feature/phase-1a-core-foundation 71a7931 [origin/feature/phase-1a-core-foundation] PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION
+* feature/phase-1a-core-foundation 35a9b81 [origin/feature/phase-1a-core-foundation] PHASE 2B — FINAL DOCUMENTATION ACCURACY PATCH — NO ARCHITECTURAL REDESIGN
 
 > git log -n 5 --pretty=format:"%H %P %an %ad %s" --date=iso
+35a9b81b67d607334c3640dae31a8fa51c73e2e4 71a7931c61982fce5df5829511ec595a8985ddc2 juancastro2381-hub 2026-11-11 05:05:11 -0500 PHASE 2B — FINAL DOCUMENTATION ACCURACY PATCH — NO ARCHITECTURAL REDESIGN
 71a7931c61982fce5df5829511ec595a8985ddc2 6860df6c5cfe86836919a39dc9dc7687d2fae12c juancastro2381-hub 2026-11-11 04:57:58 -0500 PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION
 6860df6c5cfe86836919a39dc9dc7687d2fae12c 679b74e13cf9d2a4ec70c5d976abe2b963d8c598 juancastro2381-hub 2026-11-11 04:49:04 -0500 PHASE 2B — FINAL TRANSACTION CONTROL REMEDIATION, INDEPENDENT VALIDATION & GOVERNANCE CLOSURE
 679b74e13cf9d2a4ec70c5d976abe2b963d8c598 4a34620688b09bebe73fd07032af94e74e88e427 juancastro2381-hub 2026-11-11 04:28:30 -0500 FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION
 4a34620688b09bebe73fd07032af94e74e88e427 5408912565b4da4dda0992e83dae561be3c963f3 juancastro2381-hub 2026-11-11 04:02:06 -0500 PHASE 2B — FINAL DATABASE SECURITY AND LIFECYCLE CONSISTENCY REMEDIATION
-5408912565b4da4dda0992e83dae561be3c963f3 7b41667b6e963b7f734914cc4d656362a3a76e4d juancastro2381-hub 2026-11-11 03:41:10 -0500 PHASE 2B — FINAL SECURITY REMEDIATION AND ACCEPTANCE GATE
 ```
 
 ### 1.2 Declared Commit Reconciled Against Physical Git Graph
@@ -45,7 +46,7 @@ nothing to commit, working tree clean
 - **Exact Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598`
 - **Remediation Parent Commit SHA:** `4a34620688b09bebe73fd07032af94e74e88e427`
 - **Remediation Author & Date:** `juancastro2381-hub <juancastro2381@gmail.com>`, `2026-11-11 04:28:30 -0500`
-- **Pre-Patch Verified HEAD SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (Parent: `6860df6c5cfe86836919a39dc9dc7687d2fae12c`)
+- **Pre-Correction Verified HEAD SHA:** `35a9b81b67d607334c3640dae31a8fa51c73e2e4` (Parent: `71a7931c61982fce5df5829511ec595a8985ddc2`)
 - **Synchronization State:** Local `feature/phase-1a-core-foundation` is perfectly synchronized (`up to date`) with `origin/feature/phase-1a-core-foundation`.
 - **Comparison to Historical Baseline `7b41667b6e963b7f734914cc4d656362a3a76e4d`:**
   - `git diff --stat 7b41667b6e963b7f734914cc4d656362a3a76e4d..HEAD`:
@@ -65,7 +66,7 @@ nothing to commit, working tree clean
 | **Declared Remediation Commit vs. HEAD SHA in Report** | Report declared `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` as "Actual HEAD Commit SHA". | Physical Git inspection confirms `679b74e` is the exact commit for `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`, but it is an ancestor of HEAD, not the HEAD itself. | Report reconciled to distinguish declared remediation commit (`679b74e`) from branch HEAD, documenting parentage explicitly. |
 | **Phase 2A Baseline 40-Character SHA** | Matrix listed `d2b5631c5180f9dd285e683457a41ec5fa721ce8` as Phase 2A closure baseline. | Physical Git inspection confirms commit `d2b5631` has full 40-char SHA `d2b5631007cccdb6fdf1b660720040052f8144d2`. | Corrected full 40-character baseline SHA to `d2b5631007cccdb6fdf1b660720040052f8144d2` across all documentation. |
 | **PostgreSQL Transaction-Control Mechanics (CALL vs DO)** | Prior notes claimed all anonymous `DO` blocks are inherently atomic and forbid transaction control. | Official PostgreSQL 16 documentation confirms both top-level `CALL` and top-level `DO` support `COMMIT`/`ROLLBACK`; the universal prohibition applies to blocks with `EXCEPTION` handlers. | Corrected technical explanation to align with official PostgreSQL 16 docs, maintaining top-level `CALL` as the preferred, idiomatic cleanup standard. |
-| **Audit Durability Qualification** | Prior text claimed unconditional 100% audit persistence on disk. | Durability is guaranteed for committed transactions under `synchronous_commit = on`, but cannot protect against hard crashes (SIGKILL, OOM), storage failure, or network drops prior to commit. | Formally qualified audit durability guarantees and clearly documented physical failure boundaries. |
+| **Audit Durability Qualification** | Prior text claimed unconditional 100% audit persistence on disk. | Audit durability is achieved upon successful transaction commit under standard PostgreSQL durability (`synchronous_commit = on`) and configured storage guarantees, but cannot protect against hard crashes (SIGKILL, OOM), storage failure, or network drops prior to commit. | Formally qualified audit durability guarantees and clearly documented physical failure boundaries. |
 | **Transaction Control Validation Classification** | Potential ambiguity regarding whether TOAST protocol had been executed live. | Environment lacks active PostgreSQL engine; empirical test protocol has NOT been executed against staging cluster. | Explicitly classified technical architecture as **PASS** (Static AST/Engine Validation) and empirical gate as **CONDITIONAL PASS** pending Phase 2B.1 staging. |
 | **Remote Origin Synchronization** | Tracking branch synchronization required verification. | `git status` confirms `feature/phase-1a-core-foundation` was fully up to date with origin at preflight verification. | Verified remote synchronization status documented in both files. |
 | **Phase 2B.1 Storage Authorization Boundary** | Must remain unbreached. | Phase 2B.1 implementation remains strictly unauthorized until explicit PO sign-off. | Formally affirmed `PHASE 2B.1 STORAGE IMPLEMENTATION: STRICTLY NOT AUTHORIZED`. |
@@ -457,7 +458,7 @@ Execution Classification: STATIC VALIDATION ONLY (Runtime testing pending Phase 
 5. Advisory Lock Mechanics:
    - Lock ID: hashtext('bethesda_toast_schema_recovery_lock') (Deterministic 64-bit int).
    - Non-blocking try-lock prevents worker hang under contention.
-   - Unconditional release in outer block guarantees release across success or error paths.
+   - Unconditional release in outer block ensures release across success or error paths.
 ========================================================================================
 ```
 
@@ -515,9 +516,9 @@ ORDER BY grantee, routine_name, privilege_type;
 
 ---
 
-## 7. AUDIT PERSISTENCE GUARANTEES, SYSTEM BOUNDARIES & FAILURE MATRIX
+## 7. AUDIT PERSISTENCE ARCHITECTURE, SYSTEM BOUNDARIES & FAILURE MATRIX
 
-### 7.1 Detailed Categorization of Persistence Guarantees
+### 7.1 Detailed Categorization of Persistence Models
 
 ```mermaid
 flowchart TD
@@ -528,7 +529,7 @@ flowchart TD
     C1 --> C2[Execute Explicit COMMIT]
     C2 --> C3[Emit Diagnostic RAISE WARNING]
     C3 --> C4[Exit via RETURN]
-    C4 --> C5[Persistence: 100% Guaranteed on Disk]
+    C4 --> C5["Persistence: Durable upon Successful Commit (synchronous_commit=on)"]
     
     B -->|Category B: Unexpected Execution Failure| D[Assertion Error / SQL Syntax / DDL Timeout]
     D --> D1[PostgreSQL Backend Rolls Back In-Flight Tx]
@@ -536,7 +537,7 @@ flowchart TD
     D2 --> D3[Client Opens NEW Independent Transaction]
     D3 --> D4[UPDATE toast_execution_registry SET verdict='FAILED']
     D4 --> D5[Client finally Calls cleanup_toast_session]
-    D5 --> D6[Persistence: Guaranteed across reachable database connections]
+    D5 --> D6["Persistence: Committed via Secondary Tx across Reachable Connections"]
     
     B -->|Category C: Hard Process / Host Crash| E[SIGKILL / OOM Killer / Power Loss / Network Severed]
     E --> E1[Backend Process Dies; Socket Closed]
@@ -546,7 +547,7 @@ flowchart TD
     E4 --> E5[Administrative Recovery Sweep Runs after Threshold]
     E5 --> E6[Verifies PID is Dead via pg_stat_activity]
     E6 --> E7[Drops Schema, Updates Registry to RECOVERED, Writes SUCCESS Audit Log]
-    E7 --> E8[Persistence: Registry Guaranteed; Crash Inferred via Sweep]
+    E7 --> E8["Persistence: Registry Persisted in Tx 1; Crash Inferred via Sweep"]
 ```
 
 ### 7.2 The 12-Scenario Exhaustive Failure Matrix (FS-01 through FS-12)
@@ -589,19 +590,20 @@ flowchart TD
 
   3. STRUCTURED REJECTION AUDIT PERSISTENCE:
      Category A operational and security rejections (unauthorized caller, invalid threshold,
-     lock contention) write audit records and issue COMMIT before returning, guaranteeing
-     100% durable audit persistence on disk.
+     lock contention) write audit records and issue COMMIT before returning, preventing
+     exception rollback; durability is achieved upon successful commit under standard
+     synchronous_commit = on and configured storage guarantees.
 
   4. ADVISORY LOCK SAFETY:
      In recover_abandoned_toast_schemas, pg_advisory_unlock is positioned unconditionally
-     in the outer procedure body prior to transaction termination, guaranteeing the lock
-     is released on success or handled error. On hard backend termination, PostgreSQL
-     kernel resource cleanup automatically releases all session-level advisory locks.
+     in the outer procedure body prior to transaction termination, ensuring procedural lock
+     release on success or handled error. On hard backend termination, PostgreSQL kernel
+     resource cleanup automatically releases all session-level advisory locks.
 
   5. DECOUPLED DUAL-STATE LIFECYCLE RECOVERY:
      The orthogonal separation of experiment_verdict (PENDING, PASSED, FAILED) and
-     cleanup_status (PENDING, CLEANED, CLEANUP_FAILED, RECOVERED) guarantees that schemas
-     from passed experiments whose cleanup failed or crashed will be swept by recovery.
+     cleanup_status (PENDING, CLEANED, CLEANUP_FAILED, RECOVERED) ensures that schemas from
+     passed experiments whose cleanup failed or crashed will be swept by recovery.
 
 [NON-GUARANTEED / BOUNDARY CONDITIONS (ENVIRONMENTAL & PHYSICAL LIMITATIONS)]
   1. NO AUTONOMOUS TRANSACTIONS:
@@ -611,11 +613,12 @@ flowchart TD
      client orchestrator opening a separate transaction once connectivity is confirmed.
 
   2. QUALIFIED AUDIT DURABILITY & HARD CRASH BOUNDARIES:
-     Explicit COMMIT guarantees durability to the WAL under standard synchronous_commit = on.
-     However, instantaneous hard crashes (SIGKILL, OS OOM killer, power outage) occurring
-     before COMMIT, severed network connections, or physical storage controller faults cannot
-     be trapped or committed by procedural code. Recovery for uncommitted crashes relies on the
-     committed Step 1 registry row and subsequent dead-PID sweeps by administrative recovery.
+     Explicit COMMIT ensures durability to the WAL under standard synchronous_commit = on
+     and configured storage guarantees. However, instantaneous hard crashes (SIGKILL, OS
+     OOM killer, power outage) occurring before COMMIT, severed network connections, or
+     physical storage controller faults cannot be trapped or committed by procedural code.
+     Recovery for uncommitted crashes relies on the committed Step 1 registry row and
+     subsequent dead-PID sweeps by administrative recovery.
 
   3. PRE-AUTHORIZATION ENVIRONMENT LIMITATION:
      Live runtime execution against physical PostgreSQL 16 database clusters has NOT yet
@@ -673,6 +676,6 @@ Based on rigorous static AST evaluation, PL/pgSQL transaction invariant modeling
 
 | Deliverable | SHA-256 Checksum | Status |
 | :--- | :--- | :--- |
-| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | `4440ED3A471EF73BB267FF8E146EE02D3713F387E1F8C64DF8D57A5991A4617C` | Updated & Reconciled |
+| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | `77ED182448C5DBFC53E39707BA383D8C708AB0B5CEC2EC996C581F149771795C` | Updated & Reconciled |
 | `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` | `41EEA6D96B29C2D520E3A7CD6E85BD7AD3637C8B71E53660CC9F5D505CA1CB7B` | Baseline Gate Report |
 

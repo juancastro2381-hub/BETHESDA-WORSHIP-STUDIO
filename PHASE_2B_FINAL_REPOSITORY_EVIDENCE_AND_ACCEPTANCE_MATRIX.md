@@ -11,7 +11,8 @@
 **Previous Verified Baseline SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d`  
 **Technical Transaction Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` (2026-11-11 04:28:30 -0500)  
 **Initial Governance Closure Commit SHA:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (2026-11-11 04:49:04 -0500)  
-**Pre-Patch Verified HEAD SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500)  
+**Documentation Traceability Patch SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500)  
+**Pre-Correction Verified HEAD SHA:** `35a9b81b67d607334c3640dae31a8fa51c73e2e4` (2026-11-11 05:05:11 -0500)  
 **Verification State:** Clean working tree; tracking branch synchronized with `origin/feature/phase-1a-core-foundation`  
 **Target Document Path:** `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md`  
 
@@ -41,8 +42,9 @@ Physical Git inspection of the commit Directed Acyclic Graph (DAG) confirms the 
 3. **Security Reconciliation Intermediate Commit:** `4a34620688b09bebe73fd07032af94e74e88e427` (2026-11-11 04:02:06 -0500, Subject: `PHASE 2B — FINAL DATABASE SECURITY AND LIFECYCLE CONSISTENCY REMEDIATION`)
 4. **Technical Transaction Remediation Commit:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` (2026-11-11 04:28:30 -0500, Subject: `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`)
 5. **Initial Governance Closure Commit:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (2026-11-11 04:49:04 -0500, Subject: `PHASE 2B — FINAL TRANSACTION CONTROL REMEDIATION, INDEPENDENT VALIDATION & GOVERNANCE CLOSURE`)
-6. **Pre-Patch Verified HEAD Commit:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500, Subject: `PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION`)
-- **Remote Synchronization:** The tracking branch `origin/feature/phase-1a-core-foundation` was confirmed fully synchronized at commit `71a7931c61982fce5df5829511ec595a8985ddc2` at preflight verification time.
+6. **Documentation Traceability Patch Commit:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500, Subject: `PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION`)
+7. **Pre-Correction Verified HEAD Commit:** `35a9b81b67d607334c3640dae31a8fa51c73e2e4` (2026-11-11 05:05:11 -0500, Subject: `PHASE 2B — FINAL DOCUMENTATION ACCURACY PATCH — NO ARCHITECTURAL REDESIGN`)
+- **Remote Synchronization:** The tracking branch `origin/feature/phase-1a-core-foundation` was confirmed fully synchronized at commit `35a9b81b67d607334c3640dae31a8fa51c73e2e4` at preflight verification time.
 
 ### 2.2 Confirmation of Governance Deliverables in Repository History
 Commit history demonstrates that all governance audit documents are preserved and tracked across the linear commit history:
@@ -86,7 +88,7 @@ A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631
 | **Declared Remediation Commit vs. HEAD SHA in Report** | Report declared `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` as "Actual HEAD Commit SHA". | Physical Git inspection confirms `679b74e` is the exact commit for `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`, but it is an ancestor of HEAD, not the HEAD itself. | Report reconciled to distinguish declared remediation commit (`679b74e`) from branch HEAD, documenting parentage explicitly. |
 | **Phase 2A Baseline 40-Character SHA** | Matrix listed `d2b5631c5180f9dd285e683457a41ec5fa721ce8` as Phase 2A closure baseline. | Physical Git inspection confirms commit `d2b5631` has full 40-char SHA `d2b5631007cccdb6fdf1b660720040052f8144d2`. | Corrected full 40-character baseline SHA to `d2b5631007cccdb6fdf1b660720040052f8144d2` across all documentation. |
 | **PostgreSQL Transaction-Control Mechanics (CALL vs DO)** | Prior notes claimed all anonymous `DO` blocks are inherently atomic and forbid transaction control. | Official PostgreSQL 16 documentation confirms both top-level `CALL` and top-level `DO` support `COMMIT`/`ROLLBACK`; the universal prohibition applies to blocks with `EXCEPTION` handlers. | Corrected technical explanation to align with official PostgreSQL 16 docs, maintaining top-level `CALL` as the preferred, idiomatic cleanup standard. |
-| **Audit Durability Qualification** | Prior text claimed unconditional 100% audit persistence on disk. | Durability is guaranteed for committed transactions under `synchronous_commit = on`, but cannot protect against hard crashes (SIGKILL, OOM), storage failure, or network drops prior to commit. | Formally qualified audit durability guarantees and clearly documented physical failure boundaries. |
+| **Audit Durability Qualification** | Prior text claimed unconditional 100% audit persistence on disk. | Audit durability is achieved upon successful transaction commit under standard PostgreSQL durability (`synchronous_commit = on`) and configured storage guarantees, but cannot protect against hard crashes (SIGKILL, OOM), storage failure, or network drops prior to commit. | Formally qualified audit durability guarantees and clearly documented physical failure boundaries. |
 | **Transaction Control Validation Classification** | Potential ambiguity regarding whether TOAST protocol had been executed live. | Environment lacks active PostgreSQL engine; empirical test protocol has NOT been executed against staging cluster. | Explicitly classified technical architecture as **PASS** (Static AST/Engine Validation) and empirical gate as **CONDITIONAL PASS** pending Phase 2B.1 staging. |
 | **Remote Origin Synchronization** | Tracking branch synchronization required verification. | `git status` confirms `feature/phase-1a-core-foundation` was fully up to date with origin at preflight verification. | Verified remote synchronization status documented in both files. |
 | **Phase 2B.1 Storage Authorization Boundary** | Must remain unbreached. | Phase 2B.1 implementation remains strictly unauthorized until explicit PO sign-off. | Formally affirmed `PHASE 2B.1 STORAGE IMPLEMENTATION: STRICTLY NOT AUTHORIZED`. |
@@ -721,11 +723,11 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
    - **Procedural Transaction Control Solution:** PL/pgSQL stored procedures (PostgreSQL 11+) support explicit transaction management (`COMMIT;`).
    - **Structured Rejection Flow:** For all security validation failures and operational rejections:
      1. The procedure inserts an audit entry into `bethesda_dba.toast_recovery_audit_log` detailing the rejection reason (`REJECTED_UNAUTHORIZED`, `REJECTED_INVALID_THRESHOLD`, `ABORTED_LOCK_CONTENTION`).
-     2. The procedure immediately executes an explicit `COMMIT;`, forcing the WAL flush and guaranteeing physical persistence of the security audit entry on disk.
+     2. The procedure immediately executes an explicit `COMMIT;`, flushing WAL records under standard PostgreSQL durability (`synchronous_commit = on`) so the security audit entry persists to durable storage upon successful commit.
      3. The procedure emits a diagnostic `RAISE WARNING` / `RAISE NOTICE` with contextual failure details.
      4. The procedure terminates execution cleanly via `RETURN;`, preventing unhandled exceptions from destroying the committed audit record.
-   - **Audit Guarantees Boundary:**
-     - *Guaranteed Persistent:* Unauthorized execution attempts by non-DBA callers, invalid or unsafe threshold arguments (< 5 minutes, NULL, negative), advisory lock contention aborts, dry-run reports, successful drops, and handled runtime errors commit reliably to disk.
+   - **Audit Durability Boundaries:**
+     - *Committed Audit Durability (Expected Rejections):* Unauthorized execution attempts by non-DBA callers, invalid or unsafe threshold arguments (< 5 minutes, NULL, negative), advisory lock contention aborts, dry-run reports, successful drops, and handled runtime errors are committed to disk upon transaction commit under the configured PostgreSQL durability settings.
      - *PostgreSQL Engine Boundaries:* Abrupt process terminations (`SIGKILL`, OOM killer), host power failures, or severed TCP connections before the database engine receives statements cannot be trapped by procedural PL/pgSQL. These boundaries are captured at the infrastructure layer via PostgreSQL server logging:
        ```ini
        log_connections = on
@@ -1795,7 +1797,7 @@ Issue 5: Copyright Provenance & CC0 Dedication
   - PostgreSQL `src/include/access/htup_details.h`: `HEAP_HASEXTERNAL = 0x0004`.
 - **Corrected Specification:**
   - **Schema Ownership Reconciliation:** Schema creation in Step 1 explicitly assigns authorization: `CREATE SCHEMA ... AUTHORIZATION bethesda_dba`. Tables inherit ownership by `bethesda_dba`. `bethesda_dba` can natively drop temporary schemas under `SECURITY INVOKER` without superuser privileges and without `SECURITY DEFINER` elevation. `bethesda_dba_superuser` is granted membership in `bethesda_dba` (`GRANT bethesda_dba TO bethesda_dba_superuser;`).
-  - **Transactionally Reliable Structured Rejection Logging:** Stored procedures use explicit transaction control (`COMMIT;`) to persist audit entries in `bethesda_dba.toast_recovery_audit_log` before returning `RAISE WARNING` / `RETURN;`, preventing exception-triggered rollback. Formal distinction documented between guaranteed audit persistence and PostgreSQL engine boundaries (abrupt client disconnects, SIGKILL).
+  - **Transactionally Reliable Structured Rejection Logging:** Stored procedures use explicit transaction control (`COMMIT;`) to persist audit entries in `bethesda_dba.toast_recovery_audit_log` before returning `RAISE WARNING` / `RETURN;`, preventing exception-triggered rollback. Formal distinction documented between committed audit persistence and PostgreSQL engine boundaries (abrupt client disconnects, SIGKILL).
   - **Decoupled Dual-State Lifecycle:** `bethesda_dba.toast_execution_registry` decouples `experiment_verdict` (`PENDING`, `PASSED`, `FAILED`) from `cleanup_status` (`PENDING`, `CLEANED`, `CLEANUP_FAILED`, `RECOVERED`). Administrative recovery inspects `cleanup_status IN ('PENDING', 'CLEANUP_FAILED')`, guaranteeing reclamation of orphaned schemas from all runs.
   - **Explicit Administrative Object Privileges:** Formalized complete DDL granting explicit object privileges (`USAGE`, `SELECT`, `INSERT`, `UPDATE`, `EXECUTE`) to `bethesda_dba`, revoking all from `PUBLIC` and `bethesda_app`, defining default privileges, and providing system catalog verification queries.
   - Formally implemented the session cleanup procedure `bethesda_dba.cleanup_toast_session(UUID, TEXT)` with `SECURITY INVOKER`, structured rejection, parameter validation, caller authorization check, and safe schema drop.
@@ -1858,11 +1860,11 @@ PostgreSQL does not natively support autonomous transactions (such as Oracle's `
 
 To provide truthful, auditable persistence guarantees, the architecture strictly categorizes failure modes:
 
-| Category | Failure Type | Mechanism & Persistence Guarantee | Limitation Boundary |
+| Category | Failure Type | Mechanism & Persistence Model | Limitation Boundary |
 | :--- | :--- | :--- | :--- |
-| **Category A** | **Expected Business / Operational Rejections** (e.g., unauthorized caller, invalid threshold, lock contention) | **Structured Diagnostic Rejection:** The procedure inserts an audit entry into `bethesda_dba.toast_recovery_audit_log`, issues an explicit `COMMIT;` (forcing WAL write to disk), emits a diagnostic `RAISE WARNING`, and exits via `RETURN;`. **Persistence: 100% Guaranteed.** | Caller must not wrap `CALL` in a client-side transaction block. |
-| **Category B** | **Unexpected Execution Failures** (e.g., dynamic SQL error, `DROP SCHEMA` lock timeout, constraint violation) | **Subtransaction-Segregated Trap + Client Orchestrator:** Dynamic DDL is wrapped in an inner `BEGIN ... EXCEPTION` sub-block with zero transaction control. In the outer procedure scope, the failure is recorded in `toast_execution_registry` and committed. If an unhandled client-level error occurs, the client orchestrator opens a NEW independent transaction to log failure details. **Persistence: Guaranteed across reachable database connections.** | Requires healthy database connectivity for the second transaction. |
-| **Category C** | **Hard Process / Connection Termination** (e.g., `SIGKILL`, OOM killer, severed TCP socket, power loss) | **Persistent Registry + Administrative Recovery:** No procedural code can trap a process kill at the instant of death. However, Step 1 registry initialization committed in Transaction 1. The administrative recovery procedure (`recover_abandoned_toast_schemas`) identifies dead PID executions after abandonment threshold and reclaims schemas. **Persistence: Registry guaranteed; in-flight crash details inferred via recovery sweep.** | Instantaneous crash stack traces cannot be written to database by a terminated process. |
+| **Category A** | **Expected Business / Operational Rejections** (e.g., unauthorized caller, invalid threshold, lock contention) | **Structured Diagnostic Rejection:** The procedure inserts an audit entry into `bethesda_dba.toast_recovery_audit_log`, issues an explicit `COMMIT;` (flushing WAL under standard `synchronous_commit = on`), emits a diagnostic `RAISE WARNING`, and exits via `RETURN;`. **Persistence: Durable upon successful transaction commit under standard PostgreSQL durability.** | Caller must not wrap `CALL` in a client-side transaction block; durability depends on configured storage guarantees. |
+| **Category B** | **Unexpected Execution Failures** (e.g., dynamic SQL error, `DROP SCHEMA` lock timeout, constraint violation) | **Subtransaction-Segregated Trap + Client Orchestrator:** Dynamic DDL is wrapped in an inner `BEGIN ... EXCEPTION` sub-block with zero transaction control. In the outer procedure scope, the failure is recorded in `toast_execution_registry` and committed. If an unhandled client-level error occurs, the client orchestrator opens a NEW independent transaction to log failure details. **Persistence: Committed via secondary transaction across reachable database connections.** | Requires healthy database connectivity for the second transaction. |
+| **Category C** | **Hard Process / Connection Termination** (e.g., `SIGKILL`, OOM killer, severed TCP socket, power loss) | **Persistent Registry + Administrative Recovery:** No procedural code can trap a process kill at the instant of death. However, Step 1 registry initialization was committed in Transaction 1. The administrative recovery procedure (`recover_abandoned_toast_schemas`) identifies dead PID executions after abandonment threshold and reclaims schemas. **Persistence: Registry persisted in Transaction 1; in-flight crash details inferred via recovery sweep.** | Instantaneous crash stack traces cannot be written to database by a terminated process. |
 
 ### 12.4 Client-Side Two-Transaction Defensive Orchestration Model
 Because PostgreSQL lacks autonomous transactions, automated test runners (such as Jest / Node.js in Phase 2B.1) must implement the Two-Transaction Defensive Orchestration Pattern:
@@ -1905,12 +1907,12 @@ try {
 }
 ```
 
-### 12.5 Advisory Lock Lifecycle, Contention Handling & Guaranteed Outer Release
+### 12.5 Advisory Lock Lifecycle, Contention Handling & Unconditional Outer Release
 In `bethesda_dba.recover_abandoned_toast_schemas`, concurrency is controlled via an explicit session-level advisory lock:
 1. **Acquisition:** `SELECT pg_try_advisory_lock(hashtext('bethesda_toast_schema_recovery_lock')) INTO v_lock_acquired;`
 2. **Contention:** Non-blocking attempt. If another recovery worker holds the lock, the procedure logs `ABORTED_LOCK_CONTENTION`, executes `COMMIT;`, emits a diagnostic warning, and exits via `RETURN;`.
 3. **Loop Execution:** Candidate schemas are locked with `FOR UPDATE OF reg SKIP LOCKED`. Each dynamic `DROP SCHEMA` executes inside an inner exception block without `COMMIT;`.
-4. **Guaranteed Release:** `PERFORM pg_advisory_unlock(hashtext('bethesda_toast_schema_recovery_lock'));` is positioned unconditionally in the outer procedure body prior to transaction termination, ensuring the lock is never leaked even on catastrophic loop failure.
+4. **Unconditional Release:** `PERFORM pg_advisory_unlock(hashtext('bethesda_toast_schema_recovery_lock'));` is positioned unconditionally in the outer procedure body prior to transaction termination, ensuring the lock is never leaked even on catastrophic loop failure.
 5. **Crash Resilience:** If the backend process crashes or terminates abruptly, PostgreSQL automatically frees all session-level advisory locks as part of standard backend resource cleanup.
 
 ### 12.6 Independent SQL Static AST Validation Matrix
@@ -1946,7 +1948,7 @@ In `bethesda_dba.recover_abandoned_toast_schemas`, concurrency is controlled via
      returning, preventing transaction abort rollbacks.
   4. Top-level CALL invocations outside client transaction blocks guarantee non-atomic
      execution contexts (estate->atomic = false).
-  5. Decoupled dual-state lifecycle (experiment_verdict vs cleanup_status) guarantees that
+  5. Decoupled dual-state lifecycle (experiment_verdict vs cleanup_status) ensures that
      temporary schemas from passed experiments can be reclaimed if cleanup fails.
 
 [NON-GUARANTEED / BOUNDARY CONDITIONS (ENVIRONMENTAL & PHYSICAL LIMITATIONS)]
@@ -1956,11 +1958,12 @@ In `bethesda_dba.recover_abandoned_toast_schemas`, concurrency is controlled via
      that transaction. Durable failure logging for Category B failures requires an external
      client orchestrator opening a separate transaction once connectivity is confirmed.
   2. QUALIFIED AUDIT DURABILITY & HARD CRASH BOUNDARIES:
-     Explicit COMMIT guarantees durability to the WAL under standard synchronous_commit = on.
-     However, instantaneous hard crashes (SIGKILL, OS OOM killer, power outage) occurring
-     before COMMIT, severed network connections, or physical storage controller faults cannot
-     be trapped or committed by procedural code. Recovery for uncommitted crashes relies on the
-     committed Step 1 registry row and subsequent dead-PID sweeps by administrative recovery.
+     Explicit COMMIT ensures durability to the WAL under standard synchronous_commit = on
+     and configured storage guarantees. However, instantaneous hard crashes (SIGKILL, OS
+     OOM killer, power outage) occurring before COMMIT, severed network connections, or
+     physical storage controller faults cannot be trapped or committed by procedural code.
+     Recovery for uncommitted crashes relies on the committed Step 1 registry row and
+     subsequent dead-PID sweeps by administrative recovery.
   3. PRE-AUTHORIZATION ENVIRONMENT LIMITATION:
      Runtime execution against live PostgreSQL 16 database infrastructure has NOT yet been
      performed in this pre-authorization phase. All findings represent rigorous static

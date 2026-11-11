@@ -4,3 +4,4 @@ DROP INDEX IF EXISTS idx_cas_deletion_intents_key;
 DROP INDEX IF EXISTS idx_cas_deletion_intents_state;
 DROP TABLE IF EXISTS cas_deletion_intents;
 DROP TYPE IF EXISTS cas_deletion_state;
+

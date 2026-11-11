@@ -494,3 +494,4 @@ All test suites were executed with Node.js v24.12.0 and TypeScript `tsx` against
 > [!IMPORTANT]
 > **GATE NOTICE — PHASE 2B.2 IS NOT AUTHORIZED**  
 > In strict accordance with the Project Owner's instructions, Phase 2B.2 (ASCII Tab Conversion Architecture), Phase 2B.3, Phase 2B.4, and Phase 2B.5 remain strictly **UNAUTHORIZED**. No code, schema migrations, or architectural artifacts for Phase 2B.2 have been introduced. The system now awaits formal Project Owner acceptance.
+

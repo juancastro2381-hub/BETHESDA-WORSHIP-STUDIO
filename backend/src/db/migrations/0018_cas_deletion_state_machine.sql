@@ -31,3 +31,4 @@ CREATE TABLE IF NOT EXISTS cas_deletion_intents (
 
 CREATE INDEX IF NOT EXISTS idx_cas_deletion_intents_state ON cas_deletion_intents (state);
 CREATE INDEX IF NOT EXISTS idx_cas_deletion_intents_key ON cas_deletion_intents (storage_key);
+

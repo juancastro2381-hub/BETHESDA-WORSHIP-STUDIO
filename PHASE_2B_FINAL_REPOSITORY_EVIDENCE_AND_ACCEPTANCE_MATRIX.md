@@ -1,13 +1,13 @@
 # BETHESDA WORSHIP STUDIO
 # PHASE 2B — FINAL REPOSITORY EVIDENCE AND ACCEPTANCE MATRIX
 ## DEFINITIVE PRE-IMPLEMENTATION GOVERNANCE & ENGINEERING BASELINE
-### (INCORPORATING PROJECT OWNER'S FINAL PROTOCOL SAFETY CORRECTIONS)
+### (INCORPORATING PROJECT OWNER'S FINAL PROTOCOL SAFETY & SECURITY REMEDIATIONS)
 
 **Audit Date:** 2026-11-11  
-**Auditor Roles:** Principal Software Architect, Principal PostgreSQL Internals Engineer, Database Security Engineer, AWS S3 Storage Architect, and Independent Technical Auditor  
+**Auditor Roles:** Principal Software Architect, Principal PostgreSQL Database Engineer, Independent Database Security Auditor, AWS S3 Storage Architect, and MIR Specialist  
 **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`  
 **Branch:** `feature/phase-1a-core-foundation`  
-**Current Branch HEAD SHA:** `a7b75a236ddf3bd461e182cd4095f754e2650448` (Synchronized with `origin`)  
+**Current Branch HEAD SHA:** `b0b6c8a2c582597122f6064986887455e53eb288` (Synchronized with `origin`)  
 **Historical Phase 2A Closure Baseline:** `d2b5631c5180f9dd285e683457a41ec5fa721ce8` / `ddb0e82`  
 **Target Document Path:** `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md`  
 
@@ -20,7 +20,7 @@
                                 GOVERNANCE STATUS GATE
 ========================================================================================
   PHASE 2A:              ACCEPTED AND FORMALLY CLOSED — IMMUTABLE BASELINE
-  PHASE 2B:              DOCUMENTARY RECONCILIATION COMPLETE — PROTOCOL SAFETY CERTIFIED
+  PHASE 2B:              DOCUMENTARY RECONCILIATION COMPLETE — PROTOCOL REMEDIATION CERTIFIED
   PHASE 2B.1 STORAGE:    STRICTLY NOT AUTHORIZED (Awaiting Project Owner Sign-Off)
   REPOSITORY CODEBASE:   100% PRESERVED — ZERO CODE / SCHEMA / MIGRATION CHANGES
 ========================================================================================
@@ -30,40 +30,28 @@
 
 ## 2. REPOSITORY TRACEABILITY & COMMIT EVIDENCE RECONCILIATION
 
-### 2.1 Correction of Stale HEAD References
-A documentary defect in previous draft reports recorded the repository HEAD as `e09d116dfb09a7a4fbf4eef7cfe42f776a6b9c67`.
-
+### 2.1 Branch HEAD Verification
 Physical Git inspection confirms:
-- **Actual HEAD SHA:** `a7b75a236ddf3bd461e182cd4095f754e2650448`
-- **Commit Subject:** `a7b75a2 PHASE 2B — FINAL TECHNICAL ACCEPTANCE & RISK CLOSURE`
-- **Commit Timestamp:** `Wed Nov 11 02:00:06 2026 -0500`
+- **Actual HEAD SHA:** `b0b6c8a2c582597122f6064986887455e53eb288`
+- **Commit Subject:** `b0b6c8a PHASE 2B — FINAL POSTGRESQL TOAST PROTOCOL SAFETY CORRECTION`
+- **Commit Timestamp:** `Wed Nov 11 03:08:26 2026 -0500`
 - **Synchronization:** `HEAD` and `origin/feature/phase-1a-core-foundation` are identical and synchronized.
 
-### 2.2 Confirmation of Four Governance Deliverables in Repository History
-Commit `a7b75a2` committed four pre-implementation governance deliverables into repository history:
-1. `PHASE_2B_FINAL_TECHNICAL_ASSURANCE_AND_GOVERNANCE_CLOSURE.md` (496 lines)
-2. `PHASE_2B_FINAL_ENGINEERING_DEFECT_RECONCILIATION.md` (406 lines)
-3. `PHASE_2B_FINAL_FOUR_DEFECT_CLOSURE.md` (465 lines)
-4. `PHASE_2B_FINAL_TECHNICAL_ACCEPTANCE_AND_RISK_CLOSURE.md` (580 lines)
+### 2.2 Confirmation of Five Historical Governance Deliverables in Repository History
+Commit history demonstrates that the governance audit documents are preserved and tracked:
+1. `PHASE_2B_FINAL_TECHNICAL_ASSURANCE_AND_GOVERNANCE_CLOSURE.md` (committed in `a7b75a2`)
+2. `PHASE_2B_FINAL_ENGINEERING_DEFECT_RECONCILIATION.md` (committed in `a7b75a2`)
+3. `PHASE_2B_FINAL_FOUR_DEFECT_CLOSURE.md` (committed in `a7b75a2`)
+4. `PHASE_2B_FINAL_TECHNICAL_ACCEPTANCE_AND_RISK_CLOSURE.md` (committed in `a7b75a2`)
+5. `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` (committed in `b0b6c8a`)
 
 ### 2.3 Repository Integrity Verification (Diff vs. Phase 2A Baseline)
-A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631`) and current HEAD (`a7b75a2`) proves:
+A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631`) and current HEAD (`b0b6c8a`) proves:
 - **Application source files (`.ts`, `.tsx`, `.js`):** `0 lines changed`
 - **Database schema definitions & migrations (`.sql`, `schema.ts`):** `0 lines changed`
 - **Package manifests (`package.json`, lockfiles):** `0 lines changed`
 - **Automated test suites (`__tests__`):** `0 lines changed`
-- **Total delta:** Exactly 6 documentation/governance markdown files added (+2,790 lines), zero code changes.
-
-```
-git diff --stat d2b5631..a7b75a2
- PHASE_2B_ARCHITECTURAL_PROPOSAL_REVIEW_AND_REQUIRED_CORRECTIONS.md | 489 +++++++++++++++++
- PHASE_2B_FINAL_ENGINEERING_DEFECT_RECONCILIATION.md                | 406 +++++++++++++++
- PHASE_2B_FINAL_FOUR_DEFECT_CLOSURE.md                             | 465 +++++++++++++++++
- PHASE_2B_FINAL_PRE_IMPLEMENTATION_GOVERNANCE_AND_ACCEPTANCE_BASELINE.md | 354 +++++++++++++
- PHASE_2B_FINAL_TECHNICAL_ACCEPTANCE_AND_RISK_CLOSURE.md           | 580 +++++++++++++++++++++
- PHASE_2B_FINAL_TECHNICAL_ASSURANCE_AND_GOVERNANCE_CLOSURE.md       | 496 ++++++++++++++++++
- 6 files changed, 2790 insertions(+)
-```
+- **Total delta:** Exactly 7 documentation/governance markdown files added (+3,978 lines), zero code changes.
 
 ---
 
@@ -644,30 +632,36 @@ If `row_count === 0`, another worker superseded the lease; the current worker ab
 ### 6.1 Status: `NOT EXECUTED — PENDING PHASE 2B.1`
 This empirical experiment has **NOT YET BEEN EXECUTED** against live database infrastructure. It is specified as the mandatory acceptance gate to be run during Phase 2B.1 integration testing.
 
-### 6.2 Technical Nuances & Safety Invariants
-1. **Destructive Schema Safety & Unique Execution Isolation:**
-   - Previous designs using static schema names (`test_scratch`) and `DROP SCHEMA ... CASCADE` were vulnerable to deleting pre-existing, unrelated database objects.
-   - The corrected protocol generates a cryptographically random, execution-specific schema identifier: `toast_test_<32_hex_chars>`.
-   - The protocol explicitly verifies that the schema **did not previously exist** and verifies **strict ownership by `current_user`** before and after the run.
-   - Cleanup drops **only** the unique execution schema created by the specific test run. If ownership or naming checks fail, cleanup aborts fail-closed without dropping anything.
-2. **Pageinspect Prerequisite Verification (Zero Extension Modification):**
+### 6.2 Architectural Safety, Session Contract & Security Invariants
+1. **Single Session Execution Contract:**
+   - The entire 6-step protocol **MUST execute within a single, persistent, non-pooled PostgreSQL client session** (e.g. a dedicated `psql -v ON_ERROR_STOP=1` script execution or a single dedicated Node.js `pg.Client` instance).
+   - Switching connections across a connection pool (`pg.Pool`) between steps is **strictly prohibited**, as `bethesda.toast_test_schema` is a session-scoped configuration parameter.
+   - If session context is lost (`current_setting('bethesda.toast_test_schema', true)` is null), the script aborts immediately without touching any database state.
+2. **Pageinspect Privilege & Staging DBA Execution Model:**
    - The protocol **never** executes `CREATE EXTENSION` or `DROP EXTENSION`.
-   - `pageinspect` is treated as a strict infrastructure prerequisite managed by database administrators.
-   - Step 1 verifies `SELECT 1 FROM pg_extension WHERE extname = 'pageinspect'`. If absent, the experiment aborts immediately with a clear prerequisite diagnostic.
-3. **Exact 1500-Byte Inline Payload Guarantee:**
+   - `pageinspect` is treated as a pre-existing infrastructure component installed by the DBA.
+   - Step 1 verifies both extension presence (`SELECT 1 FROM pg_extension WHERE extname = 'pageinspect'`) AND explicit execution privileges via `has_function_privilege()` on `heap_page_items(bytea)` and `get_raw_page()`.
+   - **Security Invariant:** In PostgreSQL 11+, `pageinspect` functions are restricted to superusers or members of `pg_read_all_stats`. **Granting superuser or `pg_read_all_stats` to the application runtime role (`bethesda_app`) is strictly forbidden.** This experiment is executed exclusively by an authorized staging DBA role (`bethesda_dba`).
+3. **Failure-Safe Independent Cleanup & Abandoned Schema Recovery:**
+   - Step 5 evaluates assertions, records the verdict, and prints detailed diagnostics without raising premature transaction-aborting exceptions.
+   - **Step 6 executes unconditionally in an isolated transaction** to drop `toast_test_<uuid>`, ensuring the test schema is never orphaned even if assertions fail.
+   - Step 6 validates naming pattern `^toast_test_[0-9a-f]{32}$` and strict `current_user` ownership before issuing `DROP SCHEMA ... CASCADE`.
+   - An administrative maintenance recovery query is provided for cleaning up schemas if a client disconnects unexpectedly.
+4. **Exact 1500-Byte Inline Payload Guarantee:**
    - The inline payload is mathematically constructed with exact prefix, suffix, and computed character padding such that `octet_length(v_payload_inline) = 1500`.
    - An explicit prerequisite assertion verifies `octet_length(v_payload_inline) = 1500` before insertion; if the length differs by even 1 byte, the experiment aborts.
-4. **Deterministic Out-of-Line Storage via `STORAGE EXTERNAL`:**
-   - To guarantee physical out-of-line TOAST externalization without relying on compression entropy assumptions, the test table column is explicitly configured:
-     `ALTER TABLE ... ALTER COLUMN error_payload SET STORAGE EXTERNAL;`
+5. **Deterministic Out-of-Line Storage via `STORAGE EXTERNAL`:**
+   - The test table column is explicitly configured: `ALTER TABLE ... ALTER COLUMN error_payload SET STORAGE EXTERNAL;`
    - In PostgreSQL, `STORAGE EXTERNAL` permits out-of-line storage while **completely disabling TOAST compression**.
    - The payload is generated using 300 ordered MD5 hashes (`string_agg(md5(i::text), '' ORDER BY i)`), producing exactly 9600 bytes. At 9600 bytes without compression, the datum is mathematically guaranteed to exceed `TOAST_TUPLE_THRESHOLD` ($2048$ bytes at 8 KB page size) and externalize into dedicated TOAST chunks.
+6. **NULL-Safe Acceptance Assertions:**
+   - All comparisons use `IS DISTINCT FROM` to ensure that any missing, unrecorded, or `NULL` measurement results in an unambiguous `FAILED` verdict, never an accidental `PASSED`.
 
-### 6.3 Complete Two-Phase Reproducible Test Protocol
+### 6.3 Complete Six-Step Reproducible Test Protocol
 
 ```sql
 -- =============================================================================
--- STEP 1: PREREQUISITE AUDIT & UNIQUE EXECUTION ISOLATION (TRANSACTION 1)
+-- STEP 1: PREREQUISITE & PRIVILEGE AUDIT, UNIQUE SCHEMA INITIALIZATION (TX 1)
 -- =============================================================================
 DO $$
 DECLARE
@@ -675,29 +669,45 @@ DECLARE
   v_test_schema TEXT;
   v_block_size INT;
   v_toast_threshold INT;
+  v_has_priv_raw BOOLEAN;
+  v_has_priv_items BOOLEAN;
 BEGIN
-  -- 1. Infrastructure Prerequisite Check: pageinspect MUST be pre-installed
+  -- 1. Verify pageinspect extension availability
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pageinspect') THEN
-    RAISE EXCEPTION 'PREREQUISITE FAILED: Extension "pageinspect" is not installed. Pre-requisite DBA installation required.';
+    RAISE EXCEPTION 'PREREQUISITE FAILED: Extension "pageinspect" is not installed in database. Pre-requisite DBA installation required.';
   END IF;
 
-  -- 2. Query server block size and calculate mathematical TOAST threshold
+  -- 2. Verify EXECUTE privilege on pageinspect functions for current user
+  v_has_priv_items := has_function_privilege(current_user, 'heap_page_items(bytea)', 'EXECUTE');
+  
+  -- Handle version differences for get_raw_page (text, int4 or int8)
+  BEGIN
+    v_has_priv_raw := has_function_privilege(current_user, 'get_raw_page(text, int8)', 'EXECUTE');
+  EXCEPTION WHEN undefined_function THEN
+    v_has_priv_raw := has_function_privilege(current_user, 'get_raw_page(text, int4)', 'EXECUTE');
+  END;
+
+  IF NOT (v_has_priv_items AND v_has_priv_raw) THEN
+    RAISE EXCEPTION 'PRIVILEGE AUDIT FAILED: User % lacks EXECUTE privilege on pageinspect functions. Must execute under DBA or pg_read_all_stats role.', current_user;
+  END IF;
+
+  -- 3. Query server block size and calculate mathematical TOAST threshold
   SELECT current_setting('block_size')::int INTO v_block_size;
   v_toast_threshold := v_block_size / 4; -- Exactly 2048 for standard 8KB pages
 
-  -- 3. Generate unique execution-specific schema identifier
+  -- 4. Generate unique execution-specific schema identifier
   v_exec_id := replace(gen_random_uuid()::text, '-', '');
   v_test_schema := 'toast_test_' || v_exec_id;
 
-  -- 4. Safety Guard: Abort if schema unexpectedly exists
+  -- 5. Safety Guard: Abort if schema unexpectedly exists
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = v_test_schema) THEN
     RAISE EXCEPTION 'CRITICAL: Unique test schema % already exists. Aborting safely.', v_test_schema;
   END IF;
 
-  -- 5. Create dedicated, isolated test schema
+  -- 6. Create dedicated, isolated test schema
   EXECUTE format('CREATE SCHEMA %I', v_test_schema);
 
-  -- 6. Verify schema ownership by current user
+  -- 7. Verify schema ownership by current user
   IF NOT EXISTS (
     SELECT 1 FROM pg_namespace n
     JOIN pg_roles r ON n.nspowner = r.oid
@@ -706,10 +716,10 @@ BEGIN
     RAISE EXCEPTION 'CRITICAL: Current user % does not own schema %. Aborting.', current_user, v_test_schema;
   END IF;
 
-  -- 7. Persist execution schema name in session configuration for cross-tx access
+  -- 8. Persist execution schema name in session configuration for cross-tx access
   PERFORM set_config('bethesda.toast_test_schema', v_test_schema, false);
 
-  -- 8. Create isolated unlogged test table with dedicated TOAST relation
+  -- 9. Create isolated unlogged test table with dedicated TOAST relation
   EXECUTE format(
     'CREATE UNLOGGED TABLE %I.toast_experiment_table (' ||
     '  id UUID PRIMARY KEY,' ||
@@ -719,13 +729,13 @@ BEGIN
     v_test_schema
   );
 
-  -- 9. Explicitly configure STORAGE EXTERNAL on test column (disables TOAST compression)
+  -- 10. Explicitly configure STORAGE EXTERNAL on test column (disables TOAST compression)
   EXECUTE format(
     'ALTER TABLE %I.toast_experiment_table ALTER COLUMN error_payload SET STORAGE EXTERNAL',
     v_test_schema
   );
 
-  -- 10. Create shared unlogged staging table to record metrics across transactions
+  -- 11. Create shared unlogged staging table to record metrics across transactions
   EXECUTE format(
     'CREATE UNLOGGED TABLE %I.toast_experiment_staging (' ||
     '  metric_key TEXT PRIMARY KEY,' ||
@@ -741,11 +751,11 @@ $$;
 COMMIT;
 
 -- =============================================================================
--- STEP 2: TEST A — INLINE ERROR PAYLOAD (EXACTLY 1500 BYTES) (TRANSACTION 2)
+-- STEP 2: TEST A — INLINE ERROR PAYLOAD (EXACTLY 1500 BYTES) (TX 2)
 -- =============================================================================
 DO $$
 DECLARE
-  v_test_schema TEXT := current_setting('bethesda.toast_test_schema');
+  v_test_schema TEXT := current_setting('bethesda.toast_test_schema', true);
   v_job_id_inline UUID := 'e0000000-0000-0000-0000-000000000001'::UUID;
   v_prefix TEXT := '{"status":"FAILED","errorCode":"ERR_CONVERSION_TIMEOUT","errorDetails":{"stackTrace":"';
   v_suffix TEXT := '","recoveryAction":"RETRY"}}';
@@ -754,6 +764,10 @@ DECLARE
   v_payload_inline TEXT;
   v_insert_sql TEXT;
 BEGIN
+  IF v_test_schema IS NULL THEN
+    RAISE EXCEPTION 'SESSION CONTEXT LOST: Configuration bethesda.toast_test_schema is missing.';
+  END IF;
+
   -- Calculate exact padding needed to hit 1500 bytes
   v_pad_len := v_target_length - octet_length(v_prefix) - octet_length(v_suffix);
   IF v_pad_len <= 0 THEN
@@ -763,7 +777,7 @@ BEGIN
   v_payload_inline := v_prefix || repeat('A', v_pad_len) || v_suffix;
 
   -- MANDATORY ACCEPTANCE ASSERTION: Exact octet length verification
-  IF octet_length(v_payload_inline) != 1500 THEN
+  IF octet_length(v_payload_inline) IS DISTINCT FROM 1500 THEN
     RAISE EXCEPTION 'ASSERTION FAILED: v_payload_inline length is % B (expected exactly 1500 B).', octet_length(v_payload_inline);
   END IF;
 
@@ -784,20 +798,24 @@ $$;
 COMMIT;
 
 -- =============================================================================
--- STEP 3: TEST B — OUT-OF-LINE DETERMINISTIC PAYLOAD (9600 BYTES) (TRANSACTION 3)
+-- STEP 3: TEST B — OUT-OF-LINE DETERMINISTIC PAYLOAD (9600 BYTES) (TX 3)
 -- =============================================================================
 DO $$
 DECLARE
-  v_test_schema TEXT := current_setting('bethesda.toast_test_schema');
+  v_test_schema TEXT := current_setting('bethesda.toast_test_schema', true);
   v_job_id_toast UUID := 'e0000000-0000-0000-0000-000000000002'::UUID;
   v_payload_toast TEXT;
   v_insert_sql TEXT;
 BEGIN
+  IF v_test_schema IS NULL THEN
+    RAISE EXCEPTION 'SESSION CONTEXT LOST: Configuration bethesda.toast_test_schema is missing.';
+  END IF;
+
   -- Deterministic generation of 9600 bytes using ORDER BY i
   SELECT string_agg(md5(i::text), '' ORDER BY i) INTO v_payload_toast FROM generate_series(1, 300) i;
 
   -- MANDATORY ACCEPTANCE ASSERTION: Exact octet length verification
-  IF octet_length(v_payload_toast) != 9600 THEN
+  IF octet_length(v_payload_toast) IS DISTINCT FROM 9600 THEN
     RAISE EXCEPTION 'ASSERTION FAILED: v_payload_toast length is % B (expected exactly 9600 B).', octet_length(v_payload_toast);
   END IF;
 
@@ -818,11 +836,11 @@ $$;
 COMMIT;
 
 -- =============================================================================
--- STEP 4: PHYSICAL INSPECTION VIA PAGEINSPECT & CHUNK AUDIT (TRANSACTION 4)
+-- STEP 4: PHYSICAL INSPECTION VIA PAGEINSPECT & CHUNK AUDIT (TX 4)
 -- =============================================================================
 DO $$
 DECLARE
-  v_test_schema TEXT := current_setting('bethesda.toast_test_schema');
+  v_test_schema TEXT := current_setting('bethesda.toast_test_schema', true);
   v_toast_schema TEXT;
   v_toast_relname TEXT;
   v_job_inline UUID;
@@ -839,6 +857,10 @@ DECLARE
   v_toast_chunks BIGINT;
   v_count_sql TEXT;
 BEGIN
+  IF v_test_schema IS NULL THEN
+    RAISE EXCEPTION 'SESSION CONTEXT LOST: Configuration bethesda.toast_test_schema is missing.';
+  END IF;
+
   -- 1. Dynamically resolve dedicated TOAST table for isolated test table
   SELECT 
     quote_ident(n.nspname),
@@ -852,6 +874,10 @@ BEGIN
   JOIN pg_namespace n ON c_toast.relnamespace = n.oid
   WHERE n_main.nspname = v_test_schema AND c_main.relname = 'toast_experiment_table';
 
+  IF v_toast_relname IS NULL THEN
+    RAISE EXCEPTION 'CRITICAL: Failed to resolve dedicated TOAST relation for %.toast_experiment_table.', v_test_schema;
+  END IF;
+
   EXECUTE format('SELECT text_val::UUID FROM %I.toast_experiment_staging WHERE metric_key = $1', v_test_schema)
   INTO v_job_inline USING 'job_id_inline';
 
@@ -860,6 +886,10 @@ BEGIN
 
   EXECUTE format('SELECT text_val FROM %I.toast_experiment_staging WHERE metric_key = $1', v_test_schema)
   INTO v_orig_md5 USING 'original_toast_md5';
+
+  IF v_job_inline IS NULL OR v_job_toast IS NULL OR v_orig_md5 IS NULL THEN
+    RAISE EXCEPTION 'CRITICAL: Test staging identifiers could not be retrieved.';
+  END IF;
 
   -- 2. Inspect Test A (Inline Tuple)
   EXECUTE format('SELECT ctid, pg_column_size(error_payload) FROM %I.toast_experiment_table WHERE id = $1 FOR SHARE', v_test_schema)
@@ -900,25 +930,40 @@ BEGIN
     v_toast_chunks,
     CASE WHEN v_orig_md5 = v_retrieved_md5 THEN 'true' ELSE 'false' END;
 
-  RAISE NOTICE 'STEP 4 SUCCESS: Physical inspection complete. TOAST chunks = %.', v_toast_chunks;
+  RAISE NOTICE 'STEP 4 SUCCESS: Physical inspection complete. Dedicated TOAST chunks = %.', v_toast_chunks;
 END;
 $$;
 COMMIT;
 
 -- =============================================================================
--- STEP 5: VERDICT REPORT & GUARANTEED SAFE CLEANUP (TRANSACTION 5)
+-- STEP 5: NULL-SAFE VERDICT EVALUATION & REPORTING (TX 5)
+-- Evaluates assertions; records verdict without raising transaction abort
 -- =============================================================================
 DO $$
 DECLARE
-  v_test_schema TEXT := current_setting('bethesda.toast_test_schema');
+  v_test_schema TEXT := current_setting('bethesda.toast_test_schema', true);
   v_ext_inline TEXT;
   v_ext_toast TEXT;
   v_size_inline BIGINT;
   v_size_toast BIGINT;
   v_toast_chunks BIGINT;
   v_roundtrip TEXT;
+  v_test_row_count BIGINT;
+  v_failures TEXT[] := ARRAY[]::TEXT[];
+  v_verdict TEXT := 'PASSED';
 BEGIN
-  -- Read recorded metrics
+  IF v_test_schema IS NULL THEN
+    RAISE EXCEPTION 'SESSION CONTEXT LOST: Configuration bethesda.toast_test_schema is missing.';
+  END IF;
+
+  -- 1. Verify existence of both test records
+  EXECUTE format('SELECT count(*) FROM %I.toast_experiment_table', v_test_schema) INTO v_test_row_count;
+  IF v_test_row_count IS DISTINCT FROM 2 THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Record count mismatch: found % (expected exactly 2)', v_test_row_count));
+  END IF;
+
+  -- 2. Read recorded metrics
   EXECUTE format('SELECT text_val FROM %I.toast_experiment_staging WHERE metric_key = ''ext_inline''', v_test_schema) INTO v_ext_inline;
   EXECUTE format('SELECT text_val FROM %I.toast_experiment_staging WHERE metric_key = ''ext_toast''', v_test_schema) INTO v_ext_toast;
   EXECUTE format('SELECT bigint_val FROM %I.toast_experiment_staging WHERE metric_key = ''size_inline''', v_test_schema) INTO v_size_inline;
@@ -926,48 +971,107 @@ BEGIN
   EXECUTE format('SELECT bigint_val FROM %I.toast_experiment_staging WHERE metric_key = ''toast_chunks''', v_test_schema) INTO v_toast_chunks;
   EXECUTE format('SELECT text_val FROM %I.toast_experiment_staging WHERE metric_key = ''roundtrip_match''', v_test_schema) INTO v_roundtrip;
 
+  -- 3. Strict NULL-Safe Assertions
+  -- Assertion A: Test A inline external flag must be EXACTLY 'false'
+  IF v_ext_inline IS DISTINCT FROM 'false' THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Test A external flag is % (expected exactly false)', coalesce(v_ext_inline, 'NULL')));
+  END IF;
+
+  -- Assertion B: Test A column size must be <= 1500 bytes and not null
+  IF v_size_inline IS NULL OR v_size_inline > 1500 OR v_size_inline <= 0 THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Test A column size is % B (expected 1..1500 B)', coalesce(v_size_inline::text, 'NULL')));
+  END IF;
+
+  -- Assertion C: Test B out-of-line external flag must be EXACTLY 'true'
+  IF v_ext_toast IS DISTINCT FROM 'true' THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Test B external flag is % (expected exactly true)', coalesce(v_ext_toast, 'NULL')));
+  END IF;
+
+  -- Assertion D: Dedicated TOAST chunks allocated must be > 0 and not null
+  IF v_toast_chunks IS NULL OR v_toast_chunks <= 0 THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Dedicated TOAST chunks count is % (expected > 0)', coalesce(v_toast_chunks::text, 'NULL')));
+  END IF;
+
+  -- Assertion E: Round-trip data integrity match must be EXACTLY 'true'
+  IF v_roundtrip IS DISTINCT FROM 'true' THEN
+    v_verdict := 'FAILED';
+    v_failures := array_append(v_failures, format('Round-trip MD5 integrity is % (expected exactly true)', coalesce(v_roundtrip, 'NULL')));
+  END IF;
+
   RAISE NOTICE '=============================================================================';
   RAISE NOTICE 'TOAST EMPIRICAL EXPERIMENT VERDICT REPORT (SCHEMA: %):', v_test_schema;
-  RAISE NOTICE 'TEST A (1500 B Inline): ColSize = % B, HEAP_HASEXTERNAL = % (Expected: false)', v_size_inline, v_ext_inline;
-  RAISE NOTICE 'TEST B (9600 B External): ColSize = % B, HEAP_HASEXTERNAL = % (Expected: true)', v_size_toast, v_ext_toast;
-  RAISE NOTICE 'Dedicated TOAST Chunks Allocated: % (Expected: > 0)', v_toast_chunks;
-  RAISE NOTICE 'Round-Trip MD5 Hash Match: % (Expected: true)', v_roundtrip;
+  RAISE NOTICE 'TEST A (1500 B Inline): ColSize = % B, HEAP_HASEXTERNAL = %', v_size_inline, v_ext_inline;
+  RAISE NOTICE 'TEST B (9600 B External): ColSize = % B, HEAP_HASEXTERNAL = %', v_size_toast, v_ext_toast;
+  RAISE NOTICE 'Dedicated TOAST Chunks Allocated: %', v_toast_chunks;
+  RAISE NOTICE 'Round-Trip MD5 Hash Match: %', v_roundtrip;
+  RAISE NOTICE 'OVERALL VERDICT: %', v_verdict;
+  IF v_verdict = 'FAILED' THEN
+    RAISE WARNING 'FAILURE DETAILS: %', array_to_string(v_failures, ' | ');
+  ELSE
+    RAISE NOTICE 'ALL PHYSICAL CRITERIA MET. Inline boundary and out-of-line externalization certified.';
+  END IF;
   RAISE NOTICE '=============================================================================';
+END;
+$$;
+COMMIT;
 
-  -- Assertions
-  IF v_ext_inline = 'true' THEN
-    RAISE EXCEPTION 'TEST A FAILED: 1500-byte error payload triggered out-of-line TOAST.';
-  END IF;
-
-  IF v_ext_toast = 'false' OR v_toast_chunks <= 0 THEN
-    RAISE EXCEPTION 'TEST B FAILED: 9600-byte payload failed to externalize to TOAST chunks.';
-  END IF;
-
-  IF v_roundtrip != 'true' THEN
-    RAISE EXCEPTION 'TEST B FAILED: Retrieved out-of-line data corrupted (MD5 mismatch).';
-  END IF;
-
-  RAISE NOTICE 'FINAL VERDICT: ACCEPTED. Both inline boundary and out-of-line externalization certified.';
-
-  -- GUARANTEED SAFE CLEANUP: Verify pattern and ownership before drop
+-- =============================================================================
+-- STEP 6: DETERMINISTIC FAILURE-SAFE CLEANUP (TX 6)
+-- Executes unconditionally in an isolated transaction to guarantee zero schema orphaning
+-- =============================================================================
+DO $$
+DECLARE
+  v_test_schema TEXT := current_setting('bethesda.toast_test_schema', true);
+BEGIN
+  -- 1. Validate naming pattern strictly
   IF v_test_schema IS NULL OR v_test_schema !~ '^toast_test_[0-9a-f]{32}$' THEN
-    RAISE EXCEPTION 'CRITICAL SECURITY FAILURE: Schema name % does not match expected pattern. Refusing drop.', v_test_schema;
+    RAISE WARNING 'CLEANUP ABORTED: Invalid or missing schema identifier (%). Refusing drop.', v_test_schema;
+    RETURN;
   END IF;
 
+  -- 2. Verify schema existence and strict ownership by current_user
   IF NOT EXISTS (
     SELECT 1 FROM pg_namespace n
     JOIN pg_roles r ON n.nspowner = r.oid
     WHERE n.nspname = v_test_schema AND r.rolname = current_user
   ) THEN
-    RAISE EXCEPTION 'CRITICAL SECURITY FAILURE: Current user % does not own schema %. Refusing drop.', current_user, v_test_schema;
+    RAISE WARNING 'CLEANUP ABORTED: Schema % does not exist or is not owned by %. Refusing drop.', v_test_schema, current_user;
+    RETURN;
   END IF;
 
-  -- Safe drop of exclusively the unique execution schema
+  -- 3. Execute safe drop of exclusively the unique execution schema
   EXECUTE format('DROP SCHEMA %I CASCADE', v_test_schema);
   RAISE NOTICE 'CLEANUP SUCCESS: Schema % dropped safely with zero residual database impact.', v_test_schema;
 END;
 $$;
 COMMIT;
+```
+
+### 6.4 Abandoned Execution Schema Recovery Procedure
+If an administrative client session crashes or disconnects unexpectedly before Step 6 completes, the execution schema remains isolated under its unique name `toast_test_<32_hex_chars>`. The DBA executes the following recovery query to reclaim space safely:
+
+```sql
+-- ADMINISTRATIVE MAINTENANCE PROCEDURE: Abandoned Schema Cleanup
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  FOR r IN (
+    SELECT n.nspname
+    FROM pg_namespace n
+    JOIN pg_roles u ON n.nspowner = u.oid
+    WHERE n.nspname ~ '^toast_test_[0-9a-f]{32}$'
+      AND u.rolname = current_user
+  ) LOOP
+    EXECUTE format('DROP SCHEMA %I CASCADE', r.nspname);
+    RAISE NOTICE 'RECOVERY: Dropped abandoned experiment schema %', r.nspname;
+  END LOOP;
+END;
+$$;
 ```
 
 ---
@@ -1030,7 +1134,7 @@ To prevent premature closure declarations, observations are evaluated against fi
 | **OB-01** | **Rhythmic Data Integrity** | Synthetic ticks must not be fabricated for unmeasured tablatures. | Formalized two independent coordinate systems: (A) Musical Temporal vs (B) Visual Presentation. Unknown ticks remain explicitly `null` with `rhythmicProvenance = 'NONE'`. Multi-factor MIDI export gating enforced. | Zero artificial quarter notes or rests injected. MIDI export rejected when timing unknown. | Unit tests for `MidiExportGatekeeper` during Phase 2B.2. | Musician must manually align unmeasured tabs to get MIDI playback. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.2)** |
 | **OB-02** | **CAS S3 Versioning & Deletion** | Must handle S3 versioning (enabled, disabled, suspended), prevent key reuse after `PURGING`, and handle stale worker in-flight deletes. | Defined explicit VersionId deletion semantics, immutable key isolation on re-ingestion, irrevocable `PURGING` state, and CAS fenced database finalization. Decoupled PostgreSQL from S3. | Physical keys never reused once entering `PURGING`. Re-ingested objects receive new UUID keys. | S3 integration tests with versioned bucket in Phase 2B.1. | Eventual consistency delay on S3 bucket index listings. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.1)** |
 | **OB-03** | **Temporal Validator Specification** | Tuplet math was comparing single notes to scalar values. Must validate tuplet groups, full tie chains (START/CONT/STOP), pickup measures, and trailing silence. | Formulated exhaustive TypeScript specification covering tuplet group aggregation, rational arithmetic, continuous tie matching across measures, pickup measure exemption, trailing gap detection, and 5-phase validation sequence. | All tuplet ratios mathematically validated. Ties validated for pitch and temporal continuity. | Unit test suite in `temporal-validator.test.ts` during Phase 2B.2. | Implementation deferred to Phase 2B.2. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.2)** |
-| **OB-04** | **PostgreSQL TOAST Verification** | Protocol lacked schema safety, used compressible payloads, and had flawed length calculations. | Corrected protocol with unique execution schema (`toast_test_<uuid>`), safe ownership checks, exact 1500 B inline assertion, 9600 B deterministic payload (`ORDER BY i`), `STORAGE EXTERNAL`, and read-only `pageinspect` prerequisite check. | $\Delta \text{TOAST} \equiv 0$ for 1500 B; $\Delta \text{TOAST} > 0$ for 9600 B; `pageinspect` `t_infomask` verified. | Execution log during Phase 2B.1 DB staging test. | Requires `pageinspect` extension pre-installed on PostgreSQL server. | **DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1)** |
+| **OB-04** | **PostgreSQL TOAST Verification** | Protocol lacked schema safety, used compressible payloads, lacked failure-safe cleanup, and had nullable assertions. | Corrected 6-step protocol: unique execution schema (`toast_test_<uuid>`), failure-safe separate cleanup, NULL-safe assertions (`IS DISTINCT FROM`), single session contract, `pageinspect` privilege check, exact 1500 B assertion, 9600 B deterministic payload (`ORDER BY i`), `STORAGE EXTERNAL`. | $\Delta \text{TOAST} \equiv 0$ for 1500 B; $\Delta \text{TOAST} > 0$ for 9600 B; `pageinspect` `t_infomask` verified; cleanup executes unconditionally. | Execution log during Phase 2B.1 DB staging test. | Requires `pageinspect` execution privileges under staging DBA role. | **DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1)** |
 | **OB-05** | **Copyright Provenance** | Layered rights must be distinguished. Worldwide PD cannot rely solely on Colombian law. CC0 requires documentary evidence. Cabrera 1916 text needs archival proof. | Evaluated all 10 resources across 6 distinct copyright layers and 3 international jurisdictions. Unverified translations marked UNVERIFIED. Cabrera 1916 marked PD CLAIM — VERIFICATION REQUIRED. CC0 classified as declared pending formal waiver. | Zero unverified translations ingested as PD. Archival scan for Cabrera 1916. Formal CC0 dedication document executed. | Archival records for Cabrera 1916; Bethesda CC0 waiver document. | Modern hymnal editorial revisions may carry active derivative copyright. | **DOCUMENTATION RECONCILED — LEGAL EVIDENCE PENDING** |
 
 ---
@@ -1072,8 +1176,8 @@ Issue 3: CAS & S3 Versioning State Model
   - Code Reality: Schema migration 20261111_001_phase2b1_storage_schema.sql specified but unexecuted.
 
 Issue 4: PostgreSQL TOAST Empirical Experiment Protocol
-  - Previous Defect: Destructive static schema drop; payload length mismatch (1478 B vs 1500 B); compressible MD5 assumption.
-  - Corrected Spec: Unique execution schema (toast_test_<uuid>); exact 1500 B assertion; STORAGE EXTERNAL; pageinspect check.
+  - Previous Defect: Exceptions aborted cleanup; comparisons not NULL-safe; missing function privilege checks; connection switching risk.
+  - Corrected Spec: 6-step protocol; failure-safe unconditional cleanup (Step 6); NULL-safe assertions (IS DISTINCT FROM); single session contract; pageinspect privilege check; exact 1500 B assertion; STORAGE EXTERNAL.
   - Current Status: DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1).
   - Execution Reality: NOT EXECUTED — PENDING PHASE 2B.1 INTEGRATION TESTING.
 
@@ -1124,24 +1228,27 @@ Issue 5: Copyright Provenance & CC0 Dedication
 
 ---
 
-### Issue 3: PostgreSQL TOAST — Protocol Safety & Physical Measurement Invariants
+### Issue 3: PostgreSQL TOAST — Protocol Safety, Null-Safety & Execution Contract
 - **Technical Finding:**
-  1. **Destructive Cleanup Risk:** Static schema names (`test_scratch`) with `DROP SCHEMA ... CASCADE` present high operational risk if an existing schema by that name already contains unrelated objects.
-  2. **Payload Length Imprecision:** The previous inline template generated 1478 bytes, not the required 1500 bytes.
-  3. **Compression Nuance:** Statistical entropy alone does not guarantee zero compression. Configuring `STORAGE EXTERNAL` explicitly disables TOAST compression at the table engine level.
-  4. **Extension Hygiene:** `CREATE EXTENSION` modifies global database state and must be audited as a pre-requisite rather than installed dynamically.
+  1. **Premature Abort Schema Orphaning:** Raising exceptions during assertion evaluation prevents execution of subsequent `DROP SCHEMA` statements, leaving orphaned experimental schemas in the database.
+  2. **Nullable Logic Vulnerability:** Comparisons such as `v_ext_inline = 'true'` or `v_roundtrip != 'true'` evaluate to `NULL` (unknown) when inputs are null, allowing missing measurements to silently bypass assertions.
+  3. **Privilege Blindness:** Extension presence alone does not guarantee `EXECUTE` privileges on `get_raw_page()` and `heap_page_items()`.
+  4. **Connection Pool Switching Risk:** Relying on session configuration across connection pools risks context loss if steps execute on different backend PIDs.
 - **Authoritative Technical Documentation:**
   - PostgreSQL Documentation Chapter 68 (TOAST Internals): `STORAGE EXTERNAL` semantics and `TOAST_TUPLE_THRESHOLD`.
   - PostgreSQL `src/include/access/htup_details.h`: `HEAP_HASEXTERNAL = 0x0004`.
-  - PostgreSQL Documentation on Schema Management and Object Ownership (`pg_namespace`, `pg_roles`).
+  - PostgreSQL Documentation on Privilege Management: `has_function_privilege()`, `pg_read_all_stats`.
+  - PostgreSQL Documentation on Session Configuration Parameters: `set_config()`, `current_setting()`.
 - **Corrected Specification:**
-  - Designed the comprehensive, safe 5-step protocol in Section 6.3 incorporating:
-    - Cryptographic execution schema (`toast_test_<32_hex_chars>`) with pre-existence abort and ownership verification.
-    - Read-only `pageinspect` pre-requisite verification.
-    - Exact 1500-byte mathematical assertion (`octet_length = 1500`).
+  - Designed the comprehensive 6-step protocol in Section 6.3 incorporating:
+    - Dedicated Single Session Execution Contract (prohibits connection pool switching).
+    - Read-only `pageinspect` availability and execution privilege audit under the staging DBA role.
+    - Decoupled verdict evaluation (Step 5) with strict NULL-safe assertions (`IS DISTINCT FROM`).
+    - Unconditional, failure-safe cleanup (Step 6) dropping exclusively the verified execution schema.
+    - Exact 1500 B inline assertion (`octet_length = 1500`).
     - Explicit `STORAGE EXTERNAL` configuration on the isolated test table column.
     - Deterministic 9600-byte payload with `ORDER BY i`.
-    - Safe cleanup dropping exclusively the verified execution schema.
+    - Administrative abandoned schema recovery query.
 - **Implementation Status:** Maintained strictly as: **`NOT EXECUTED — PENDING PHASE 2B.1`**.
 - **Acceptance Implications:** The experiment will be executed against the staging database during Phase 2B.1 integration verification; full execution logs will serve as the empirical gate.
 
@@ -1174,11 +1281,11 @@ Issue 5: Copyright Provenance & CC0 Dedication
 ========================================================================================
                           PROJECT OWNER DECISION REQUEST
 ========================================================================================
-  [ ] APPROVE PHASE 2B DOCUMENTARY RECONCILIATION & AUTHORIZE PHASE 2B.1 COMMENCEMENT
+  [ ] APPROVE PHASE 2B PROTOCOL REMEDIATION & AUTHORIZE COMMENCEMENT OF PHASE 2B.1
       Authorize commencement of Phase 2B.1 implementation:
       - Execution of database migration 20261111_001_phase2b1_storage_schema.sql
       - Creation of S3 / MinIO storage adapter service and test suite.
-      - Execution of PostgreSQL TOAST two-phase empirical acceptance experiment.
+      - Execution of PostgreSQL TOAST certified six-step empirical acceptance experiment.
 
   [ ] REVISE SPECIFICATION
       Provide additional instructions before granting implementation authorization.

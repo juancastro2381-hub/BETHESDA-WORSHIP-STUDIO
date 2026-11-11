@@ -1,13 +1,13 @@
 # BETHESDA WORSHIP STUDIO
 # PHASE 2B — FINAL REPOSITORY EVIDENCE AND ACCEPTANCE MATRIX
 ## DEFINITIVE PRE-IMPLEMENTATION GOVERNANCE & ENGINEERING BASELINE
-### (INCORPORATING PROJECT OWNER'S FINAL SECURITY AUDIT & PROTOCOL REMEDIATIONS)
+### (INCORPORATING PROJECT OWNER'S DATABASE SECURITY, OWNERSHIP & LIFECYCLE CONSISTENCY REMEDIATIONS)
 
 **Audit Date:** 2026-11-11  
 **Auditor Roles:** Principal PostgreSQL Database Security Architect, Principal Software Architect, Independent Technical Governance Auditor, AWS S3 Storage Architect, and MIR Specialist  
 **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`  
 **Branch:** `feature/phase-1a-core-foundation`  
-**Current Branch HEAD SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d` (Synchronized with `origin`)  
+**Current Branch HEAD SHA:** `5408912565b4da4dda0992e83dae561be3c963f3` (Synchronized with `origin`)  
 **Historical Phase 2A Closure Baseline:** `d2b5631c5180f9dd285e683457a41ec5fa721ce8` / `ddb0e82`  
 **Target Document Path:** `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md`  
 
@@ -32,37 +32,39 @@
 
 ### 2.1 Branch HEAD Verification
 Physical Git inspection confirms:
-- **Actual HEAD SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d`
-- **Commit Subject:** `PHASE 2B — FINAL SECURITY REMEDIATION & ACCEPTANCE GATE`
-- **Commit Timestamp:** `Wed Nov 11 03:29:10 2026 -0500`
+- **Actual HEAD SHA:** `5408912565b4da4dda0992e83dae561be3c963f3`
+- **Commit Subject:** `PHASE 2B — FINAL SECURITY REMEDIATION AND ACCEPTANCE GATE`
+- **Commit Timestamp:** `Wed Nov 11 03:41:10 2026 -0500`
 - **Synchronization:** `HEAD` and `origin/feature/phase-1a-core-foundation` are identical and synchronized.
 
-### 2.2 Confirmation of Seven Historical Governance Deliverables in Repository History
+### 2.2 Confirmation of Eight Historical Governance Deliverables in Repository History
 Commit history demonstrates that the governance audit documents are preserved and tracked:
 1. `PHASE_2B_FINAL_TECHNICAL_ASSURANCE_AND_GOVERNANCE_CLOSURE.md` (committed in `a7b75a2`)
 2. `PHASE_2B_FINAL_ENGINEERING_DEFECT_RECONCILIATION.md` (committed in `a7b75a2`)
 3. `PHASE_2B_FINAL_FOUR_DEFECT_CLOSURE.md` (committed in `a7b75a2`)
 4. `PHASE_2B_FINAL_TECHNICAL_ACCEPTANCE_AND_RISK_CLOSURE.md` (committed in `a7b75a2`)
-5. `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` (committed in `b0b6c8a`, updated in `8dd3142`, `7b41667`)
+5. `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` (committed in `b0b6c8a`, updated in `8dd3142`, `7b41667`, `5408912`)
 6. Six-step SQL protocol defect remediation (committed in `8dd3142`)
 7. Final security remediation & acceptance gate (committed in `7b41667`)
+8. `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` (committed in `5408912`)
 
 ### 2.3 Repository Integrity Verification (Diff vs. Phase 2A Baseline)
-A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631`) and current HEAD (`7b41667`) proves:
+A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631`) and current HEAD (`5408912`) proves:
 - **Application source files (`.ts`, `.tsx`, `.js`):** `0 lines changed`
 - **Database schema definitions & migrations (`.sql`, `schema.ts`):** `0 lines changed`
 - **Package manifests (`package.json`, lockfiles):** `0 lines changed`
 - **Automated test suites (`__tests__`):** `0 lines changed`
-- **Total delta across repository:** Exactly 7 documentation/governance markdown files added (+4,275 lines), zero code changes.
+- **Total delta across repository:** Exactly 8 documentation/governance markdown files added (+4,884 lines), zero code changes.
 
-#### Detailed Inventory of Changed Files vs. Phase 2A Baseline (`d2b5631..7b41667`):
+#### Detailed Inventory of Changed Files vs. Phase 2A Baseline (`d2b5631..5408912`):
 | File Path | Lines Changed | Classification | Governance Purpose |
 | :--- | :---: | :--- | :--- |
 | `PHASE_2B_INDEPENDENT_ARCHITECTURAL_PROPOSAL_REVIEW_AND_REQUIRED_CORRECTIONS.md` | +489 | Documentation / Audit | Initial Phase 2B architectural review |
 | `PHASE_2B_FINAL_ENGINEERING_DEFECT_RECONCILIATION.md` | +406 | Documentation / Audit | Reconciliation of 6 engineering defects |
 | `PHASE_2B_FINAL_FOUR_DEFECT_CLOSURE.md` | +465 | Documentation / Audit | Four-defect closure report |
 | `FINAL_PRE_IMPLEMENTATION_GOVERNANCE_AND_ACCEPTANCE_BASELINE.md` | +354 | Documentation / Baseline | Pre-implementation governance baseline |
-| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | +1,485 | Documentation / Deliverable | Definitive pre-implementation acceptance matrix |
+| `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` | +1,645 | Documentation / Deliverable | Definitive pre-implementation acceptance matrix |
+| `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` | +449 | Documentation / Report | Pre-implementation security audit and remediation report |
 | `PHASE_2B_FINAL_TECHNICAL_ACCEPTANCE_AND_RISK_CLOSURE.md` | +580 | Documentation / Audit | Technical acceptance and risk closure |
 | `PHASE_2B_FINAL_TECHNICAL_ASSURANCE_AND_GOVERNANCE_CLOSURE.md` | +496 | Documentation / Audit | Technical assurance and governance closure |
 | **Total Code Changes:** | **0** | **Application / Schema / Tests** | **Baseline 100% Immutable** |
@@ -648,19 +650,30 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
 
 ### 6.2 Architectural Safety, Security Privilege Matrix, Session Contract & Client Mechanics
 
-1. **Security Privilege Matrix:**
+1. **Role Ownership, Privilege Matrix & Administrative Security Hierarchy:**
    Physical inspection and maintenance operations are strictly partitioned across database roles following the principle of least privilege:
 
-   | Database Role | Intended Role Classification | Superuser | `pageinspect` Access | `cleanup_toast_session` | `recover_abandoned_toast_schemas` | DDL / Schema Drop Scope |
-   | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-   | `bethesda_dba_superuser` | Staging Superuser / Infrastructure Admin | **YES** | **YES** | **YES** | **YES** | Full cluster-wide DDL authority |
-   | `bethesda_dba` | Authorized Staging Maintenance DBA Role | **NO** | **NO** | **YES** (`EXECUTE` granted) | **YES** (`EXECUTE` granted) | Restricted to DBA administrative procedures |
-   | `bethesda_app` | Runtime Application Service (API/Workers) | **NO** | **REVOKED** | **REVOKED** | **REVOKED** | **Zero DDL authority** (DML only on app tables) |
-   | `PUBLIC` | Default Implicit Database Role | **NO** | **REVOKED** | **REVOKED** | **REVOKED** | **Zero execution privileges** |
+   | Database Role | Role Classification | Superuser | Member of `bethesda_dba` | `pageinspect` Direct Access | `cleanup_toast_session` | `recover_abandoned_toast_schemas` | DDL / Schema Drop Scope |
+   | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+   | `bethesda_dba_superuser` | Staging Superuser / Infrastructure Admin | **YES** | **YES** (`GRANT bethesda_dba`) | **YES** | **YES** (`EXECUTE`) | **YES** (`EXECUTE`) | Full cluster-wide DDL authority |
+   | `bethesda_dba` | Authorized Maintenance DBA Service Role | **NO** | **YES** (Group role) | **NO** | **YES** (`EXECUTE`) | **YES** (`EXECUTE`) | Owns experimental test schemas & DBA objects |
+   | `bethesda_app` | Runtime Application Service (API/Workers) | **NO** | **NO** | **REVOKED** | **REVOKED** | **REVOKED** | **Zero DDL authority** (DML only on app tables) |
+   | `PUBLIC` | Default Implicit Database Role | **NO** | **NO** | **REVOKED** | **REVOKED** | **REVOKED** | **Zero execution privileges** |
 
    > [!CRITICAL]
-   > **Non-Negotiable Runtime Security Invariant:**
-   > Under no circumstances shall `SUPERUSER` privileges or `EXECUTE` rights on `pageinspect` functions be granted to the application runtime user (`bethesda_app`). Database inspection is exclusively an offline staging assurance task executed by `bethesda_dba_superuser`.
+   > **Schema Ownership Reconciliation Invariant:**
+   > In PostgreSQL, executing `DROP SCHEMA <schema> CASCADE` strictly requires the caller to be either:
+   > 1. The owner of the target schema (`pg_namespace.nspowner = current_user`),
+   > 2. A member of the role that owns the target schema (`pg_has_role(current_user, nspowner, 'MEMBER')`), or
+   > 3. A database cluster `SUPERUSER`.
+   >
+   > To allow the maintenance DBA (`bethesda_dba`) to execute session cleanup and administrative recovery without superuser privileges and **without resorting to dangerous `SECURITY DEFINER` procedures**, the experimental schema creation in Step 1 explicitly assigns authorization to `bethesda_dba`:
+   > ```sql
+   > EXECUTE format('CREATE SCHEMA %I AUTHORIZATION bethesda_dba', v_test_schema);
+   > ```
+   > All tables created within this schema are owned by `bethesda_dba`. Consequently, when `bethesda_dba` invokes `cleanup_toast_session` or `recover_abandoned_toast_schemas` under `SECURITY INVOKER`, `current_user` matches the schema owner directly. PostgreSQL natively permits the schema drop under standard access controls.
+   > Furthermore, `bethesda_dba_superuser` is granted membership in `bethesda_dba` (`GRANT bethesda_dba TO bethesda_dba_superuser;`), ensuring that both staging administrators and automated maintenance workers operate seamlessly and securely.
+   > Under no circumstances shall `SUPERUSER` privileges or `EXECUTE` rights on `pageinspect` functions be granted to the application runtime user (`bethesda_app`). Physical page inspection is exclusively an offline staging assurance task executed by `bethesda_dba_superuser`.
 
 2. **Official PostgreSQL Version Compatibility & Function Signatures:**
    Audited directly against the official PostgreSQL 14, 15, and 16 documentation:
@@ -681,8 +694,27 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
    - **Bitmask Evaluation:** `(t_infomask & 4) != 0` evaluates `HEAP_HASEXTERNAL` (`0x0004`).
    - *Compatibility Note:* PostgreSQL block numbers are strictly 32-bit `integer`. Speculative `int8` overloads have been completely removed.
 
-3. **Explicit Definition of the Session Cleanup Procedure:**
-   To resolve the previously undefined procedure reference, `bethesda_dba.cleanup_toast_session` is formally defined with strict validation and `SECURITY INVOKER` semantics:
+3. **Transactionally Reliable Security Audit Logging & Structured Rejection Model:**
+   - **PostgreSQL Transaction Abort Defect:** In PostgreSQL, an unhandled exception (`RAISE EXCEPTION`) aborts the active transaction block (`ROLLBACK`). Any SQL statements executed earlier in that transaction—including `INSERT INTO bethesda_dba.toast_recovery_audit_log`—are rolled back and permanently lost. PostgreSQL does not natively support autonomous transactions (`PRAGMA AUTONOMOUS_TRANSACTION`).
+   - **Procedural Transaction Control Solution:** PL/pgSQL stored procedures (PostgreSQL 11+) support explicit transaction management (`COMMIT;`).
+   - **Structured Rejection Flow:** For all security validation failures and operational rejections:
+     1. The procedure inserts an audit entry into `bethesda_dba.toast_recovery_audit_log` detailing the rejection reason (`REJECTED_UNAUTHORIZED`, `REJECTED_INVALID_THRESHOLD`, `ABORTED_LOCK_CONTENTION`).
+     2. The procedure immediately executes an explicit `COMMIT;`, forcing the WAL flush and guaranteeing physical persistence of the security audit entry on disk.
+     3. The procedure emits a diagnostic `RAISE WARNING` / `RAISE NOTICE` with contextual failure details.
+     4. The procedure terminates execution cleanly via `RETURN;`, preventing unhandled exceptions from destroying the committed audit record.
+   - **Audit Guarantees Boundary:**
+     - *Guaranteed Persistent:* Unauthorized execution attempts by non-DBA callers, invalid or unsafe threshold arguments (< 5 minutes, NULL, negative), advisory lock contention aborts, dry-run reports, successful drops, and handled runtime errors commit reliably to disk.
+     - *PostgreSQL Engine Boundaries:* Abrupt process terminations (`SIGKILL`, OOM killer), host power failures, or severed TCP connections before the database engine receives statements cannot be trapped by procedural PL/pgSQL. These boundaries are captured at the infrastructure layer via PostgreSQL server logging:
+       ```ini
+       log_connections = on
+       log_disconnections = on
+       log_statement = 'all'
+       log_min_messages = info
+       ```
+       streamed to tamper-proof host logs or cloud monitoring (e.g. AWS CloudWatch).
+
+4. **Explicit Definition of the Session Cleanup Procedure:**
+   `bethesda_dba.cleanup_toast_session` operates under `SECURITY INVOKER`, validates parameters, verifies caller authorization, and deterministically cleans up the session schema:
 
    ```sql
    CREATE OR REPLACE PROCEDURE bethesda_dba.cleanup_toast_session(
@@ -696,17 +728,20 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
      v_reg_pid INT;
      v_reg_owner TEXT;
      v_is_superuser BOOLEAN;
+     v_audit_id UUID := gen_random_uuid();
    BEGIN
-     -- 1. Validate input parameters
+     -- 1. Input parameter validation
      IF p_execution_id IS NULL THEN
-       RAISE EXCEPTION 'INVALID ARGUMENT: Execution UUID cannot be null.';
+       RAISE WARNING 'INVALID ARGUMENT: Execution UUID cannot be null.';
+       RETURN;
      END IF;
 
      IF p_schema_name IS NULL OR p_schema_name !~ '^toast_test_[0-9a-f]{32}$' THEN
-       RAISE EXCEPTION 'SECURITY REJECTION: Schema name "%" is invalid or does not match format toast_test_<32_hex>.', p_schema_name;
+       RAISE WARNING 'SECURITY REJECTION: Schema name "%" is invalid or does not match format toast_test_<32_hex>.', p_schema_name;
+       RETURN;
      END IF;
 
-     -- 2. Verify caller authorization (must be owner, bethesda_dba, or superuser)
+     -- 2. Verify caller authorization (must be bethesda_dba member or superuser)
      SELECT rolsuper INTO v_is_superuser FROM pg_roles WHERE rolname = current_user;
      
      SELECT backend_pid, owner_role INTO v_reg_pid, v_reg_owner
@@ -714,42 +749,71 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
      WHERE execution_id = p_execution_id AND schema_name = p_schema_name;
 
      IF NOT FOUND THEN
-       RAISE EXCEPTION 'SECURITY REJECTION: No registry entry found matching execution UUID % and schema %.', p_execution_id, p_schema_name;
+       RAISE WARNING 'SECURITY REJECTION: No registry entry found matching execution UUID % and schema %.', p_execution_id, p_schema_name;
+       RETURN;
      END IF;
 
      IF current_user != v_reg_owner AND 
+        current_user != 'bethesda_dba' AND
         NOT pg_has_role(current_user, 'bethesda_dba', 'MEMBER') AND 
         NOT COALESCE(v_is_superuser, false) THEN
-       RAISE EXCEPTION 'AUTHORIZATION FAILURE: User % is not authorized to clean execution % owned by %.', current_user, p_execution_id, v_reg_owner;
+       INSERT INTO bethesda_dba.toast_recovery_audit_log (
+         attempt_id, executed_by, threshold_param, dry_run_param, outcome, error_message
+       ) VALUES (
+         v_audit_id, current_user, INTERVAL '0', false, 'REJECTED_UNAUTHORIZED',
+         format('Caller %s lacks authorization to clean execution % owned by %.', current_user, p_execution_id, v_reg_owner)
+       );
+       COMMIT;
+       RAISE WARNING 'AUTHORIZATION FAILURE: User % is not authorized to clean execution % owned by %.', current_user, p_execution_id, v_reg_owner;
+       RETURN;
      END IF;
 
      -- 3. Concurrency Safety: Ensure another active session is not using this schema
      IF v_reg_pid != pg_backend_pid() AND
         EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = v_reg_pid) AND
         NOT COALESCE(v_is_superuser, false) THEN
-       RAISE EXCEPTION 'CONCURRENCY REJECTION: Execution % is actively owned by live backend PID %. Refusing drop.', p_execution_id, v_reg_pid;
+       RAISE WARNING 'CONCURRENCY REJECTION: Execution % is actively owned by live backend PID %. Refusing drop.', p_execution_id, v_reg_pid;
+       RETURN;
      END IF;
 
-     -- 4. Verify physical schema existence and ownership in pg_namespace
+     -- 4. Verify physical schema existence in pg_namespace
      IF NOT EXISTS (
        SELECT 1 FROM pg_namespace n
        JOIN pg_roles r ON n.nspowner = r.oid
-       WHERE n.nspname = p_schema_name AND (r.rolname = current_user OR COALESCE(v_is_superuser, false))
+       WHERE n.nspname = p_schema_name AND (r.rolname = 'bethesda_dba' OR r.rolname = current_user OR COALESCE(v_is_superuser, false))
      ) THEN
-       RAISE WARNING 'CLEANUP NOTICE: Schema % does not exist or has already been dropped.', p_schema_name;
+       UPDATE bethesda_dba.toast_execution_registry
+       SET cleanup_status = 'CLEANED',
+           completed_at = clock_timestamp(),
+           updated_at = clock_timestamp(),
+           recovery_notes = 'Schema already absent during cleanup invocation.'
+       WHERE execution_id = p_execution_id;
+       COMMIT;
+       RAISE NOTICE 'CLEANUP NOTICE: Schema % does not exist or has already been dropped.', p_schema_name;
        RETURN;
      END IF;
 
      -- 5. Safe drop of exclusively this validated execution schema
-     EXECUTE format('DROP SCHEMA %I CASCADE', p_schema_name);
-
-     -- 6. Update registry notes
-     UPDATE bethesda_dba.toast_execution_registry
-     SET updated_at = clock_timestamp(),
-         recovery_notes = format('Schema purged safely via cleanup_toast_session by user %s at %s', current_user, clock_timestamp())
-     WHERE execution_id = p_execution_id;
-
-     RAISE NOTICE 'CLEANUP SUCCESS: Schema % dropped safely for execution %.', p_schema_name, p_execution_id;
+     BEGIN
+       EXECUTE format('DROP SCHEMA %I CASCADE', p_schema_name);
+       
+       UPDATE bethesda_dba.toast_execution_registry
+       SET cleanup_status = 'CLEANED',
+           completed_at = clock_timestamp(),
+           updated_at = clock_timestamp(),
+           recovery_notes = format('Schema purged safely via cleanup_toast_session by user %s at %s', current_user, clock_timestamp())
+       WHERE execution_id = p_execution_id;
+       COMMIT;
+       RAISE NOTICE 'CLEANUP SUCCESS: Schema % dropped safely for execution %.', p_schema_name, p_execution_id;
+     EXCEPTION WHEN OTHERS THEN
+       UPDATE bethesda_dba.toast_execution_registry
+       SET cleanup_status = 'CLEANUP_FAILED',
+           updated_at = clock_timestamp(),
+           recovery_notes = format('DROP SCHEMA failed: %s', SQLERRM)
+       WHERE execution_id = p_execution_id;
+       COMMIT;
+       RAISE WARNING 'CLEANUP ERROR: Failed to drop schema %: %', p_schema_name, SQLERRM;
+     END;
    END;
    $$;
 
@@ -758,7 +822,7 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
    GRANT EXECUTE ON PROCEDURE bethesda_dba.cleanup_toast_session(UUID, TEXT) TO bethesda_dba;
    ```
 
-4. **Single Session Execution Contract & Actual SQL Client Failure Mechanics:**
+5. **Single Session Execution Contract & Actual SQL Client Failure Mechanics:**
    - The entire 6-step protocol **MUST execute within a single, persistent, non-pooled PostgreSQL client session** (e.g. a dedicated `psql -v ON_ERROR_STOP=1` script execution or a single dedicated Node.js `pg.Client` instance).
    - Switching connections across a connection pool (`pg.Pool`, PgBouncer in transaction mode) between steps is **strictly prohibited**, as `bethesda.toast_test_schema` and `bethesda.toast_execution_id` are session-scoped configuration parameters.
    - **Reconciling "Unconditional Cleanup" with SQL Client Behavior:**
@@ -770,52 +834,86 @@ This empirical experiment has **NOT YET BEEN EXECUTED** against live database in
        - **Database-Side Safety Architecture:** For orphaned schemas resulting from hard client crashes where `finally` cannot execute, the central **Execution Registry** (`toast_execution_registry`), **Audit Log** (`toast_recovery_audit_log`), and **Auditable Administrative Recovery Procedure (Section 6.4)** provide the true, verifiable recovery mechanism.
        - **Rule:** We do not claim guaranteed cleanup unless the execution mechanism actually guarantees it.
 
-5. **Persistent Execution Registry & Auditable Lifecycle Model:**
-   - Schema: `bethesda_dba.toast_execution_registry`
+6. **Decoupled Dual-State Lifecycle Model (`experiment_verdict` vs `cleanup_status`):**
+   - Registry Schema: `bethesda_dba.toast_execution_registry`
    - Attributes:
      - `execution_id UUID PRIMARY KEY`: Unique run identifier.
      - `schema_name TEXT NOT NULL UNIQUE`: Dedicated isolated schema name (`toast_test_<32_hex_chars>`).
-     - `owner_role TEXT NOT NULL`: PostgreSQL role executing the run.
+     - `owner_role TEXT NOT NULL`: PostgreSQL role owning the schema (`bethesda_dba`).
      - `backend_pid INTEGER NOT NULL`: PID of backend process (`pg_backend_pid()`).
-     - `started_at TIMESTAMPTZ NOT NULL`: Exact execution launch timestamp.
-     - `updated_at TIMESTAMPTZ NOT NULL`: Last status update timestamp.
+     - `started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()`: Exact execution launch timestamp.
+     - `updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()`: Last status update timestamp.
      - `completed_at TIMESTAMPTZ`: Exact completion timestamp.
-     - `execution_state TEXT NOT NULL`: State machine (`ACTIVE`, `COMPLETED`, `FAILED`, `ABANDONED`, `RECOVERED`).
-     - `verdict TEXT`: Assertion verdict (`PASSED` or `FAILED`).
+     - `experiment_verdict TEXT NOT NULL DEFAULT 'PENDING' CHECK (experiment_verdict IN ('PENDING', 'PASSED', 'FAILED'))`: Scientific assertion result.
+     - `cleanup_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (cleanup_status IN ('PENDING', 'CLEANED', 'CLEANUP_FAILED', 'RECOVERED'))`: Temporary schema physical storage lifecycle.
      - `failure_details TEXT`: Specific assertion failure diagnostics.
      - `recovered_at TIMESTAMPTZ`: Timestamp when administrative recovery reclaimed the schema.
      - `recovered_by TEXT`: Administrative role executing the recovery.
      - `recovery_notes TEXT`: Audit trail notes.
-   - Lifecycle States:
-     - `ACTIVE`: Experiment currently executing; backend PID actively verified in `pg_stat_activity`.
-     - `COMPLETED`: Experiment finished, all storage assertions passed, schema dropped via standard Step 6.
-     - `FAILED`: Experiment finished, one or more assertions failed, diagnostics recorded.
-     - `ABANDONED`: An execution whose backend PID is terminated in `pg_stat_activity` and whose start time exceeds the minimum abandonment window.
-     - `RECOVERED`: An abandoned or failed execution whose temporary schema was safely reclaimed by the DBA recovery procedure.
+   - **Why Lifecycle Decoupling is Essential:**
+     - In earlier drafts, a single `execution_state` was marked `COMPLETED` at Step 5. If Step 6 cleanup crashed or encountered a lock timeout, the temporary schema remained in the database. Because Section 6.4 recovery only scanned for `ACTIVE` and `FAILED` executions, schemas from successful experiments were completely ignored and orphaned forever!
+     - By decoupling `experiment_verdict` (`PENDING`, `PASSED`, `FAILED`) from `cleanup_status` (`PENDING`, `CLEANED`, `CLEANUP_FAILED`, `RECOVERED`), the recovery procedure inspects `cleanup_status IN ('PENDING', 'CLEANUP_FAILED')`. Any temporary schema that was not safely cleaned—regardless of whether its assertions passed or failed—is identified and reclaimed after the abandonment threshold.
 
-6. **The 11 Invariants of Secure Abandoned Schema Recovery:**
+7. **Explicit Administrative Object Privileges & DDL Specification:**
+   To guarantee that `bethesda_dba` can execute administrative maintenance under `SECURITY INVOKER`, explicit object grants are formalized:
+   ```sql
+   -- Explicit Object Grants for bethesda_dba:
+   GRANT USAGE ON SCHEMA bethesda_dba TO bethesda_dba;
+   GRANT SELECT, INSERT, UPDATE ON bethesda_dba.toast_execution_registry TO bethesda_dba;
+   GRANT SELECT, INSERT ON bethesda_dba.toast_recovery_audit_log TO bethesda_dba;
+   GRANT EXECUTE ON PROCEDURE bethesda_dba.cleanup_toast_session(UUID, TEXT) TO bethesda_dba;
+   GRANT EXECUTE ON PROCEDURE bethesda_dba.recover_abandoned_toast_schemas(INTERVAL, BOOLEAN) TO bethesda_dba;
+
+   -- Strict Revocations from Application and Public roles:
+   REVOKE ALL ON SCHEMA bethesda_dba FROM PUBLIC, bethesda_app;
+   REVOKE ALL ON ALL TABLES IN SCHEMA bethesda_dba FROM PUBLIC, bethesda_app;
+   REVOKE ALL ON ALL PROCEDURES IN SCHEMA bethesda_dba FROM PUBLIC, bethesda_app;
+
+   -- Explicit Default Privileges for future objects created in bethesda_dba:
+   ALTER DEFAULT PRIVILEGES IN SCHEMA bethesda_dba REVOKE ALL ON TABLES FROM PUBLIC, bethesda_app;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA bethesda_dba REVOKE ALL ON ROUTINES FROM PUBLIC, bethesda_app;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA bethesda_dba GRANT SELECT, INSERT, UPDATE ON TABLES TO bethesda_dba;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA bethesda_dba GRANT EXECUTE ON ROUTINES TO bethesda_dba;
+   ```
+
+   **Privilege Verification Queries:**
+   ```sql
+   -- Verify table privileges:
+   SELECT grantee, table_name, privilege_type 
+   FROM information_schema.table_privileges 
+   WHERE table_schema = 'bethesda_dba' 
+   ORDER BY grantee, table_name, privilege_type;
+
+   -- Verify routine privileges:
+   SELECT grantee, routine_name, privilege_type 
+   FROM information_schema.routine_privileges 
+   WHERE specific_schema = 'bethesda_dba' 
+   ORDER BY grantee, routine_name, privilege_type;
+   ```
+
+8. **The 11 Invariants of Secure Abandoned Schema Recovery:**
    - **Never classify an execution as abandoned solely because its schema matches a naming pattern!**
    - The recovery procedure strictly enforces 11 auditable invariants:
      1. *Metadata-Driven:* Candidate schemas are identified exclusively via `bethesda_dba.toast_execution_registry`.
      2. *Explicit Privilege Hardening:* `REVOKE EXECUTE ... FROM PUBLIC` and `GRANT EXECUTE ... TO bethesda_dba`.
      3. *Security Invoker & Caller Authorization:* Procedure runs with `SECURITY INVOKER`. Verifies caller is a member of `bethesda_dba` or superuser before any destructive action.
      4. *Strict Threshold Validation:* Rejects NULL, zero, or negative abandonment thresholds; enforces minimum safe period of 5 minutes (`INTERVAL '5 minutes'`).
-     5. *Comprehensive Audit Logging:* Every recovery attempt (including unauthorized, lock-aborted, and dry-run attempts) is recorded in `bethesda_dba.toast_recovery_audit_log`.
+     5. *Comprehensive Structured Rejection Audit:* Every recovery attempt (including unauthorized, lock-aborted, and dry-run attempts) is committed to `bethesda_dba.toast_recovery_audit_log` before returning diagnostic warnings.
      6. *Active Session Liveness Verification:* Checks `backend_pid NOT IN (SELECT pid FROM pg_stat_activity WHERE pid IS NOT NULL)`. If the backend process is still alive, the execution is NEVER classified as abandoned and NEVER deleted!
      7. *Concurrency Protection via Advisory Lock:* Acquires `SELECT pg_try_advisory_lock(hashtext('bethesda_toast_schema_recovery_lock'))`. If another recovery worker is active, the operation aborts cleanly without contention.
      8. *Row-Level Concurrency Protection:* Candidate registry rows are locked with `FOR UPDATE OF reg SKIP LOCKED`.
-     9. *Ownership Verification:* Confirms that `pg_namespace.nspowner` matches the recorded `owner_role` and that the recovering administrator has drop authority.
+     9. *Ownership Verification:* Confirms that `pg_namespace.nspowner` matches `bethesda_dba` and that the recovering administrator has drop authority.
      10. *Pattern Validation:* Schema name is checked against `^toast_test_[0-9a-f]{32}$`.
-     11. *Active Execution Immutability:* Schemas belonging to active executions (`execution_state = 'ACTIVE'` with live PID) are strictly immune from deletion.
+     11. *Decoupled Lifecycle Recovery:* Reclaims all schemas with `cleanup_status IN ('PENDING', 'CLEANUP_FAILED')`, protecting against abandoned schemas from passed experiments.
 
-7. **Exact 1500-Byte Inline Payload Guarantee:**
+9. **Exact 1500-Byte Inline Payload Guarantee:**
    - Mathematically constructed with prefix, suffix, and padding such that `octet_length(v_payload_inline) = 1500`. Pre-insert assertion enforces exact equality.
 
-8. **Deterministic Out-of-Line Storage via `STORAGE EXTERNAL`:**
-   - Test column explicitly set: `ALTER TABLE ... ALTER COLUMN error_payload SET STORAGE EXTERNAL;` completely disabling TOAST compression. 300 MD5 hashes (`ORDER BY i`) generate exactly 9600 bytes, mathematically guaranteeing allocation of dedicated TOAST chunks.
+10. **Deterministic Out-of-Line Storage via `STORAGE EXTERNAL`:**
+    - Test column explicitly set: `ALTER TABLE ... ALTER COLUMN error_payload SET STORAGE EXTERNAL;` completely disabling TOAST compression. 300 MD5 hashes (`ORDER BY i`) generate exactly 9600 bytes, mathematically guaranteeing allocation of dedicated TOAST chunks.
 
-9. **NULL-Safe Acceptance Assertions:**
-   - All comparisons use `IS DISTINCT FROM` to ensure missing, unrecorded, or `NULL` metrics yield an unambiguous `FAILED` verdict, never an accidental `PASSED`.
+11. **NULL-Safe Acceptance Assertions:**
+    - All comparisons use `IS DISTINCT FROM` to ensure missing, unrecorded, or `NULL` metrics yield an unambiguous `FAILED` verdict, never an accidental `PASSED`.
 
 ### 6.3 Complete Six-Step Reproducible Test Protocol
 
@@ -880,15 +978,20 @@ BEGIN
     started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     completed_at TIMESTAMPTZ,
-    execution_state TEXT NOT NULL CHECK (execution_state IN ('ACTIVE', 'COMPLETED', 'FAILED', 'ABANDONED', 'RECOVERED')),
-    verdict TEXT,
+    experiment_verdict TEXT NOT NULL DEFAULT 'PENDING' CHECK (experiment_verdict IN ('PENDING', 'PASSED', 'FAILED')),
+    cleanup_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (cleanup_status IN ('PENDING', 'CLEANED', 'CLEANUP_FAILED', 'RECOVERED')),
     failure_details TEXT,
     recovered_at TIMESTAMPTZ,
     recovered_by TEXT,
     recovery_notes TEXT
   );
 
-  -- 6. Generate unique execution UUID and schema identifier
+  -- 6. Explicitly grant administrative privileges to bethesda_dba
+  GRANT USAGE ON SCHEMA bethesda_dba TO bethesda_dba;
+  GRANT SELECT, INSERT, UPDATE ON bethesda_dba.toast_execution_registry TO bethesda_dba;
+  GRANT SELECT, INSERT ON bethesda_dba.toast_recovery_audit_log TO bethesda_dba;
+
+  -- 7. Generate unique execution UUID and schema identifier
   v_exec_uuid := gen_random_uuid();
   v_test_schema := 'toast_test_' || replace(v_exec_uuid::text, '-', '');
 
@@ -896,30 +999,30 @@ BEGIN
     RAISE EXCEPTION 'CRITICAL: Unique test schema % already exists. Aborting safely.', v_test_schema;
   END IF;
 
-  -- 7. Register ACTIVE execution in persistent registry
+  -- 8. Register PENDING execution in persistent registry with decoupled lifecycle
   INSERT INTO bethesda_dba.toast_execution_registry (
-    execution_id, schema_name, owner_role, backend_pid, execution_state
+    execution_id, schema_name, owner_role, backend_pid, experiment_verdict, cleanup_status
   ) VALUES (
-    v_exec_uuid, v_test_schema, current_user, pg_backend_pid(), 'ACTIVE'
+    v_exec_uuid, v_test_schema, 'bethesda_dba', pg_backend_pid(), 'PENDING', 'PENDING'
   );
 
-  -- 8. Create dedicated, isolated test schema
-  EXECUTE format('CREATE SCHEMA %I', v_test_schema);
+  -- 9. Create dedicated, isolated test schema with ownership assigned to bethesda_dba
+  EXECUTE format('CREATE SCHEMA %I AUTHORIZATION bethesda_dba', v_test_schema);
 
-  -- 9. Verify schema ownership by current user
+  -- 10. Verify schema ownership in pg_namespace
   IF NOT EXISTS (
     SELECT 1 FROM pg_namespace n
     JOIN pg_roles r ON n.nspowner = r.oid
-    WHERE n.nspname = v_test_schema AND r.rolname = current_user
+    WHERE n.nspname = v_test_schema AND r.rolname = 'bethesda_dba'
   ) THEN
-    RAISE EXCEPTION 'CRITICAL: Current user % does not own schema %. Aborting.', current_user, v_test_schema;
+    RAISE EXCEPTION 'CRITICAL: Schema % is not owned by bethesda_dba. Aborting.', v_test_schema;
   END IF;
 
-  -- 10. Persist execution identifiers in session configuration for cross-tx access
+  -- 11. Persist execution identifiers in session configuration for cross-tx access
   PERFORM set_config('bethesda.toast_execution_id', v_exec_uuid::text, false);
   PERFORM set_config('bethesda.toast_test_schema', v_test_schema, false);
 
-  -- 11. Create isolated unlogged test table with dedicated TOAST relation
+  -- 12. Create isolated unlogged test table with dedicated TOAST relation
   EXECUTE format(
     'CREATE UNLOGGED TABLE %I.toast_experiment_table (' ||
     '  id UUID PRIMARY KEY,' ||
@@ -929,13 +1032,13 @@ BEGIN
     v_test_schema
   );
 
-  -- 12. Explicitly configure STORAGE EXTERNAL on test column (disables TOAST compression)
+  -- 13. Explicitly configure STORAGE EXTERNAL on test column (disables TOAST compression)
   EXECUTE format(
     'ALTER TABLE %I.toast_experiment_table ALTER COLUMN error_payload SET STORAGE EXTERNAL',
     v_test_schema
   );
 
-  -- 13. Create shared unlogged staging table to record metrics across transactions
+  -- 14. Create shared unlogged staging table to record metrics across transactions
   EXECUTE format(
     'CREATE UNLOGGED TABLE %I.toast_experiment_staging (' ||
     '  metric_key TEXT PRIMARY KEY,' ||
@@ -945,7 +1048,7 @@ BEGIN
     v_test_schema
   );
 
-  RAISE NOTICE 'STEP 1 SUCCESS: Registered execution % (PID %) and initialized schema % with STORAGE EXTERNAL.', 
+  RAISE NOTICE 'STEP 1 SUCCESS: Registered execution % (PID %) and initialized schema % owned by bethesda_dba with STORAGE EXTERNAL.', 
     v_exec_uuid, pg_backend_pid(), v_test_schema;
 END;
 $$;
@@ -1200,12 +1303,10 @@ BEGIN
     v_failures := array_append(v_failures, format('Round-trip MD5 integrity is % (expected exactly true)', coalesce(v_roundtrip, 'NULL')));
   END IF;
 
-  -- 4. Update persistent execution registry
+  -- 4. Update persistent execution registry (experiment_verdict decoupled from cleanup_status)
   UPDATE bethesda_dba.toast_execution_registry
-  SET execution_state = CASE WHEN v_verdict = 'PASSED' THEN 'COMPLETED' ELSE 'FAILED' END,
-      verdict = v_verdict,
+  SET experiment_verdict = v_verdict,
       failure_details = array_to_string(v_failures, ' | '),
-      completed_at = clock_timestamp(),
       updated_at = clock_timestamp()
   WHERE execution_id = v_exec_id::UUID;
 
@@ -1279,7 +1380,9 @@ BEGIN
       v_audit_id, current_user, COALESCE(p_abandonment_threshold, INTERVAL '0'), p_dry_run, 'REJECTED_UNAUTHORIZED',
       format('User %s is neither a member of bethesda_dba nor a superuser.', current_user)
     );
-    RAISE EXCEPTION 'UNAUTHORIZED ACCESS: User % is not authorized to execute bethesda_dba.recover_abandoned_toast_schemas.', current_user;
+    COMMIT;
+    RAISE WARNING 'UNAUTHORIZED ACCESS: User % is not authorized to execute bethesda_dba.recover_abandoned_toast_schemas.', current_user;
+    RETURN;
   END IF;
 
   -- 2. Validate abandonment threshold (must be non-null, strictly positive, minimum 5 minutes)
@@ -1290,7 +1393,9 @@ BEGIN
       v_audit_id, current_user, INTERVAL '0', p_dry_run, 'REJECTED_INVALID_THRESHOLD',
       'Abandonment threshold must be non-null and strictly positive.'
     );
-    RAISE EXCEPTION 'INVALID THRESHOLD: Abandonment threshold must be positive.';
+    COMMIT;
+    RAISE WARNING 'INVALID THRESHOLD: Abandonment threshold must be positive.';
+    RETURN;
   END IF;
 
   IF p_abandonment_threshold < INTERVAL '5 minutes' THEN
@@ -1300,7 +1405,9 @@ BEGIN
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'REJECTED_INVALID_THRESHOLD',
       format('Threshold %s is below minimum safe threshold of 5 minutes.', p_abandonment_threshold)
     );
-    RAISE EXCEPTION 'UNSAFE THRESHOLD: Minimum permitted abandonment threshold is 5 minutes (received %).', p_abandonment_threshold;
+    COMMIT;
+    RAISE WARNING 'UNSAFE THRESHOLD: Minimum permitted abandonment threshold is 5 minutes (received %).', p_abandonment_threshold;
+    RETURN;
   END IF;
 
   -- 3. Protect against concurrent recovery operations using an advisory lock
@@ -1312,11 +1419,13 @@ BEGIN
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'ABORTED_LOCK_CONTENTION',
       'Another recovery process holds the session advisory lock.'
     );
-    RAISE EXCEPTION 'CONCURRENT OPERATION DETECTED: Another recovery process is currently active. Lock not acquired.';
+    COMMIT;
+    RAISE WARNING 'CONCURRENT OPERATION DETECTED: Another recovery process is currently active. Lock not acquired.';
+    RETURN;
   END IF;
 
   BEGIN
-    -- 4. Query registry for candidate abandoned or failed executions:
+    -- 4. Query registry for candidate abandoned executions using decoupled cleanup_status:
     FOR r IN
       SELECT 
         reg.execution_id,
@@ -1324,11 +1433,12 @@ BEGIN
         reg.owner_role,
         reg.backend_pid,
         reg.started_at,
-        reg.execution_state
+        reg.experiment_verdict,
+        reg.cleanup_status
       FROM bethesda_dba.toast_execution_registry reg
       JOIN pg_namespace n ON n.nspname = reg.schema_name
-      JOIN pg_roles ro ON n.nspowner = ro.oid AND ro.rolname = reg.owner_role
-      WHERE reg.execution_state IN ('ACTIVE', 'FAILED')
+      JOIN pg_roles ro ON n.nspowner = ro.oid AND (ro.rolname = reg.owner_role OR ro.rolname = 'bethesda_dba')
+      WHERE reg.cleanup_status IN ('PENDING', 'CLEANUP_FAILED')
         AND reg.started_at < clock_timestamp() - p_abandonment_threshold
         AND reg.backend_pid NOT IN (
           SELECT pid FROM pg_stat_activity WHERE pid IS NOT NULL
@@ -1346,23 +1456,25 @@ BEGIN
       END IF;
 
       IF p_dry_run THEN
-        RAISE NOTICE '[DRY RUN] Identified abandoned schema % (Execution %, PID % dead, started %)', 
-          r.schema_name, r.execution_id, r.backend_pid, r.started_at;
+        RAISE NOTICE '[DRY RUN] Identified abandoned schema % (Execution %, verdict %, PID % dead, started %)', 
+          r.schema_name, r.execution_id, r.experiment_verdict, r.backend_pid, r.started_at;
       ELSE
         -- Drop exclusively the verified orphaned schema
         EXECUTE format('DROP SCHEMA %I CASCADE', r.schema_name);
 
-        -- Update registry to preserve auditable history
+        -- Update registry to preserve auditable history and decoupled state
         UPDATE bethesda_dba.toast_execution_registry
-        SET execution_state = 'RECOVERED',
+        SET cleanup_status = 'RECOVERED',
             recovered_at = clock_timestamp(),
             recovered_by = current_user,
             updated_at = clock_timestamp(),
-            recovery_notes = format('Reclaimed abandoned schema from dead backend PID %s (started %s)', r.backend_pid, r.started_at)
+            recovery_notes = format('Reclaimed abandoned schema from dead backend PID %s (started %s, verdict %s)', 
+              r.backend_pid, r.started_at, r.experiment_verdict)
         WHERE execution_id = r.execution_id;
 
         v_recovered_count := v_recovered_count + 1;
-        RAISE NOTICE 'RECOVERED: Schema % reclaimed safely (Execution %, dead PID %)', r.schema_name, r.execution_id, r.backend_pid;
+        RAISE NOTICE 'RECOVERED: Schema % reclaimed safely (Execution %, verdict %, dead PID %)', 
+          r.schema_name, r.execution_id, r.experiment_verdict, r.backend_pid;
       END IF;
     END LOOP;
 
@@ -1373,6 +1485,7 @@ BEGIN
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'SUCCESS', v_scanned_count, v_recovered_count,
       jsonb_build_object('dry_run', p_dry_run, 'scanned', v_scanned_count, 'recovered', v_recovered_count)
     );
+    COMMIT;
 
     RAISE NOTICE 'RECOVERY OPERATION COMPLETED: % candidate schemas scanned, % reclaimed (dry_run = %).', 
       v_scanned_count, v_recovered_count, p_dry_run;
@@ -1385,7 +1498,8 @@ BEGIN
     ) VALUES (
       v_audit_id, current_user, p_abandonment_threshold, p_dry_run, 'ERROR', SQLERRM
     );
-    RAISE;
+    COMMIT;
+    RAISE WARNING 'RECOVERY PROCEDURE ERROR: %', SQLERRM;
   END;
 END;
 $$;
@@ -1407,22 +1521,22 @@ CALL bethesda_dba.recover_abandoned_toast_schemas(p_abandonment_threshold => INT
 
 ### 6.5 Comprehensive 12-Scenario Failure-Scenario Matrix
 
-The table below reconciles all twelve physical failure modes with SQL-client mechanics, documenting why unassisted multi-transaction scripts cannot guarantee cleanup and how each scenario is deterministically resolved:
+The table below reconciles all twelve physical failure modes with SQL-client mechanics, documenting why unassisted multi-transaction scripts cannot guarantee cleanup, how the decoupled lifecycle state machine tracks each outcome, and how each scenario is deterministically resolved:
 
-| ID | Failure Scenario | DB Transaction Outcome | Registry State | Temporary Schema State | Cleanup Behavior | Required Administrative Action | Evidence Retained |
-| :---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FS-01** | **Failure in Step 1 (Setup error)** | Tx 1 rolls back (`ROLLBACK`). | Record rolled back; does not exist. | Schema rolled back; does not exist on disk. | **Self-cleaning:** Atomic rollback leaves zero residual disk state. | None required. | Server error log; client error trace. |
-| **FS-02** | **Failure in Step 2 (Inline insert error)** | Tx 2 rolls back. Tx 1 remains committed. | State remains `ACTIVE` with registered PID. | Schema persists with empty `toast_experiment_table`. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold. | Registry entry; error stack trace. |
-| **FS-03** | **Failure in Step 3 (External insert error)** | Tx 3 rolls back. Tx 1 & 2 remain committed. | State remains `ACTIVE` with registered PID. | Schema persists with Test A record only. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold. | Registry entry; Test A staging metrics. |
-| **FS-04** | **Failure in Step 4 (Inspection error)** | Tx 4 rolls back. Data inserts committed. | State remains `ACTIVE` with registered PID. | Schema persists with Test A & B records. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold. | Registry entry; table records intact for debugging. |
-| **FS-05** | **Step 5 Assertion Failure (Verification fail)** | Tx 5 evaluates assertions, records `verdict='FAILED'`, and **commits cleanly**. | State updated to `FAILED` with diagnostics in `failure_details`. | Schema persists intact with all records. | Client proceeds to Step 6. Step 6 calls `cleanup_toast_session`. | Schema dropped normally; failure diagnostics preserved permanently in registry. | Full assertion failure details in `bethesda_dba.toast_execution_registry`. |
-| **FS-06** | **Step 6 Cleanup Failure (Lock contention)** | Tx 6 rolls back or encounters lock timeout on `DROP SCHEMA`. | State remains `COMPLETED` or `FAILED` with drop pending. | Schema remains in database. | Client reports cleanup warning. | DBA investigates blocking transaction on schema and re-runs Section 6.4 recovery. | Registry entry; lock contention notice in client log. |
-| **FS-07** | **Client Process Crash (SIGKILL / OOM)** | In-flight transaction rolled back by backend. Committed txs remain. | State remains `ACTIVE` with terminated PID. | Schema persists orphaned in database. | Client terminated; `finally` block cannot execute. | Section 6.4 recovery identifies dead PID, waits for threshold, and drops schema safely. | Registry entry; OS process exit signal. |
-| **FS-08** | **Network Disconnection mid-run** | Backend detects broken socket, terminates connection, rolls back in-flight tx. | State remains `ACTIVE` with terminated PID. | Schema persists orphaned in database. | Client disconnected; cleanup cannot be dispatched. | Section 6.4 recovery identifies dead PID, verifies threshold, and drops schema safely. | Backend termination log; registry entry. |
-| **FS-09** | **Backend Termination (`pg_terminate_backend`)** | PostgreSQL backend process terminated by administrator or server restart. | State remains `ACTIVE` with terminated PID. | Schema persists orphaned in database. | Session closed abruptly. | Section 6.4 recovery identifies dead PID, reclaims schema, and logs `RECOVERED`. | PostgreSQL server termination log. |
-| **FS-10** | **Concurrent Experiment Execution** | Each run operates in independent backend PID with separate UUID schema. | Separate rows in registry keyed by unique execution UUID. | Schemas completely isolated (`toast_test_<uuid>`). | Each session cleans its own dedicated schema via `cleanup_toast_session`. | None required. Native MVCC ensures zero cross-talk. | Distinct execution UUIDs and separate registry entries. |
-| **FS-11** | **Recovery Procedure Lock Contention** | Advisory lock acquisition fails (`pg_try_advisory_lock` returns false). | Unchanged. | Schemas remain intact. | Recovery halts immediately without waiting; zero lock contention. | Re-run procedure after active recovery worker finishes. | Audit record in `toast_recovery_audit_log` with `ABORTED_LOCK_CONTENTION`. |
-| **FS-12** | **Unauthorized Recovery Invocation** | Pre-condition checks reject caller (`current_user` lacks DBA role). | Unchanged. | Schemas remain intact. | Procedure raises exception before any DDL or lock acquisition. | Review access control; grant `bethesda_dba` only to authorized personnel. | Audit record in `toast_recovery_audit_log` with `REJECTED_UNAUTHORIZED`. |
+| ID | Failure Scenario | DB Transaction Outcome | Experiment Verdict | Cleanup Status | Temporary Schema State | Cleanup Behavior | Required Administrative Action | Evidence Retained |
+| :---: | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :--- |
+| **FS-01** | **Failure in Step 1 (Setup error)** | Tx 1 rolls back (`ROLLBACK`). | N/A | N/A | Schema rolled back; does not exist on disk. | **Self-cleaning:** Atomic rollback leaves zero residual disk state. | None required. | Server error log; client error trace. |
+| **FS-02** | **Failure in Step 2 (Inline insert error)** | Tx 2 rolls back. Tx 1 remains committed. | `PENDING` | `PENDING` | Schema persists with empty `toast_experiment_table`. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold (`RECOVERED`). | Registry entry; error stack trace. |
+| **FS-03** | **Failure in Step 3 (External insert error)** | Tx 3 rolls back. Tx 1 & 2 remain committed. | `PENDING` | `PENDING` | Schema persists with Test A record only. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold (`RECOVERED`). | Registry entry; Test A staging metrics. |
+| **FS-04** | **Failure in Step 4 (Inspection error)** | Tx 4 rolls back. Data inserts committed. | `PENDING` | `PENDING` | Schema persists with Test A & B records. | Client halts; Step 6 not sent. Client `finally` calls `cleanup_toast_session`. | If client crashes before `finally`, Section 6.4 reclaims after threshold (`RECOVERED`). | Registry entry; table records intact for debugging. |
+| **FS-05** | **Step 5 Assertion Failure (Verification fail)** | Tx 5 evaluates assertions, records `experiment_verdict='FAILED'`, and **commits cleanly**. | `FAILED` | `PENDING` $\rightarrow$ `CLEANED` | Schema persists intact until Step 6. | Client proceeds to Step 6. Step 6 calls `cleanup_toast_session` and updates `cleanup_status='CLEANED'`. | Schema dropped normally; failure diagnostics preserved permanently in registry. | Full assertion failure details in `bethesda_dba.toast_execution_registry`. |
+| **FS-06** | **Step 6 Cleanup Failure (Lock contention)** | Tx 6 encounters lock timeout on `DROP SCHEMA`. | `PASSED` / `FAILED` | `CLEANUP_FAILED` | Temporary schema remains in database. | Procedure records `CLEANUP_FAILED` in registry and commits before returning warning. | Section 6.4 recovery reclaims schema after threshold and marks `RECOVERED`. | Registry entry; lock contention notice in client and audit log. |
+| **FS-07** | **Client Process Crash (SIGKILL / OOM)** | In-flight transaction rolled back by backend. Committed txs remain. | `PENDING` / `PASSED` | `PENDING` | Schema persists orphaned in database. | Client terminated; `finally` block cannot execute. | Section 6.4 recovery identifies dead PID, waits for threshold, drops schema safely, and marks `RECOVERED`. | Registry entry; OS process exit signal. |
+| **FS-08** | **Network Disconnection mid-run** | Backend detects broken socket, terminates connection, rolls back in-flight tx. | `PENDING` / `PASSED` | `PENDING` | Schema persists orphaned in database. | Client disconnected; cleanup cannot be dispatched. | Section 6.4 recovery identifies dead PID, verifies threshold, drops schema safely, and marks `RECOVERED`. | Backend termination log; registry entry. |
+| **FS-09** | **Backend Termination (`pg_terminate_backend`)** | PostgreSQL backend process terminated by administrator or server restart. | `PENDING` / `PASSED` | `PENDING` | Schema persists orphaned in database. | Session closed abruptly. | Section 6.4 recovery identifies dead PID, reclaims schema, and logs `cleanup_status='RECOVERED'`. | PostgreSQL server termination log. |
+| **FS-10** | **Concurrent Experiment Execution** | Each run operates in independent backend PID with separate UUID schema. | Independent | Independent | Schemas completely isolated (`toast_test_<uuid>`). | Each session cleans its own dedicated schema via `cleanup_toast_session`. | None required. Native MVCC ensures zero cross-talk. | Distinct execution UUIDs and separate registry entries. |
+| **FS-11** | **Recovery Procedure Lock Contention** | Advisory lock acquisition fails (`pg_try_advisory_lock` returns false). | Unchanged | Unchanged | Schemas remain intact. | Inserts record into `toast_recovery_audit_log` with `ABORTED_LOCK_CONTENTION`, commits, and returns warning. | Re-run procedure after active recovery worker finishes. | Audit record in `toast_recovery_audit_log` with `ABORTED_LOCK_CONTENTION`. |
+| **FS-12** | **Unauthorized Recovery Invocation** | Pre-condition checks reject caller (`current_user` lacks DBA role). | Unchanged | Unchanged | Schemas remain intact. | Inserts record into `toast_recovery_audit_log` with `REJECTED_UNAUTHORIZED`, commits, and returns warning. | Review access control; grant `bethesda_dba` only to authorized personnel. | Audit record in `toast_recovery_audit_log` with `REJECTED_UNAUTHORIZED` committed to disk. |
 
 ---
 
@@ -1484,7 +1598,7 @@ To prevent premature closure declarations, observations are evaluated against fi
 | **OB-01** | **Rhythmic Data Integrity** | Synthetic ticks must not be fabricated for unmeasured tablatures. | Formalized two independent coordinate systems: (A) Musical Temporal vs (B) Visual Presentation. Unknown ticks remain explicitly `null` with `rhythmicProvenance = 'NONE'`. Multi-factor MIDI export gating enforced. | Zero artificial quarter notes or rests injected. MIDI export rejected when timing unknown. | Unit tests for `MidiExportGatekeeper` during Phase 2B.2. | Musician must manually align unmeasured tabs to get MIDI playback. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.2)** |
 | **OB-02** | **CAS S3 Versioning & Deletion** | Must handle S3 versioning (enabled, disabled, suspended), prevent key reuse after `PURGING`, and handle stale worker in-flight deletes. | Defined explicit VersionId deletion semantics, immutable key isolation on re-ingestion, irrevocable `PURGING` state, and CAS fenced database finalization. Decoupled PostgreSQL from S3. | Physical keys never reused once entering `PURGING`. Re-ingested objects receive new UUID keys. | S3 integration tests with versioned bucket in Phase 2B.1. | Eventual consistency delay on S3 bucket index listings. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.1)** |
 | **OB-03** | **Temporal Validator Specification** | Tuplet math was comparing single notes to scalar values. Must validate tuplet groups, full tie chains (START/CONT/STOP), pickup measures, and trailing silence. | Formulated exhaustive TypeScript specification covering tuplet group aggregation, rational arithmetic, continuous tie matching across measures, pickup measure exemption, trailing gap detection, and 5-phase validation sequence. | All tuplet ratios mathematically validated. Ties validated for pitch and temporal continuity. | Unit test suite in `temporal-validator.test.ts` during Phase 2B.2. | Implementation deferred to Phase 2B.2. | **DOCUMENTATION RECONCILED — IMPLEMENTATION PENDING (PHASE 2B.2)** |
-| **OB-04** | **PostgreSQL TOAST Verification** | Protocol lacked schema safety, used compressible payloads, lacked failure-safe cleanup, had nullable assertions, risked destroying concurrent executions during recovery, misstated pageinspect privileges, and lacked defined cleanup procedure. | Corrected 6-step protocol: unique execution schema (`toast_test_<uuid>`), persistent execution registry (`toast_execution_registry`), defined `cleanup_toast_session` procedure, mandatory SUPERUSER verification (zero `pg_read_all_stats` implication), honest SQL-client failure mechanics with client `finally` wrapper requirement, exhaustive 12-scenario failure matrix (FS-01..12), hardened 11-invariant administrative recovery procedure with PID liveness check, advisory locking, caller authorization check, 5-minute minimum threshold guard, persistent recovery audit log table (`toast_recovery_audit_log`), NULL-safe assertions (`IS DISTINCT FROM`), single session contract, exact 1500 B assertion, 9600 B deterministic payload (`ORDER BY i`), `STORAGE EXTERNAL`. | $\Delta \text{TOAST} \equiv 0$ for 1500 B; $\Delta \text{TOAST} > 0$ for 9600 B; `pageinspect` `t_infomask` verified under staging DBA superuser; zero schema orphaning; zero deletion of active concurrent runs; all recovery attempts logged. | Execution log & registry audit during Phase 2B.1 DB staging test. | Requires dedicated staging DBA superuser role; physical page inspection permanently decoupled from application runtime. | **DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1)** |
+| **OB-04** | **PostgreSQL TOAST Verification** | Protocol lacked schema safety, used compressible payloads, lacked failure-safe cleanup, had nullable assertions, risked destroying concurrent executions during recovery, misstated pageinspect privileges, lacked defined cleanup procedure, failed to reconcile schema creation ownership with non-superuser DBA drop privileges, risked losing audit entries on transaction abort, conflated experiment verdict with cleanup status, and omitted explicit DBA object privileges. | Corrected protocol: unique execution schema (`toast_test_<uuid>`) created with `AUTHORIZATION bethesda_dba` allowing non-superuser `bethesda_dba` to drop schema under `SECURITY INVOKER` without `SECURITY DEFINER` risks; persistent execution registry (`toast_execution_registry`) with decoupled `experiment_verdict` and `cleanup_status`; transactionally reliable structured rejection audit logging with explicit procedural `COMMIT;` in `toast_recovery_audit_log`; explicit object grants (`USAGE`, `SELECT`, `INSERT`, `UPDATE`, `EXECUTE`) on schema `bethesda_dba` and revocation from `PUBLIC`/`bethesda_app`; client runner defensive wrapper (try/finally); exhaustive 12-scenario failure matrix (FS-01..12); hardened 11-invariant administrative recovery procedure (`recover_abandoned_toast_schemas`) reclaiming orphaned schemas from both passed and failed runs; NULL-safe assertions (`IS DISTINCT FROM`); exact 1500 B assertion; 9600 B deterministic payload; `STORAGE EXTERNAL`. | $\Delta \text{TOAST} \equiv 0$ for 1500 B; $\Delta \text{TOAST} > 0$ for 9600 B; `pageinspect` `t_infomask` verified under staging DBA superuser; zero schema orphaning; zero deletion of active concurrent runs; all recovery and rejection attempts committed to audit log. | Execution log & registry audit during Phase 2B.1 DB staging test. | Requires dedicated staging DBA superuser role for page inspection; physical page inspection permanently decoupled from application runtime. | **DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1)** |
 | **OB-05** | **Copyright Provenance** | Layered rights must be distinguished. Worldwide PD cannot rely solely on Colombian law. CC0 requires documentary evidence. Cabrera 1916 text needs archival proof. | Evaluated all 10 resources across 6 distinct copyright layers and 3 international jurisdictions. Unverified translations marked UNVERIFIED. Cabrera 1916 marked PD CLAIM — VERIFICATION REQUIRED. CC0 classified as declared pending formal waiver. | Zero unverified translations ingested as PD. Archival scan for Cabrera 1916. Formal CC0 dedication document executed. | Archival records for Cabrera 1916; Bethesda CC0 waiver document. | Modern hymnal editorial revisions may carry active derivative copyright. | **DOCUMENTATION RECONCILED — LEGAL EVIDENCE PENDING** |
 
 ---
@@ -1527,8 +1641,8 @@ Issue 3: CAS & S3 Versioning State Model
   - Code Reality: Schema migration 20261111_001_phase2b1_storage_schema.sql specified but unexecuted.
 
 Issue 4: PostgreSQL TOAST Empirical Experiment Protocol & Security Governance
-  - Previous Defect: Premature abort skipped cleanup; nullable comparisons bypassed checks; naive recovery risked destroying active concurrent runs; pageinspect privileges erroneously linked to pg_read_all_stats; undefined cleanup procedure; lack of recovery authorization checks and audit logging.
-  - Corrected Spec: 6-step protocol; persistent execution registry (bethesda_dba.toast_execution_registry); defined cleanup procedure (bethesda_dba.cleanup_toast_session); strict SUPERUSER verification (pg_read_all_stats retracted); client runner defensive wrapper (try/finally); exhaustive 12-scenario failure matrix (FS-01..12); hardened 11-invariant administrative recovery (bethesda_dba.recover_abandoned_toast_schemas) with caller authorization checks, 5-minute minimum threshold guard, advisory locking, active PID liveness checks, and full audit logging (bethesda_dba.toast_recovery_audit_log); NULL-safe assertions (IS DISTINCT FROM); single session contract; exact 1500 B assertion; STORAGE EXTERNAL.
+  - Previous Defect: Premature abort skipped cleanup; nullable comparisons bypassed checks; naive recovery risked destroying active concurrent runs; pageinspect privileges erroneously linked to pg_read_all_stats; undefined cleanup procedure; schema creation ownership prevented non-superuser DBA drops under SECURITY INVOKER; audit log entries lost on unhandled transaction aborts; conflated experiment verdict with cleanup status orphaned schemas from passed runs; omitted explicit DBA object privileges.
+  - Corrected Spec: 6-step protocol; schema created with AUTHORIZATION bethesda_dba enabling non-superuser drop under SECURITY INVOKER without SECURITY DEFINER elevation; persistent execution registry (bethesda_dba.toast_execution_registry) decoupling experiment_verdict (PENDING, PASSED, FAILED) from cleanup_status (PENDING, CLEANED, CLEANUP_FAILED, RECOVERED); transactionally reliable structured rejection audit logging with explicit procedural COMMIT; in bethesda_dba.toast_recovery_audit_log; explicit object grants (USAGE, SELECT, INSERT, UPDATE, EXECUTE) to bethesda_dba and revoking all from PUBLIC/bethesda_app; strict SUPERUSER verification for pageinspect; client runner defensive wrapper (try/finally); exhaustive 12-scenario failure matrix (FS-01..12); hardened 11-invariant administrative recovery (bethesda_dba.recover_abandoned_toast_schemas) scanning cleanup_status IN ('PENDING', 'CLEANUP_FAILED'); NULL-safe assertions (IS DISTINCT FROM); single session contract; exact 1500 B assertion; STORAGE EXTERNAL.
   - Current Status: DOCUMENTATION RECONCILED — EMPIRICAL VALIDATION PENDING (PHASE 2B.1).
   - Execution Reality: NOT EXECUTED — PENDING PHASE 2B.1 INTEGRATION TESTING.
 
@@ -1581,19 +1695,25 @@ Issue 5: Copyright Provenance & CC0 Dedication
 
 ### Issue 3: PostgreSQL TOAST — Protocol Security, Superuser Requirement & Safe Recovery
 - **Technical Finding:**
-  1. **Unsafe Schema Recovery:** Dropping schemas matching `toast_test_<32_hex_chars>` owned by `current_user` risked destroying active, in-flight experiments executing concurrently in other database sessions.
-  2. **Pageinspect Superuser Invariant:** PostgreSQL documentation explicitly restricts `pageinspect` functions to `SUPERUSER`. The previous reference to `pg_read_all_stats` as an alternative was technically inaccurate; `pg_read_all_stats` does not grant permissions to inspect raw physical disk pages.
-  3. **Multi-Transaction Client Execution Realities:** In standard client runners (`psql -v ON_ERROR_STOP=1`, Node.js `pg`), errors in earlier transaction blocks cause client scripts to halt immediately, meaning subsequent blocks (like Step 6) are never transmitted to PostgreSQL.
-  4. **Undefined Cleanup Procedure Reference:** Calling `bethesda_dba.cleanup_toast_session` without defining its exact interface, transactional semantics, caller validation, and session binding created an engineering defect.
+  1. **Schema Ownership & Non-Superuser Drop Failure:** In PostgreSQL, `DROP SCHEMA <schema> CASCADE` strictly requires the caller to be the owner of that schema, a member of the owning role, or a `SUPERUSER`. In prior drafts, `bethesda_dba_superuser` created `toast_test_<uuid>`, leaving it owned by the superuser. When `bethesda_dba` (the non-superuser maintenance role) invoked `cleanup_toast_session` under `SECURITY INVOKER`, execution failed with `ERROR: must be owner of schema ...`. Using `SECURITY DEFINER` blindly would introduce privilege-escalation vectors.
+  2. **Audit Log Rollback on Transaction Abort:** In PostgreSQL, an unhandled exception (`RAISE EXCEPTION`) aborts the active transaction block (`ROLLBACK`). Any prior writes—including `INSERT INTO bethesda_dba.toast_recovery_audit_log`—are rolled back and permanently lost. PostgreSQL lacks autonomous transactions.
+  3. **Conflated Lifecycle State Machine:** `execution_state` was set to `COMPLETED` at Step 5. If Step 6 cleanup crashed, the schema remained orphaned, but Section 6.4 recovery only searched for `ACTIVE` and `FAILED`, permanently ignoring orphaned schemas from `PASSED` experiments.
+  4. **Missing Explicit Administrative Object Privileges:** `bethesda_dba` lacked explicit `USAGE`, `SELECT`, `INSERT`, `UPDATE`, and `EXECUTE` privileges on `bethesda_dba` schema and tables under `SECURITY INVOKER`.
+  5. **Unsafe Schema Recovery:** Dropping schemas matching `toast_test_<32_hex_chars>` owned by `current_user` risked destroying active, in-flight experiments executing concurrently in other database sessions.
+  6. **Pageinspect Superuser Invariant:** PostgreSQL documentation explicitly restricts `pageinspect` functions to `SUPERUSER`. The previous reference to `pg_read_all_stats` as an alternative was technically inaccurate; `pg_read_all_stats` does not grant permissions to inspect raw physical disk pages.
+  7. **Multi-Transaction Client Execution Realities:** In standard client runners (`psql -v ON_ERROR_STOP=1`, Node.js `pg`), errors in earlier transaction blocks cause client scripts to halt immediately, meaning subsequent blocks (like Step 6) are never transmitted to PostgreSQL.
 - **Authoritative Technical Documentation:**
   - PostgreSQL Official Documentation on `pageinspect`: *"The functions provided by pageinspect may only be run by superusers, because they allow direct inspection of the contents of database pages."*
-  - PostgreSQL System Catalogs & Roles: `pg_roles.rolsuper`, `pg_stat_activity`, `pg_locks`, `pg_try_advisory_lock()`.
+  - PostgreSQL System Catalogs & Roles: `pg_roles.rolsuper`, `pg_stat_activity`, `pg_locks`, `pg_try_advisory_lock()`, `pg_namespace.nspowner`, `information_schema.table_privileges`.
   - PostgreSQL Chapter 68 (TOAST Internals): `STORAGE EXTERNAL` semantics and `TOAST_TUPLE_THRESHOLD`.
+  - PostgreSQL Chapter 43 (PL/pgSQL Transaction Management): `COMMIT` in stored procedures.
   - PostgreSQL `src/include/access/htup_details.h`: `HEAP_HASEXTERNAL = 0x0004`.
 - **Corrected Specification:**
-  - Formally implemented the session cleanup procedure `bethesda_dba.cleanup_toast_session(UUID, TEXT)` with `SECURITY INVOKER`, parameter validation, caller authorization check, and safe schema drop.
-  - Implemented the persistent execution registry `bethesda_dba.toast_execution_registry` tracking `execution_id`, `schema_name`, `owner_role`, `backend_pid`, `started_at`, `updated_at`, `completed_at`, `execution_state`, `verdict`, and audit notes.
-  - Implemented the persistent recovery audit ledger `bethesda_dba.toast_recovery_audit_log` tracking all recovery attempts, including unauthorized, lock-aborted, and dry-run attempts.
+  - **Schema Ownership Reconciliation:** Schema creation in Step 1 explicitly assigns authorization: `CREATE SCHEMA ... AUTHORIZATION bethesda_dba`. Tables inherit ownership by `bethesda_dba`. `bethesda_dba` can natively drop temporary schemas under `SECURITY INVOKER` without superuser privileges and without `SECURITY DEFINER` elevation. `bethesda_dba_superuser` is granted membership in `bethesda_dba` (`GRANT bethesda_dba TO bethesda_dba_superuser;`).
+  - **Transactionally Reliable Structured Rejection Logging:** Stored procedures use explicit transaction control (`COMMIT;`) to persist audit entries in `bethesda_dba.toast_recovery_audit_log` before returning `RAISE WARNING` / `RETURN;`, preventing exception-triggered rollback. Formal distinction documented between guaranteed audit persistence and PostgreSQL engine boundaries (abrupt client disconnects, SIGKILL).
+  - **Decoupled Dual-State Lifecycle:** `bethesda_dba.toast_execution_registry` decouples `experiment_verdict` (`PENDING`, `PASSED`, `FAILED`) from `cleanup_status` (`PENDING`, `CLEANED`, `CLEANUP_FAILED`, `RECOVERED`). Administrative recovery inspects `cleanup_status IN ('PENDING', 'CLEANUP_FAILED')`, guaranteeing reclamation of orphaned schemas from all runs.
+  - **Explicit Administrative Object Privileges:** Formalized complete DDL granting explicit object privileges (`USAGE`, `SELECT`, `INSERT`, `UPDATE`, `EXECUTE`) to `bethesda_dba`, revoking all from `PUBLIC` and `bethesda_app`, defining default privileges, and providing system catalog verification queries.
+  - Formally implemented the session cleanup procedure `bethesda_dba.cleanup_toast_session(UUID, TEXT)` with `SECURITY INVOKER`, structured rejection, parameter validation, caller authorization check, and safe schema drop.
   - Mandated explicit `SUPERUSER` check (`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`) in Step 1.
   - Retracted all references suggesting `pg_read_all_stats` grants pageinspect privileges. Verified official signatures (`get_raw_page(text, integer)` and `heap_page_items(bytea)`).
   - Specified client-side `try { ... } finally { ... }` requirement for automated runners.

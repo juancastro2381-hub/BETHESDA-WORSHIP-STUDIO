@@ -7,10 +7,12 @@
 **Auditor Roles:** Principal PostgreSQL Architect, Senior PL/pgSQL Engineer, Git Governance Auditor, Independent Technical Reviewer, AWS S3 Storage Architect, and MIR Specialist  
 **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`  
 **Branch:** `feature/phase-1a-core-foundation`  
-**Current Verified Branch HEAD SHA:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (Synchronized with `origin`)  
-**Declared Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598`  
+**Historical Phase 2A Closure Baseline SHA:** `d2b5631007cccdb6fdf1b660720040052f8144d2` (Short: `d2b5631`) / `ddb0e82`  
 **Previous Verified Baseline SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d`  
-**Historical Phase 2A Closure Baseline:** `d2b5631007cccdb6fdf1b660720040052f8144d2` (Short: `d2b5631`) / `ddb0e82`  
+**Technical Transaction Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` (2026-11-11 04:28:30 -0500)  
+**Initial Governance Closure Commit SHA:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (2026-11-11 04:49:04 -0500)  
+**Pre-Patch Verified HEAD SHA:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500)  
+**Verification State:** Clean working tree; tracking branch synchronized with `origin/feature/phase-1a-core-foundation`  
 **Target Document Path:** `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md`  
 
 ---
@@ -32,19 +34,15 @@
 
 ## 2. REPOSITORY TRACEABILITY & COMMIT EVIDENCE RECONCILIATION
 
-### 2.1 Branch HEAD Verification & Commit Lineage
-Physical Git inspection of the commit Directed Acyclic Graph (DAG) confirms:
-- **Verified Current HEAD SHA:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c`
-- **Current HEAD Subject:** `PHASE 2B — FINAL TRANSACTION CONTROL REMEDIATION, INDEPENDENT VALIDATION & GOVERNANCE CLOSURE`
-- **Current HEAD Timestamp:** `Wed Nov 11 04:49:04 2026 -0500`
-- **Current HEAD Parent SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598`
-- **Declared Remediation Commit SHA:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598`
-- **Declared Remediation Subject:** `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`
-- **Declared Remediation Timestamp:** `Wed Nov 11 04:28:30 2026 -0500`
-- **Declared Remediation Parent SHA:** `4a34620688b09bebe73fd07032af94e74e88e427`
-- **Previous Verified Baseline SHA:** `7b41667b6e963b7f734914cc4d656362a3a76e4d`
-- **Historical Phase 2A Closure Baseline SHA:** `d2b5631007cccdb6fdf1b660720040052f8144d2`
-- **Branch Synchronization:** Local `feature/phase-1a-core-foundation` and `origin/feature/phase-1a-core-foundation` are verified identical and synchronized.
+### 2.1 Verified Git Commit Lineage & Role Disambiguation
+Physical Git inspection of the commit Directed Acyclic Graph (DAG) confirms the verified historical progression without self-referential HEAD ambiguity:
+1. **Historical Phase 2A Acceptance Baseline:** `d2b5631007cccdb6fdf1b660720040052f8144d2` (Short: `d2b5631`, 2026-11-10 16:33:04 -0500)
+2. **Previous Governance Baseline:** `7b41667b6e963b7f734914cc4d656362a3a76e4d` (2026-11-11 03:29:10 -0500, Subject: `PHASE 2B — FINAL SECURITY REMEDIATION & ACCEPTANCE GATE`)
+3. **Security Reconciliation Intermediate Commit:** `4a34620688b09bebe73fd07032af94e74e88e427` (2026-11-11 04:02:06 -0500, Subject: `PHASE 2B — FINAL DATABASE SECURITY AND LIFECYCLE CONSISTENCY REMEDIATION`)
+4. **Technical Transaction Remediation Commit:** `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` (2026-11-11 04:28:30 -0500, Subject: `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`)
+5. **Initial Governance Closure Commit:** `6860df6c5cfe86836919a39dc9dc7687d2fae12c` (2026-11-11 04:49:04 -0500, Subject: `PHASE 2B — FINAL TRANSACTION CONTROL REMEDIATION, INDEPENDENT VALIDATION & GOVERNANCE CLOSURE`)
+6. **Pre-Patch Verified HEAD Commit:** `71a7931c61982fce5df5829511ec595a8985ddc2` (2026-11-11 04:57:58 -0500, Subject: `PHASE 2B — FINAL TRACEABILITY RECONCILIATION AND DOCUMENTARY ACCEPTANCE CORRECTION`)
+- **Remote Synchronization:** The tracking branch `origin/feature/phase-1a-core-foundation` was confirmed fully synchronized at commit `71a7931c61982fce5df5829511ec595a8985ddc2` at preflight verification time.
 
 ### 2.2 Confirmation of Governance Deliverables in Repository History
 Commit history demonstrates that all governance audit documents are preserved and tracked across the linear commit history:
@@ -55,11 +53,11 @@ Commit history demonstrates that all governance audit documents are preserved an
 5. `FINAL_PRE_IMPLEMENTATION_GOVERNANCE_AND_ACCEPTANCE_BASELINE.md` (committed in `e09d116`)
 6. `PHASE_2B_INDEPENDENT_ARCHITECTURAL_PROPOSAL_REVIEW_AND_REQUIRED_CORRECTIONS.md` (committed in `3fdcfb7`)
 7. `PHASE_2B_FINAL_SECURITY_REMEDIATION_AND_ACCEPTANCE_GATE_REPORT.md` (committed in `5408912`, updated in `679b74e`)
-8. `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` (committed in `b0b6c8a`, updated in `8dd3142`, `7b41667`, `5408912`, `4a34620`, `679b74e`, `6860df6`)
-9. `PHASE_2B_FINAL_TRANSACTION_CONTROL_REMEDIATION_AND_INDEPENDENT_REVALIDATION_REPORT.md` (committed in `6860df6`)
+8. `PHASE_2B_FINAL_REPOSITORY_EVIDENCE_AND_ACCEPTANCE_MATRIX.md` (committed in `b0b6c8a`, updated in `8dd3142`, `7b41667`, `5408912`, `4a34620`, `679b74e`, `6860df6`, `71a7931`)
+9. `PHASE_2B_FINAL_TRANSACTION_CONTROL_REMEDIATION_AND_INDEPENDENT_REVALIDATION_REPORT.md` (committed in `6860df6`, updated in `71a7931`)
 
 ### 2.3 Repository Integrity Verification (Diff vs. Phase 2A Baseline)
-A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631007cccdb6fdf1b660720040052f8144d2`) and current HEAD (`6860df6c5cfe86836919a39dc9dc7687d2fae12c`) proves:
+A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631007cccdb6fdf1b660720040052f8144d2`) and current repository state proves:
 - **Application source files (`.ts`, `.tsx`, `.js`):** `0 lines changed`
 - **Database schema definitions & migrations (`.sql`, `schema.ts`):** `0 lines changed`
 - **Package manifests (`package.json`, lockfiles):** `0 lines changed`
@@ -82,14 +80,15 @@ A complete git diff across the historical Phase 2A acceptance baseline (`d2b5631
 
 ### 2.4 Final Discrepancy Reconciliation Table
 
-| Item | Previous Evidence | Verified Physical Git Evidence | Technical Resolution |
+| Item | Previous Documentary Evidence | Verified Physical Git Evidence | Technical & Documentary Resolution |
 | :--- | :--- | :--- | :--- |
-| **Branch HEAD Reference in Matrix** | Identified `5408912565b4da4dda0992e83dae561be3c963f3` as current HEAD in header and Section 2.1. | Physical Git DAG proves `5408912` was succeeded by `4a34620`, `679b74e`, and `6860df6c5cfe86836919a39dc9dc7687d2fae12c`. | Updated Matrix header and Section 2 to identify `6860df6` (and parent `679b74e`) as verified HEAD, preserving complete historical commit lineage. |
-| **Declared Remediation Commit vs. HEAD SHA in Report** | Report declared `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` as "Actual HEAD Commit SHA". | Physical Git inspection confirms `679b74e` is the exact commit for `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`, but it is the parent of HEAD `6860df6c5cfe86836919a39dc9dc7687d2fae12c`. | Reconciled report to explicitly distinguish declared remediation commit (`679b74e`) from branch HEAD (`6860df6`), and documented parent-child DAG relationship. |
+| **Commit Role Disambiguation & Self-Referential HEAD** | Matrix previously referenced static intermediate commits (`5408912` or `6860df6`) as "Current HEAD". | Physical Git inspection proves a sequence of documented patches: `5408912` $ightarrow$ `4a34620` $ightarrow$ `679b74e` $ightarrow$ `6860df6` $ightarrow$ `71a7931`. | Reconciled all documentation to reference commits by explicit roles and timestamps, avoiding self-referential HEAD invalidation. |
+| **Declared Remediation Commit vs. HEAD SHA in Report** | Report declared `679b74e13cf9d2a4ec70c5d976abe2b963d8c598` as "Actual HEAD Commit SHA". | Physical Git inspection confirms `679b74e` is the exact commit for `FINAL TRANSACTION CONTROL REMEDIATION & INDEPENDENT REVALIDATION`, but it is an ancestor of HEAD, not the HEAD itself. | Report reconciled to distinguish declared remediation commit (`679b74e`) from branch HEAD, documenting parentage explicitly. |
 | **Phase 2A Baseline 40-Character SHA** | Matrix listed `d2b5631c5180f9dd285e683457a41ec5fa721ce8` as Phase 2A closure baseline. | Physical Git inspection confirms commit `d2b5631` has full 40-char SHA `d2b5631007cccdb6fdf1b660720040052f8144d2`. | Corrected full 40-character baseline SHA to `d2b5631007cccdb6fdf1b660720040052f8144d2` across all documentation. |
-| **Repository Deliverables Inventory** | Matrix listed 8 deliverables up to commit `5408912` (+4,884 lines). | Git diff `d2b5631007cccdb6fdf1b660720040052f8144d2..HEAD` shows exactly 9 documentation files (+6,145 lines, 0 code changes). | Updated deliverable inventory table to include all 9 markdown governance files through `6860df6`. |
+| **PostgreSQL Transaction-Control Mechanics (CALL vs DO)** | Prior notes claimed all anonymous `DO` blocks are inherently atomic and forbid transaction control. | Official PostgreSQL 16 documentation confirms both top-level `CALL` and top-level `DO` support `COMMIT`/`ROLLBACK`; the universal prohibition applies to blocks with `EXCEPTION` handlers. | Corrected technical explanation to align with official PostgreSQL 16 docs, maintaining top-level `CALL` as the preferred, idiomatic cleanup standard. |
+| **Audit Durability Qualification** | Prior text claimed unconditional 100% audit persistence on disk. | Durability is guaranteed for committed transactions under `synchronous_commit = on`, but cannot protect against hard crashes (SIGKILL, OOM), storage failure, or network drops prior to commit. | Formally qualified audit durability guarantees and clearly documented physical failure boundaries. |
 | **Transaction Control Validation Classification** | Potential ambiguity regarding whether TOAST protocol had been executed live. | Environment lacks active PostgreSQL engine; empirical test protocol has NOT been executed against staging cluster. | Explicitly classified technical architecture as **PASS** (Static AST/Engine Validation) and empirical gate as **CONDITIONAL PASS** pending Phase 2B.1 staging. |
-| **Remote Origin Synchronization** | Tracking branch synchronization required verification. | `git status` confirms `feature/phase-1a-core-foundation` is up to date with `origin/feature/phase-1a-core-foundation`. | Verified remote synchronization status documented in both files. |
+| **Remote Origin Synchronization** | Tracking branch synchronization required verification. | `git status` confirms `feature/phase-1a-core-foundation` was fully up to date with origin at preflight verification. | Verified remote synchronization status documented in both files. |
 | **Phase 2B.1 Storage Authorization Boundary** | Must remain unbreached. | Phase 2B.1 implementation remains strictly unauthorized until explicit PO sign-off. | Formally affirmed `PHASE 2B.1 STORAGE IMPLEMENTATION: STRICTLY NOT AUTHORIZED`. |
 
 ---
@@ -1402,9 +1401,9 @@ COMMIT;
 
 -- =============================================================================
 -- STEP 6: FAILURE-SAFE CLEANUP VIA VERIFIED PROCEDURE (STANDALONE CALL)
--- Invoked via standalone CALL statement outside explicit client transaction blocks
--- (Executing CALL directly avoids anonymous DO block atomic context in PostgreSQL,
--- permitting the procedure to execute its internal COMMIT statements cleanly)
+-- Invoked via direct top-level CALL statement outside explicit client transaction blocks
+-- (Under PostgreSQL 16 PL/pgSQL rules, direct top-level CALL is the preferred, idiomatic
+-- cleanup invocation; transaction termination is strictly prohibited inside any block with an EXCEPTION handler)
 -- =============================================================================
 CALL bethesda_dba.cleanup_toast_session(
   NULLIF(current_setting('bethesda.toast_execution_id', true), '')::UUID,
@@ -1842,11 +1841,11 @@ ERROR: cannot commit while a subtransaction is active (SQLSTATE 2D000)
 ```
 Consequently, prior specifications placing `COMMIT` inside exception-bearing blocks were technically invalid and would immediately crash on any live PostgreSQL engine.
 
-### 12.2 Caller Context: `DO` Anonymous Functions vs Top-Level `CALL` Statements
-In PostgreSQL 11 through 16+, stored procedures (`CREATE PROCEDURE`) can manage transactions, but their execution context dictates whether `COMMIT` and `ROLLBACK` are legally permitted:
-1. **Top-Level `CALL` Invocations:** In autocommit mode (`autocommit = on`), when a client executes `CALL bethesda_dba.cleanup_toast_session(...)` outside of an explicit client-side `BEGIN ... COMMIT` block, PostgreSQL assigns `estate->atomic = false`. In this context, explicit `COMMIT;` statements within the outer procedure body are fully legal and succeed.
-2. **Anonymous `DO $$ ... $$` Wrappers:** A `DO` block is handled by PostgreSQL's `InlineCodeBlock` mechanism, which executes as an anonymous function with `estate->atomic = true`. If a procedure containing transaction control statements is invoked from inside a `DO` block, PostgreSQL rejects the transaction boundary with `ERROR: invalid transaction termination`.
-3. **Architectural Resolution:** Step 6 of the empirical protocol has been corrected to execute `CALL` directly at the top level:
+### 12.2 Caller Context: Official PostgreSQL 16 Transaction Control in `CALL` and `DO`
+According to official PostgreSQL 16 documentation ([PL/pgSQL Transaction Management](https://www.postgresql.org/docs/16/plpgsql-transactions.html)):
+1. **Permitted Top-Level Invocation Contexts:** In both stored procedures invoked via `CALL` from the top level and anonymous code blocks (`DO` commands) called from the top level (outside of an explicit client-side `BEGIN ... COMMIT` block), transaction termination (`COMMIT` and `ROLLBACK`) is legally supported by PostgreSQL. A new transaction is started immediately using the same transaction characteristics.
+2. **Universal Prohibition in Blocks with Exception Handlers:** Transaction control is **strictly prohibited inside any block possessing an `EXCEPTION` handler** (`BEGIN ... EXCEPTION ... END;`), whether in a procedure, function, or `DO` block. Because exception handlers execute within internal subtransactions (`BeginInternalSubTransaction`), issuing `COMMIT` or `ROLLBACK` within an exception-bearing block raises `ERROR: cannot commit while a subtransaction is active (SQLSTATE 2D000)`.
+3. **Direct Top-Level `CALL` as Documented Standard:** While a top-level `DO` block without an exception handler can also execute transaction control, Step 6 of the empirical protocol specifies direct top-level `CALL bethesda_dba.cleanup_toast_session(...)` as the preferred, idiomatic standard. Direct `CALL` invokes the stored procedure directly without unnecessary anonymous block encapsulation and matches standard client driver execution (`client.query('CALL ...')`).
    ```sql
    CALL bethesda_dba.cleanup_toast_session(
      NULLIF(current_setting('bethesda.toast_execution_id', true), '')::UUID,
@@ -1924,7 +1923,7 @@ In `bethesda_dba.recover_abandoned_toast_schemas`, concurrency is controlled via
 | `recover_abandoned_toast_schemas` | Cursor Transaction Safety | No `COMMIT` inside `FOR r IN ... LOOP`. Bulk finalization in outer scope avoids cursor invalidation. | **VALIDATED** |
 | `recover_abandoned_toast_schemas` | Lock Lifecycle | `pg_advisory_unlock` called unconditionally in outer scope. | **VALIDATED** |
 | `recover_abandoned_toast_schemas` | Concurrency & Liveness | `SKIP LOCKED` avoids row-level contention; `pg_stat_activity` PID liveness verification prevents dropping active schemas. | **VALIDATED** |
-| `Step 6 Protocol` | Top-Level Invocation | Top-level `CALL` outside `DO` block guarantees non-atomic context (`estate->atomic = false`). | **VALIDATED** |
+| `Step 6 Protocol` | Top-Level Invocation | Top-level `CALL` outside client transaction block provides clean, idiomatic execution without anonymous wrapper indirection. | **VALIDATED** |
 
 ### 12.7 Security & Effective Privilege Hierarchy
 - `bethesda_dba_superuser`: Cluster superuser. Granted `bethesda_dba` role. Possesses raw page inspection privileges via `pageinspect`.
@@ -1950,15 +1949,20 @@ In `bethesda_dba.recover_abandoned_toast_schemas`, concurrency is controlled via
   5. Decoupled dual-state lifecycle (experiment_verdict vs cleanup_status) guarantees that
      temporary schemas from passed experiments can be reclaimed if cleanup fails.
 
-[NON-GUARANTEED / BOUNDARY CONDITIONS (ENVIRONMENTAL LIMITATIONS)]
-  1. PostgreSQL lacks autonomous transactions. If an unhandled exception occurs inside a
-     raw DO block or client transaction, PostgreSQL WILL roll back all writes in that block.
-     Audit persistence for Category B failures relies on the client orchestrator opening a
-     SEPARATE transaction.
-  2. In the event of a hard process crash (SIGKILL, OOM, machine failure), no procedural
-     code can execute at the moment of death. Audit persistence is NOT guaranteed for
-     in-flight statements; recovery relies on dead-PID detection by administrative recovery.
-  3. Runtime execution against live PostgreSQL 16 database infrastructure has NOT yet been
+[NON-GUARANTEED / BOUNDARY CONDITIONS (ENVIRONMENTAL & PHYSICAL LIMITATIONS)]
+  1. NO AUTONOMOUS TRANSACTIONS:
+     PostgreSQL lacks autonomous transactions. If an unhandled exception aborts a DO block,
+     procedure, or client transaction, PostgreSQL will roll back all uncommitted writes in
+     that transaction. Durable failure logging for Category B failures requires an external
+     client orchestrator opening a separate transaction once connectivity is confirmed.
+  2. QUALIFIED AUDIT DURABILITY & HARD CRASH BOUNDARIES:
+     Explicit COMMIT guarantees durability to the WAL under standard synchronous_commit = on.
+     However, instantaneous hard crashes (SIGKILL, OS OOM killer, power outage) occurring
+     before COMMIT, severed network connections, or physical storage controller faults cannot
+     be trapped or committed by procedural code. Recovery for uncommitted crashes relies on the
+     committed Step 1 registry row and subsequent dead-PID sweeps by administrative recovery.
+  3. PRE-AUTHORIZATION ENVIRONMENT LIMITATION:
+     Runtime execution against live PostgreSQL 16 database infrastructure has NOT yet been
      performed in this pre-authorization phase. All findings represent rigorous static
      analysis and AST verification. Live execution is pending Phase 2B.1 staging.
 ========================================================================================

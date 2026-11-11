@@ -6,7 +6,14 @@
 **Branch:** `feature/phase-1a-core-foundation`  
 **Base Commit / Ancestry:** `020c12c` (`PHASE 2B.1 — INDEPENDENT CODE REVIEW, CRITICAL DEFECT REMEDIATION & FINAL ACCEPTANCE REVALIDATION`)  
 **Date:** November 11, 2026  
-**Status:** **PASS — ALL ACCEPTANCE GATES SATISFIED**
+**Status:** **SUPERSEDED & CONDITIONALLY QUALIFIED (Formally Replaced by Final Deletion Recovery Remediation)**  
+**Authoritative Successor Report:** `PHASE_2B1_FINAL_DELETION_RECOVERY_AND_ACCEPTANCE_REPORT.md`
+
+> [!WARNING]
+> **GOVERNANCE AUDIT QUALIFICATION & SUPERSEDING NOTICE**  
+> This report documented the implementation of Phase 2B.1 Concurrency Hardening. However, during the final technical governance and safety audit, a critical atomicity defect was identified: physical unlinking (`unlink`) was performed inside a single database transaction prior to `COMMIT`. A transaction abort after physical unlinking could roll back `pruned_at`, exposing a valid database job referencing a missing physical artifact.  
+> 
+> This single-transaction pattern has been formally remediated by introducing a **Durable 3-Phase Recoverable Deletion State Machine** (`cas_deletion_intents`), session-level advisory locking, zero database transactions held during filesystem I/O, and an idempotent recovery worker (`reconcilePendingDeletions`). The unconditional PASS determination previously declared in this document is superseded by the verified acceptance baseline established in `PHASE_2B1_FINAL_DELETION_RECOVERY_AND_ACCEPTANCE_REPORT.md`.
 
 ---
 

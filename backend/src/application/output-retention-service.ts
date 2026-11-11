@@ -15,14 +15,23 @@
  */
 
 import { and, eq, inArray, isNotNull, isNull, lt, not, or, sql } from 'drizzle-orm';
-import { db as defaultDb, type Database } from '../db/index.ts';
-import { backgroundJobs, songSources, auditLogs } from '../db/schema.ts';
+import { db as defaultDb, pool as defaultPool, type Database } from '../db/index.ts';
+import { backgroundJobs, songSources, auditLogs, casDeletionIntents, type CasDeletionState } from '../db/schema.ts';
 import {
   type IStorageProvider,
   LocalFileSystemStorageProvider,
   StorageNotFoundError,
 } from '../domain/storage/storage-provider.ts';
 import path from 'node:path';
+import type { Pool, PoolClient } from 'pg';
+
+export interface CasReconciliationReport {
+  timestamp: string;
+  scannedCount: number;
+  reconciledCount: number;
+  failedCount: number;
+  errors: Array<{ storageKey: string; error: string }>;
+}
 
 export interface RetentionPruneItem {
   jobId: string;
@@ -77,16 +86,45 @@ export class OutputRetentionService {
 
   private readonly retentionDays: number;
   private readonly quarantineDays: number;
+  private readonly pool: Pool;
 
   public constructor(
     private readonly db: Database = defaultDb,
     private readonly outputStorage: IStorageProvider = new LocalFileSystemStorageProvider(
       'storage/outputs'
     ),
-    options?: RetentionServiceOptions
+    options?: RetentionServiceOptions,
+    customPool?: Pool
   ) {
     this.retentionDays = options?.defaultRetentionDays ?? OutputRetentionService.DEFAULT_RETENTION_DAYS;
     this.quarantineDays = options?.defaultQuarantineDays ?? OutputRetentionService.DEFAULT_QUARANTINE_DAYS;
+    this.pool = customPool ?? defaultPool;
+  }
+
+  /**
+   * Ejecuta una operación bajo un bloqueo consultivo a nivel de sesión en PostgreSQL (pg_advisory_lock).
+   * 
+   * Propiedades del Protocolo de Seguridad:
+   * 1. Exclusión mutua global entre Writers, Pruners, OrphanCollectors y RecoveryWorkers sobre el mismo hash CAS.
+   * 2. Si el proceso o la red fallan, PostgreSQL libera automáticamente el bloqueo al destruirse el socket TCP.
+   * 3. Permite que las transacciones de base de datos comiteen ANTES de tocar el sistema de archivos
+   *    sin retener transacciones SQL abiertas durante operaciones de E/S física (Requirement 13).
+   */
+  public async withCasAdvisoryLock<T>(
+    storageKey: string,
+    operation: (client: PoolClient) => Promise<T>
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock(hashtext($1))', [storageKey]);
+      try {
+        return await operation(client);
+      } finally {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [storageKey]).catch(() => {});
+      }
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -154,125 +192,190 @@ export class OutputRetentionService {
 
     for (const job of candidateJobs) {
       const storageKey = job.outputStorageKey!;
+      const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
 
       try {
         let fileDeleted = false;
         let audited = false;
         let otherRefCount = 0;
         let deletionError: string | null = null;
-        let auditError: string | null = null;
+        let intentCommitted = false;
 
         if (!dryRun) {
-          await this.db.transaction(async (tx) => {
-            // Defect 1 Remediation: PostgreSQL Advisory Lock para serialización distribuida
-            // Bloquea deterministamente la clave CAS y la clave companion canónica
-            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${storageKey}))`);
-            const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
-            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${canonicalKey}))`);
-
-            // FASE 1: Transición transaccional en Base de Datos PRIMERO con bloqueo de fila (FOR UPDATE)
-            // Serializa limpiamente contra commitJobToCatalog concurrente (CR-05)
-            const [lockedJob] = await tx
-              .select({ id: backgroundJobs.id })
-              .from(backgroundJobs)
-              .where(
-                and(
-                  eq(backgroundJobs.id, job.id),
-                  isNull(backgroundJobs.prunedAt),
-                  lt(backgroundJobs.completedAt, cutoffDate),
-                  or(
-                    isNull(backgroundJobs.leaseExpiresAt),
-                    lt(backgroundJobs.leaseExpiresAt, now)
+          await this.withCasAdvisoryLock(storageKey, async () => {
+            // =========================================================================
+            // FASE 1: Compromiso de Intención de Eliminación en Base de Datos (Tx 1)
+            // =========================================================================
+            // La intención DELETE_PENDING y pruned_at = NOW() se comitean en PostgreSQL
+            // ANTES de cualquier operación sobre el sistema de archivos.
+            // Si Tx 1 falla o revierte, el archivo físico permanece intacto en disco.
+            await this.db.transaction(async (tx) => {
+              const [lockedJob] = await tx
+                .select({ id: backgroundJobs.id })
+                .from(backgroundJobs)
+                .where(
+                  and(
+                    eq(backgroundJobs.id, job.id),
+                    isNull(backgroundJobs.prunedAt),
+                    lt(backgroundJobs.completedAt, cutoffDate),
+                    or(
+                      isNull(backgroundJobs.leaseExpiresAt),
+                      lt(backgroundJobs.leaseExpiresAt, now)
+                    )
                   )
                 )
-              )
-              .for('update');
+                .for('update');
 
-            if (!lockedJob) {
-              // El trabajo ya fue podado o tomado por un worker con lease activo
+              if (!lockedJob) {
+                return; // Ya fue podado o tomado por un worker con lease activo
+              }
+
+              const [updated] = await tx
+                .update(backgroundJobs)
+                .set({
+                  prunedAt: now,
+                  updatedAt: now,
+                })
+                .where(eq(backgroundJobs.id, job.id))
+                .returning({ id: backgroundJobs.id });
+
+              if (!updated) {
+                return;
+              }
+
+              // Comprobación de referencias compartidas (CAS Deduplication)
+              const [activeOtherJobs] = await tx
+                .select({ count: sql<number>`count(*)::int` })
+                .from(backgroundJobs)
+                .where(
+                  and(
+                    eq(backgroundJobs.outputStorageKey, storageKey),
+                    isNull(backgroundJobs.prunedAt),
+                    not(eq(backgroundJobs.id, job.id))
+                  )
+                );
+
+              const [activeSources] = await tx
+                .select({ count: sql<number>`count(*)::int` })
+                .from(songSources)
+                .where(eq(songSources.storagePath, storageKey));
+
+              otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
+
+              // Si no existen referencias compartidas, registrar intención durable de eliminación
+              if (otherRefCount === 0) {
+                await tx
+                  .insert(casDeletionIntents)
+                  .values({
+                    storageKey,
+                    checksumSha256: job.outputChecksumSha256,
+                    jobId: job.id,
+                    state: 'DELETE_PENDING',
+                    attempts: 0,
+                    createdAt: now,
+                    updatedAt: now,
+                  })
+                  .onConflictDoUpdate({
+                    target: casDeletionIntents.storageKey,
+                    set: {
+                      state: 'DELETE_PENDING',
+                      jobId: job.id,
+                      updatedAt: now,
+                    },
+                  });
+                intentCommitted = true;
+              }
+            });
+
+            // Si el archivo sigue compartido con otros trabajos, NO debe eliminarse físicamente
+            if (otherRefCount > 0 || !intentCommitted) {
               return;
             }
 
-            const [updated] = await tx
-              .update(backgroundJobs)
-              .set({
-                prunedAt: now,
-                updatedAt: now,
-              })
-              .where(eq(backgroundJobs.id, job.id))
-              .returning({ id: backgroundJobs.id });
+            // =========================================================================
+            // FASE 2: Eliminación Física en Almacenamiento (SIN TRANSACCIÓN DB ABIERTA)
+            // =========================================================================
+            // Cumple con el Requirement 13: Cero transacciones DB retenidas durante E/S física
+            try {
+              const wasDeleted = await this.outputStorage.delete(storageKey);
+              if (wasDeleted) {
+                fileDeleted = true;
+              }
 
-            if (!updated) {
-              return;
-            }
-
-            // FASE 2: Comprobación de referencias compartidas (CAS Deduplication) bajo advisory lock
-            const [activeOtherJobs] = await tx
-              .select({ count: sql<number>`count(*)::int` })
-              .from(backgroundJobs)
-              .where(
-                and(
-                  eq(backgroundJobs.outputStorageKey, storageKey),
-                  isNull(backgroundJobs.prunedAt),
-                  not(eq(backgroundJobs.id, job.id))
-                )
-              );
-
-            const [activeSources] = await tx
-              .select({ count: sql<number>`count(*)::int` })
-              .from(songSources)
-              .where(eq(songSources.storagePath, storageKey));
-
-            otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
-
-            // FASE 3: Eliminación física idempotente (Solo si cero referencias activas)
-            if (otherRefCount === 0) {
-              try {
-                const wasDeleted = await this.outputStorage.delete(storageKey);
-                if (wasDeleted) {
-                  fileDeleted = true;
-                }
-
-                if (await this.outputStorage.exists(canonicalKey)) {
-                  await this.outputStorage.delete(canonicalKey).catch(() => {});
-                }
-              } catch (delErr: any) {
-                if (delErr instanceof StorageNotFoundError) {
-                  fileDeleted = false; // Ya no existía en disco (idempotencia)
-                } else {
-                  deletionError = delErr?.message ?? String(delErr);
-                  // Fail-soft: La base de datos es consistente (pruned_at establecido).
-                }
+              if (await this.outputStorage.exists(canonicalKey)) {
+                await this.outputStorage.delete(canonicalKey).catch(() => {});
+              }
+            } catch (delErr: any) {
+              if (delErr instanceof StorageNotFoundError) {
+                fileDeleted = false; // Idempotencia si el archivo ya no existía
+              } else {
+                deletionError = delErr?.message ?? String(delErr);
               }
             }
 
-            // FASE 4: Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
-            // Si la auditoría falla, la subtransacción se revierte pero la transacción principal persiste (pruned_at = now)
-            try {
-              await tx.transaction(async (subTx) => {
-                await subTx.insert(auditLogs).values({
-                  eventType: 'CONVERSION_OUTPUT_PRUNED',
-                  userId: options?.userId ?? null,
-                  resource: `background_jobs/${job.id}`,
-                  metadata: {
-                    jobId: job.id,
-                    storageKey,
-                    checksumSha256: job.outputChecksumSha256,
-                    fileDeleted,
-                    sharedReferencesRemaining: otherRefCount,
-                    retentionDays: days,
-                    completedAt: job.completedAt?.toISOString(),
-                    deletionError,
-                  },
-                });
-              });
-              audited = true;
-            } catch (aErr: any) {
-              audited = false;
-              auditError = aErr?.message ?? String(aErr);
+            // =========================================================================
+            // FASE 3: Persistencia de Estado Terminal y Auditoría (Tx 2)
+            // =========================================================================
+            if (deletionError) {
+              // Si la eliminación física falló, registrar estado reintentable (RETRY_PENDING)
+              await this.db
+                .update(casDeletionIntents)
+                .set({
+                  state: 'RETRY_PENDING',
+                  attempts: sql`${casDeletionIntents.attempts} + 1`,
+                  lastError: deletionError,
+                  updatedAt: new Date(),
+                })
+                .where(eq(casDeletionIntents.storageKey, storageKey));
+
               report.errors.push({
                 jobId: job.id,
-                error: `Fallo al registrar auditoría de podado: ${auditError}`,
+                error: `Fallo físico de eliminación (registrado RETRY_PENDING): ${deletionError}`,
+              });
+            } else {
+              // Eliminación física completada: actualizar intención a DELETED
+              await this.db.transaction(async (tx) => {
+                await tx
+                  .update(casDeletionIntents)
+                  .set({
+                    state: 'DELETED',
+                    deletedAt: new Date(),
+                    updatedAt: new Date(),
+                  })
+                  .where(eq(casDeletionIntents.storageKey, storageKey));
+
+                // Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
+                try {
+                  await tx.transaction(async (subTx) => {
+                    await subTx.insert(auditLogs).values({
+                      eventType: 'CONVERSION_OUTPUT_PRUNED',
+                      userId: options?.userId ?? null,
+                      resource: `background_jobs/${job.id}`,
+                      metadata: {
+                        jobId: job.id,
+                        storageKey,
+                        checksumSha256: job.outputChecksumSha256,
+                        fileDeleted,
+                        sharedReferencesRemaining: otherRefCount,
+                        retentionDays: days,
+                        completedAt: job.completedAt?.toISOString(),
+                        deletionError,
+                      },
+                    });
+                  });
+                  audited = true;
+                  await tx
+                    .update(casDeletionIntents)
+                    .set({ audited: true })
+                    .where(eq(casDeletionIntents.storageKey, storageKey));
+                } catch (aErr: any) {
+                  audited = false;
+                  const auditError = aErr?.message ?? String(aErr);
+                  report.errors.push({
+                    jobId: job.id,
+                    error: `Fallo al registrar auditoría de podado: ${auditError}`,
+                  });
+                }
               });
             }
           });
@@ -363,134 +466,202 @@ export class OutputRetentionService {
           let audited = false;
 
           if (!dryRun) {
-            await this.db.transaction(async (tx) => {
-              // Defect 1 Remediation: PostgreSQL Advisory Lock determinista sobre la clave huérfana
-              // Serializa contra la creación concurrente en worker y el podado de retención
-              await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+            await this.withCasAdvisoryLock(key, async () => {
+              let otherRefCount = 0;
+              let intentCommitted = false;
+              let deletionError: string | null = null;
 
-              // 3. Verificar si es un archivo companion canónico (*.canonical.json) bajo el lock
-              if (key.endsWith('.canonical.json')) {
-                const baseHash = path.basename(key, '.canonical.json');
-                const [compJob] = await tx
+              // =========================================================================
+              // FASE 1: Verificación de Referencias y Registro de Intención (Tx 1)
+              // =========================================================================
+              // Se comitea la intención DELETE_PENDING en PostgreSQL ANTES de cualquier
+              // operación en el sistema de archivos (Requirement 4).
+              await this.db.transaction(async (tx) => {
+                // 3. Verificar si es un archivo companion canónico (*.canonical.json) bajo el lock
+                if (key.endsWith('.canonical.json')) {
+                  const baseHash = path.basename(key, '.canonical.json');
+                  const [compJob] = await tx
+                    .select({ id: backgroundJobs.id })
+                    .from(backgroundJobs)
+                    .where(
+                      and(
+                        eq(backgroundJobs.outputChecksumSha256, baseHash),
+                        isNull(backgroundJobs.prunedAt)
+                      )
+                    )
+                    .limit(1);
+
+                  const [compSource] = await tx
+                    .select({ id: songSources.id })
+                    .from(songSources)
+                    .where(eq(songSources.checksumSha256, baseHash))
+                    .limit(1);
+
+                  if (compJob || compSource) {
+                    otherRefCount++;
+                    return;
+                  }
+                }
+
+                // 4. Verificar referencias en background_jobs bajo el lock
+                const [jobRef] = await tx
                   .select({ id: backgroundJobs.id })
                   .from(backgroundJobs)
                   .where(
                     and(
-                      eq(backgroundJobs.outputChecksumSha256, baseHash),
+                      eq(backgroundJobs.outputStorageKey, key),
                       isNull(backgroundJobs.prunedAt)
                     )
                   )
                   .limit(1);
 
-                const [compSource] = await tx
+                const [sourceRef] = await tx
                   .select({ id: songSources.id })
                   .from(songSources)
-                  .where(eq(songSources.checksumSha256, baseHash))
+                  .where(eq(songSources.storagePath, key))
                   .limit(1);
 
-                if (compJob || compSource) {
-                  report.activeReferencesCount++;
+                if (jobRef || sourceRef) {
+                  otherRefCount++;
                   return;
                 }
-              }
 
-              // 4. Verificar referencias en background_jobs bajo el lock
-              const [jobRef] = await tx
-                .select({ id: backgroundJobs.id })
-                .from(backgroundJobs)
-                .where(
-                  and(
-                    eq(backgroundJobs.outputStorageKey, key),
-                    isNull(backgroundJobs.prunedAt)
-                  )
-                )
-                .limit(1);
-
-              const [sourceRef] = await tx
-                .select({ id: songSources.id })
-                .from(songSources)
-                .where(eq(songSources.storagePath, key))
-                .limit(1);
-
-              if (jobRef || sourceRef) {
-                report.activeReferencesCount++;
-                return;
-              }
-
-              // 5. Verificación inmediata pre-eliminación contra referencias concurrentes en vuelo (Defect 3 Remediation)
-              const [freshJobRef] = await tx
-                .select({ id: backgroundJobs.id })
-                .from(backgroundJobs)
-                .where(
-                  and(
-                    or(
-                      eq(backgroundJobs.outputStorageKey, key),
-                      eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
-                    ),
-                    or(
-                      isNull(backgroundJobs.prunedAt),
-                      inArray(backgroundJobs.status, ['PENDING', 'PROCESSING'])
+                // 5. Verificación inmediata pre-eliminación contra referencias concurrentes en vuelo (Defect 3 Remediation)
+                const [freshJobRef] = await tx
+                  .select({ id: backgroundJobs.id })
+                  .from(backgroundJobs)
+                  .where(
+                    and(
+                      or(
+                        eq(backgroundJobs.outputStorageKey, key),
+                        eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
+                      ),
+                      or(
+                        isNull(backgroundJobs.prunedAt),
+                        inArray(backgroundJobs.status, ['PENDING', 'PROCESSING'])
+                      )
                     )
                   )
-                )
-                .limit(1);
+                  .limit(1);
 
-              const [freshSourceRef] = await tx
-                .select({ id: songSources.id })
-                .from(songSources)
-                .where(
-                  or(
-                    eq(songSources.storagePath, key),
-                    eq(songSources.checksumSha256, meta.checksumSha256)
+                const [freshSourceRef] = await tx
+                  .select({ id: songSources.id })
+                  .from(songSources)
+                  .where(
+                    or(
+                      eq(songSources.storagePath, key),
+                      eq(songSources.checksumSha256, meta.checksumSha256)
+                    )
                   )
-                )
-                .limit(1);
+                  .limit(1);
 
-              if (freshJobRef || freshSourceRef) {
+                if (freshJobRef || freshSourceRef) {
+                  otherRefCount++;
+                  return;
+                }
+
+                // Registrar intención de eliminación DELETE_PENDING
+                await tx
+                  .insert(casDeletionIntents)
+                  .values({
+                    storageKey: key,
+                    checksumSha256: meta.checksumSha256,
+                    state: 'DELETE_PENDING',
+                    attempts: 0,
+                    createdAt: now,
+                    updatedAt: now,
+                  })
+                  .onConflictDoUpdate({
+                    target: casDeletionIntents.storageKey,
+                    set: {
+                      state: 'DELETE_PENDING',
+                      updatedAt: now,
+                    },
+                  });
+                intentCommitted = true;
+              });
+
+              if (otherRefCount > 0 || !intentCommitted) {
                 report.activeReferencesCount++;
                 return;
               }
 
-              // 6. El archivo no tiene referencias en base de datos: eliminar físicamente bajo advisory lock
+              // =========================================================================
+              // FASE 2: Eliminación Física en Almacenamiento (SIN TRANSACCIÓN DB ABIERTA)
+              // =========================================================================
+              // Cumple con el Requirement 13: Cero transacciones DB retenidas durante E/S física
               try {
                 const wasDeleted = await this.outputStorage.delete(key);
                 if (wasDeleted) {
                   deleted = true;
-                  report.orphansDeletedCount++;
-                } else {
-                  deleted = false;
                 }
               } catch (delErr: any) {
                 if (delErr instanceof StorageNotFoundError) {
                   deleted = false;
                 } else {
-                  throw delErr;
+                  deletionError = delErr?.message ?? String(delErr);
                 }
               }
 
-              // 7. Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
-              try {
-                await tx.transaction(async (subTx) => {
-                  await subTx.insert(auditLogs).values({
-                    eventType: 'ORPHAN_OUTPUT_COLLECTED',
-                    userId: options?.userId ?? null,
-                    resource: `storage/${key}`,
-                    metadata: {
-                      storageKey: key,
-                      byteLength: meta.byteLength,
-                      checksumSha256: meta.checksumSha256,
-                      fileCreatedAt: meta.createdAt.toISOString(),
-                      quarantineDays: days,
-                    },
-                  });
-                });
-                audited = true;
-              } catch (auditErr: any) {
-                audited = false;
+              // =========================================================================
+              // FASE 3: Persistencia de Estado Terminal y Auditoría (Tx 2)
+              // =========================================================================
+              if (deletionError) {
+                await this.db
+                  .update(casDeletionIntents)
+                  .set({
+                    state: 'RETRY_PENDING',
+                    attempts: sql`${casDeletionIntents.attempts} + 1`,
+                    lastError: deletionError,
+                    updatedAt: new Date(),
+                  })
+                  .where(eq(casDeletionIntents.storageKey, key));
+
                 report.errors.push({
                   storageKey: key,
-                  error: `Fallo al registrar auditoría de huérfano: ${auditErr?.message ?? String(auditErr)}`,
+                  error: `Fallo físico de eliminación huérfano (registrado RETRY_PENDING): ${deletionError}`,
                 });
+              } else {
+                await this.db.transaction(async (tx) => {
+                  await tx
+                    .update(casDeletionIntents)
+                    .set({
+                      state: 'DELETED',
+                      deletedAt: new Date(),
+                      updatedAt: new Date(),
+                    })
+                    .where(eq(casDeletionIntents.storageKey, key));
+
+                  // 7. Registro de auditoría mediante subtransacción aislada (SAVEPOINT)
+                  try {
+                    await tx.transaction(async (subTx) => {
+                      await subTx.insert(auditLogs).values({
+                        eventType: 'ORPHAN_OUTPUT_COLLECTED',
+                        userId: options?.userId ?? null,
+                        resource: `storage/${key}`,
+                        metadata: {
+                          storageKey: key,
+                          byteLength: meta.byteLength,
+                          checksumSha256: meta.checksumSha256,
+                          fileCreatedAt: meta.createdAt.toISOString(),
+                          quarantineDays: days,
+                        },
+                      });
+                    });
+                    audited = true;
+                    await tx
+                      .update(casDeletionIntents)
+                      .set({ audited: true })
+                      .where(eq(casDeletionIntents.storageKey, key));
+                  } catch (auditErr: any) {
+                    audited = false;
+                    report.errors.push({
+                      storageKey: key,
+                      error: `Fallo al registrar auditoría de huérfano: ${auditErr?.message ?? String(auditErr)}`,
+                    });
+                  }
+                });
+                report.orphansDeletedCount++;
               }
             });
           } else {
@@ -522,6 +693,155 @@ export class OutputRetentionService {
         storageKey: 'outputs/',
         error: `Error al listar claves de salida: ${listErr.message || String(listErr)}`,
       });
+    }
+
+    return report;
+  }
+
+  /**
+   * Reconcilia intenciones de eliminación pendientes o fallidas (DELETE_PENDING, RETRY_PENDING) (CR-04 Remediation).
+   * 
+   * Garantiza la recuperabilidad total ante caídas abruptas de procesos o fallos de red durante el ciclo de vida CAS.
+   */
+  public async reconcilePendingDeletions(options?: {
+    userId?: string;
+  }): Promise<CasReconciliationReport> {
+    const report: CasReconciliationReport = {
+      timestamp: new Date().toISOString(),
+      scannedCount: 0,
+      reconciledCount: 0,
+      failedCount: 0,
+      errors: [],
+    };
+
+    const pendingIntents = await this.db
+      .select()
+      .from(casDeletionIntents)
+      .where(inArray(casDeletionIntents.state, ['DELETE_PENDING', 'RETRY_PENDING']));
+
+    report.scannedCount = pendingIntents.length;
+
+    for (const intent of pendingIntents) {
+      try {
+        await this.withCasAdvisoryLock(intent.storageKey, async () => {
+          // Re-consultar estado actual bajo el lock
+          const [current] = await this.db
+            .select()
+            .from(casDeletionIntents)
+            .where(eq(casDeletionIntents.storageKey, intent.storageKey))
+            .limit(1);
+
+          if (!current || current.state === 'DELETED') {
+            return; // Ya reconciliado de forma idempotente
+          }
+
+          // Verificar si un nuevo worker registró una referencia legítima
+          const [activeJob] = await this.db
+            .select({ id: backgroundJobs.id })
+            .from(backgroundJobs)
+            .where(
+              and(
+                eq(backgroundJobs.outputStorageKey, intent.storageKey),
+                isNull(backgroundJobs.prunedAt)
+              )
+            )
+            .limit(1);
+
+          const [activeSource] = await this.db
+            .select({ id: songSources.id })
+            .from(songSources)
+            .where(eq(songSources.storagePath, intent.storageKey))
+            .limit(1);
+
+          if (activeJob || activeSource) {
+            // Existe referencia activa: resolver la intención a DELETED
+            await this.db
+              .update(casDeletionIntents)
+              .set({ state: 'DELETED', updatedAt: new Date() })
+              .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+            return;
+          }
+
+          // Eliminación física (Filesystem Only - sin transacción DB)
+          let deletionError: string | null = null;
+          let fileDeleted = false;
+          try {
+            const wasDeleted = await this.outputStorage.delete(intent.storageKey);
+            if (wasDeleted) fileDeleted = true;
+
+            const canonicalKey = intent.storageKey.replace(/\.[^.]+$/, '.canonical.json');
+            if (await this.outputStorage.exists(canonicalKey)) {
+              await this.outputStorage.delete(canonicalKey).catch(() => {});
+            }
+          } catch (delErr: any) {
+            if (delErr instanceof StorageNotFoundError) {
+              fileDeleted = false;
+            } else {
+              deletionError = delErr?.message ?? String(delErr);
+            }
+          }
+
+          if (deletionError) {
+            const nextAttempts = current.attempts + 1;
+            const nextState = nextAttempts >= current.maxAttempts ? 'DELETE_FAILED' : 'RETRY_PENDING';
+            await this.db
+              .update(casDeletionIntents)
+              .set({
+                state: nextState,
+                attempts: nextAttempts,
+                lastError: deletionError,
+                updatedAt: new Date(),
+              })
+              .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+
+            report.failedCount++;
+            report.errors.push({ storageKey: intent.storageKey, error: deletionError });
+          } else {
+            await this.db.transaction(async (tx) => {
+              await tx
+                .update(casDeletionIntents)
+                .set({
+                  state: 'DELETED',
+                  deletedAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+
+              try {
+                await tx.transaction(async (subTx) => {
+                  await subTx.insert(auditLogs).values({
+                    eventType: 'CONVERSION_OUTPUT_DELETION_RECONCILED',
+                    userId: options?.userId ?? null,
+                    resource: `storage/${intent.storageKey}`,
+                    metadata: {
+                      storageKey: intent.storageKey,
+                      checksumSha256: intent.checksumSha256,
+                      jobId: intent.jobId,
+                      reconciledAt: new Date().toISOString(),
+                    },
+                  });
+                });
+                await tx
+                  .update(casDeletionIntents)
+                  .set({ audited: true })
+                  .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+              } catch (auditErr: any) {
+                report.errors.push({
+                  storageKey: intent.storageKey,
+                  error: `Fallo al registrar auditoría de reconciliación: ${auditErr?.message ?? String(auditErr)}`,
+                });
+              }
+            });
+            report.reconciledCount++;
+          }
+        });
+      } catch (err: any) {
+        report.failedCount++;
+        report.errors.push({
+          storageKey: intent.storageKey,
+          error: err.message || String(err),
+        });
+      }
     }
 
     return report;

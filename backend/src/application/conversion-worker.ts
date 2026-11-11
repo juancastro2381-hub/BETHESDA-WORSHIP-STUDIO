@@ -10,9 +10,9 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { and, eq, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { db as defaultDb, type Database } from '../db/index.ts';
-import { backgroundJobs, type BackgroundJobRow } from '../db/schema.ts';
+import { backgroundJobs, casDeletionIntents, type BackgroundJobRow } from '../db/schema.ts';
 import {
   LocalFileSystemSourceStorageProvider,
   type ISourceStorageProvider,
@@ -1470,6 +1470,34 @@ export class ConversionWorker {
         if (!activeJob) {
           return null;
         }
+
+        // Requirement 9: A committed deletion intent must prevent new references from being registered against the object.
+        const [pendingIntent] = await tx
+          .select({ state: casDeletionIntents.state })
+          .from(casDeletionIntents)
+          .where(
+            and(
+              eq(casDeletionIntents.storageKey, casStorageKey),
+              inArray(casDeletionIntents.state, ['DELETE_PENDING', 'RETRY_PENDING'])
+            )
+          )
+          .limit(1);
+
+        if (pendingIntent) {
+          throw new Error(
+            `Cannot register reference: CAS object "${casStorageKey}" has a pending deletion intent (${pendingIntent.state}).`
+          );
+        }
+
+        // Si existía un intento previo en estado DELETED, se remueve ya que se creará una instancia fresca
+        await tx
+          .delete(casDeletionIntents)
+          .where(
+            and(
+              eq(casDeletionIntents.storageKey, casStorageKey),
+              eq(casDeletionIntents.state, 'DELETED')
+            )
+          );
 
         // Persistir archivo binario/texto en el proveedor de almacenamiento bajo el advisory lock
         saveMetadata = await this.outputStorage.save(casStorageKey, outputBuffer, {

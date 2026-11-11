@@ -811,6 +811,43 @@ export const backgroundJobs = pgTable(
   ]
 );
 
+// ============================================================================
+// CAS DELETION STATE MACHINE & INTENT LOG (FASE 2B.1 REMEDIATION)
+// ============================================================================
+
+export const casDeletionStateEnum = pgEnum('cas_deletion_state', [
+  'DELETE_PENDING',
+  'DELETED',
+  'DELETE_FAILED',
+  'RETRY_PENDING',
+]);
+
+export const casDeletionIntents = pgTable(
+  'cas_deletion_intents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    storageKey: varchar('storage_key', { length: 512 }).notNull().unique(),
+    checksumSha256: varchar('checksum_sha256', { length: 64 }),
+    jobId: uuid('job_id').references(() => backgroundJobs.id, { onDelete: 'set null' }),
+    state: casDeletionStateEnum('state').notNull().default('DELETE_PENDING'),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(5),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    audited: boolean('audited').notNull().default(false),
+  },
+  (table) => [
+    index('idx_cas_deletion_intents_state').on(table.state),
+    index('idx_cas_deletion_intents_key').on(table.storageKey),
+  ]
+);
+
+export type CasDeletionIntentRow = typeof casDeletionIntents.$inferSelect;
+export type NewCasDeletionIntentRow = typeof casDeletionIntents.$inferInsert;
+export type CasDeletionState = 'DELETE_PENDING' | 'DELETED' | 'DELETE_FAILED' | 'RETRY_PENDING';
+
 /**
  * Tabla: omr_proposals
  * Propuestas preliminares generadas por OMR con revisión humana obligatoria (is_ai_draft: true).

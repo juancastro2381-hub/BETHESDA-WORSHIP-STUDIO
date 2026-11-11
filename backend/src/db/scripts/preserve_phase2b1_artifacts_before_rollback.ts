@@ -35,8 +35,12 @@ export interface PreservedArtifactEntry {
   physicalFileExists: boolean;
   checksumVerified: boolean;
   preservedFilePath: string | null;
+  preservedFileVerified: boolean;
   companionStorageKey: string | null;
+  companionChecksumSha256: string | null;
+  companionByteLength: number | null;
   companionPreservedPath: string | null;
+  companionPreservedVerified: boolean;
 }
 
 export interface RollbackBackupManifest {
@@ -89,8 +93,12 @@ export async function preservePhase2b1Artifacts(options?: {
     let physicalExists = false;
     let checksumVerified = false;
     let preservedFilePath: string | null = null;
+    let preservedFileVerified = false;
     let companionStorageKey: string | null = null;
+    let companionChecksumSha256: string | null = null;
+    let companionByteLength: number | null = null;
     let companionPreservedPath: string | null = null;
+    let companionPreservedVerified = false;
 
     if (!isPruned) {
       physicalExists = await storageProvider.exists(storageKey);
@@ -100,7 +108,7 @@ export async function preservePhase2b1Artifacts(options?: {
         );
       }
 
-      // Verificación de integridad criptográfica
+      // Verificación de integridad criptográfica del archivo primario
       const buffer = await storageProvider.getBuffer(storageKey);
       const computedHash = crypto.createHash('sha256').update(buffer).digest('hex');
 
@@ -115,16 +123,39 @@ export async function preservePhase2b1Artifacts(options?: {
       const destPath = path.join(artifactsDir, path.basename(storageKey));
       await fs.writeFile(destPath, buffer);
       preservedFilePath = path.relative(backupDir, destPath);
+
+      // Verificación bidireccional post-copia del archivo de respaldo
+      const writtenBuffer = await fs.readFile(destPath);
+      const writtenHash = crypto.createHash('sha256').update(writtenBuffer).digest('hex');
+      if (writtenHash !== computedHash) {
+        throw new Error(
+          `[FAIL-CLOSED PRECONDITION FAILED] Error al verificar copia de respaldo para ${storageKey}: hash fuente ${computedHash}, hash copia ${writtenHash}`
+        );
+      }
+      preservedFileVerified = true;
       activeArtifactsPreserved++;
 
-      // Verificar y preservar companion canónico (*.canonical.json)
+      // Verificar y preservar companion canónico (*.canonical.json) para Zero Musical Fabrication
       const companionCandidateKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
       if (await storageProvider.exists(companionCandidateKey)) {
         companionStorageKey = companionCandidateKey;
         const compBuf = await storageProvider.getBuffer(companionCandidateKey);
+        companionChecksumSha256 = crypto.createHash('sha256').update(compBuf).digest('hex');
+        companionByteLength = compBuf.byteLength;
+
         const compDestPath = path.join(artifactsDir, path.basename(companionCandidateKey));
         await fs.writeFile(compDestPath, compBuf);
         companionPreservedPath = path.relative(backupDir, compDestPath);
+
+        // Verificación bidireccional de la copia del companion
+        const writtenCompBuf = await fs.readFile(compDestPath);
+        const writtenCompHash = crypto.createHash('sha256').update(writtenCompBuf).digest('hex');
+        if (writtenCompHash !== companionChecksumSha256) {
+          throw new Error(
+            `[FAIL-CLOSED PRECONDITION FAILED] Error al verificar copia de companion para ${companionCandidateKey}: hash fuente ${companionChecksumSha256}, hash copia ${writtenCompHash}`
+          );
+        }
+        companionPreservedVerified = true;
         companionFilesPreserved++;
       }
     } else {
@@ -145,8 +176,12 @@ export async function preservePhase2b1Artifacts(options?: {
       physicalFileExists: physicalExists,
       checksumVerified,
       preservedFilePath,
+      preservedFileVerified,
       companionStorageKey,
+      companionChecksumSha256,
+      companionByteLength,
       companionPreservedPath,
+      companionPreservedVerified,
     });
   }
 
@@ -211,7 +246,24 @@ export async function preservePhase2b1Artifacts(options?: {
 
   const manifestHash = crypto.createHash('sha256').update(manifestContent).digest('hex');
 
-  console.log(`[PRESERVE-2B.1] Preservación completada exitosamente.`);
+  // 4. Verificación rigurosa de inventario del respaldo antes de declarar éxito (Requirement 5)
+  const reReadManifest: RollbackBackupManifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8'));
+  for (const entry of reReadManifest.artifacts) {
+    if (entry.preservedFilePath) {
+      const fullPreservedPath = path.join(backupDir, entry.preservedFilePath);
+      if (!fsSync.existsSync(fullPreservedPath)) {
+        throw new Error(`[FAIL-CLOSED INVENTORY ERROR] Archivo respaldado ausente: ${fullPreservedPath}`);
+      }
+    }
+    if (entry.companionPreservedPath) {
+      const fullCompPath = path.join(backupDir, entry.companionPreservedPath);
+      if (!fsSync.existsSync(fullCompPath)) {
+        throw new Error(`[FAIL-CLOSED INVENTORY ERROR] Companion respaldado ausente: ${fullCompPath}`);
+      }
+    }
+  }
+
+  console.log(`[PRESERVE-2B.1] Preservación completada e inventario 100% verificado.`);
   console.log(`[PRESERVE-2B.1] Directorio de respaldo: ${backupDir}`);
   console.log(`[PRESERVE-2B.1] Activos preservados: ${activeArtifactsPreserved}, Canónicos companion: ${companionFilesPreserved}`);
   console.log(`[PRESERVE-2B.1] Manifest SHA-256: ${manifestHash}`);

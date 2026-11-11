@@ -533,6 +533,13 @@ export class ConversionJobService {
         throw new ValidationError('Solo se pueden agregar al catálogo trabajos completados o revisados.');
       }
 
+      // Verificación de política de ciclo de vida (Fase 2B.1 Defect 2 Remediation)
+      if (job.prunedAt) {
+        throw new ValidationError(
+          'El trabajo de conversión ha sido podado según la política de retención y ya no está disponible para persistencia en catálogo.'
+        );
+      }
+
       // 2. Idempotencia Nivel 1: Si ya fue comprometido previamente en background_jobs
       if (job.committedSongId) {
         return await songService.getSong(job.committedSongId);
@@ -555,7 +562,26 @@ export class ConversionJobService {
 
       // 4. Extraer el grafo canónico real serializado durante la conversión
       const details = job.errorDetails as any;
-      const rawCanonicalJson = details?.canonicalPayload;
+      let rawCanonicalJson = details?.canonicalPayload;
+
+      // Fase 2B.1 Remediation: Rehidratación fiel de canonicalPayload desde CAS storage companion
+      // Preserva compatibilidad dual: lee directamente si existe en JSONB (Fase 2A legacy), o desde storage (Fase 2B.1)
+      if (!rawCanonicalJson && details?.canonicalStorageKey && this.outputStorage) {
+        try {
+          const canonicalBuf = await this.outputStorage.getBuffer(details.canonicalStorageKey);
+          rawCanonicalJson = JSON.parse(canonicalBuf.toString('utf-8'));
+        } catch (err: any) {
+          throw new ValidationError(
+            `Fallo al rehidratar el modelo canónico desde el almacenamiento externo: ${err?.message ?? String(err)}`
+          );
+        }
+      } else if (!rawCanonicalJson && job.outputStorageKey && this.outputStorage) {
+        const derivedKey = job.outputStorageKey.replace(/\.[^.]+$/, '.canonical.json');
+        if (await this.outputStorage.exists(derivedKey)) {
+          const canonicalBuf = await this.outputStorage.getBuffer(derivedKey);
+          rawCanonicalJson = JSON.parse(canonicalBuf.toString('utf-8'));
+        }
+      }
 
       if (!rawCanonicalJson) {
         throw new ValidationError(

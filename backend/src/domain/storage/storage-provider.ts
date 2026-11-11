@@ -119,9 +119,12 @@ export interface IStorageProvider {
   save(storageKey: string, buffer: Buffer, options?: StorageSaveOptions): Promise<StorageMetadata>;
 
   /**
-   * Obtiene el contenido completo de un objeto como Buffer.
+   * Obtiene el contenido completo de un objeto como Buffer con verificación opcional de integridad.
    */
-  getBuffer(storageKey: string): Promise<Buffer>;
+  getBuffer(
+    storageKey: string,
+    options?: { verifyChecksum?: boolean; expectedChecksumSha256?: string }
+  ): Promise<Buffer>;
 
   /**
    * Obtiene un flujo de lectura (ReadableStream) para transferencias eficientes.
@@ -164,10 +167,33 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
 
   public constructor(
     baseDir: string = 'storage/outputs',
-    signingSecret: string = 'bethesda_default_storage_signing_secret_2026'
+    signingSecret?: string
   ) {
     this.baseDir = path.resolve(process.cwd(), baseDir);
-    this.signingSecret = signingSecret;
+
+    // CR-01 Remediation: Fail-closed resolution of signing secret. No hardcoded insecure defaults.
+    const secret = signingSecret ?? process.env.STORAGE_SIGNING_SECRET;
+    if (!secret || typeof secret !== 'string') {
+      throw new StorageSecurityError(
+        'STORAGE_SIGNING_SECRET es obligatorio y debe proveerse mediante entorno o configuración. Inicialización abortada (Fail-Closed).'
+      );
+    }
+
+    if (secret.length < 32) {
+      throw new StorageSecurityError(
+        `STORAGE_SIGNING_SECRET debe contener al menos 32 caracteres (256 bits de entropía). Longitud recibida: ${secret.length}`
+      );
+    }
+
+    // Comprobación de entropía mínima: rechazar secuencias triviales o de baja entropía
+    const uniqueChars = new Set(secret).size;
+    if (uniqueChars < 8) {
+      throw new StorageSecurityError(
+        'STORAGE_SIGNING_SECRET carece de entropía suficiente (demasiados caracteres repetidos). Se requiere entropía criptográfica real.'
+      );
+    }
+
+    this.signingSecret = secret;
 
     if (!fs.existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
@@ -175,7 +201,8 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
   }
 
   /**
-   * Valida y resuelve de forma segura una clave de almacenamiento contra Directory Traversal.
+   * Valida y resuelve de forma segura una clave de almacenamiento contra Directory Traversal,
+   * Symbolic Link Escapes, UNC Paths y Bypass de Separadores (CR-01 & CR-08 Remediation).
    */
   public resolveSafePath(storageKey: string): string {
     if (!storageKey || typeof storageKey !== 'string') {
@@ -192,11 +219,13 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
     // Normalizar slashes a formato estándar
     const normalizedKey = storageKey.replace(/\\/g, '/');
 
-    // Detección estricta de traversal
+    // Detección estricta de traversal, UNC paths y drive letters
     if (
       normalizedKey.includes('../') ||
       normalizedKey.includes('/..') ||
       normalizedKey === '..' ||
+      normalizedKey.startsWith('/') ||
+      normalizedKey.startsWith('//') || // UNC path
       path.isAbsolute(normalizedKey) ||
       /^[a-zA-Z]:/.test(normalizedKey) // Windows drive letter
     ) {
@@ -208,12 +237,48 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
 
     const resolved = path.resolve(this.baseDir, normalizedKey);
 
-    // Debe residir estrictamente dentro del baseDir
+    // Debe residir léxicamente dentro del baseDir
     if (!resolved.startsWith(this.baseDir + path.sep) && resolved !== this.baseDir) {
       throw new StorageSecurityError(
         `Violación de seguridad: Ruta resuelta fuera del directorio base en: "${storageKey}"`,
         storageKey
       );
+    }
+
+    // Verificación canónica física contra enlaces simbólicos (Symlink Escape Protection)
+    try {
+      const canonicalBaseDir = fs.existsSync(this.baseDir) ? fs.realpathSync(this.baseDir) : this.baseDir;
+      if (fs.existsSync(resolved)) {
+        const canonicalResolved = fs.realpathSync(resolved);
+        if (!canonicalResolved.startsWith(canonicalBaseDir + path.sep) && canonicalResolved !== canonicalBaseDir) {
+          throw new StorageSecurityError(
+            `Violación de seguridad: Enlace simbólico fuera del directorio base detectado en: "${storageKey}"`,
+            storageKey
+          );
+        }
+      } else {
+        // Para rutas nuevas, verificar directorios ancestros existentes
+        let currentDir = path.dirname(resolved);
+        while (currentDir.length >= this.baseDir.length) {
+          if (fs.existsSync(currentDir)) {
+            const canonicalDir = fs.realpathSync(currentDir);
+            if (!canonicalDir.startsWith(canonicalBaseDir + path.sep) && canonicalDir !== canonicalBaseDir) {
+              throw new StorageSecurityError(
+                `Violación de seguridad: Enlace simbólico en jerarquía de directorios detectado en: "${storageKey}"`,
+                storageKey
+              );
+            }
+            break;
+          }
+          const parentDir = path.dirname(currentDir);
+          if (parentDir === currentDir) break;
+          currentDir = parentDir;
+        }
+      }
+    } catch (realErr) {
+      if (realErr instanceof StorageSecurityError) {
+        throw realErr;
+      }
     }
 
     return resolved;
@@ -305,11 +370,24 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
     };
   }
 
-  public async getBuffer(storageKey: string): Promise<Buffer> {
+  public async getBuffer(
+    storageKey: string,
+    options?: { verifyChecksum?: boolean; expectedChecksumSha256?: string }
+  ): Promise<Buffer> {
     const targetPath = this.resolveSafePath(storageKey);
     try {
-      return await fs.promises.readFile(targetPath);
+      const buffer = await fs.promises.readFile(targetPath);
+      if (options?.expectedChecksumSha256 || options?.verifyChecksum) {
+        const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
+        if (options.expectedChecksumSha256 && options.expectedChecksumSha256 !== actualHash) {
+          throw new StorageIntegrityError(storageKey, options.expectedChecksumSha256, actualHash);
+        }
+      }
+      return buffer;
     } catch (err: any) {
+      if (err instanceof StorageIntegrityError || err instanceof StorageSecurityError) {
+        throw err;
+      }
       if (err?.code === 'ENOENT') {
         throw new StorageNotFoundError(storageKey, err);
       }
@@ -414,7 +492,10 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
   }
 
   public verifySignedUrl(storageKey: string, expiresAt: number, signature: string): boolean {
-    if (Math.floor(Date.now() / 1000) > expiresAt) {
+    if (!signature || typeof signature !== 'string') {
+      return false;
+    }
+    if (typeof expiresAt !== 'number' || Math.floor(Date.now() / 1000) > expiresAt) {
       return false;
     }
     const dataToSign = `${storageKey}:${expiresAt}`;
@@ -423,7 +504,48 @@ export class LocalFileSystemStorageProvider implements IStorageProvider {
       .update(dataToSign)
       .digest('hex');
 
-    return crypto.timingSafeEqual(Buffer.from(signature, 'utf8'), Buffer.from(expectedSig, 'utf8'));
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expBuf = Buffer.from(expectedSig, 'utf8');
+
+    // CR-01 / Timing Attack Protection: Validate buffer length before timingSafeEqual
+    if (sigBuf.length !== expBuf.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  }
+
+  /**
+   * Limpia archivos temporales (.tmp.*) abandonados por fallos del sistema o caídas de proceso.
+   */
+  public async cleanStaleTempFiles(maxAgeMs: number = 3600_000): Promise<number> {
+    let cleanedCount = 0;
+    const now = Date.now();
+
+    const scanAndClean = async (dir: string): Promise<void> => {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await scanAndClean(fullPath);
+        } else if (entry.isFile() && entry.name.includes('.tmp.')) {
+          try {
+            const stats = await fs.promises.stat(fullPath);
+            if (maxAgeMs === 0 || now - stats.mtimeMs >= maxAgeMs) {
+              await fs.promises.unlink(fullPath);
+              cleanedCount++;
+            }
+          } catch {
+            // Ignorar errores de concurrencia al borrar tmp
+          }
+        }
+      }
+    };
+
+    if (fs.existsSync(this.baseDir)) {
+      await scanAndClean(this.baseDir);
+    }
+    return cleanedCount;
   }
 
   public async listKeys(prefix: string = ''): Promise<string[]> {
@@ -675,7 +797,10 @@ export class S3CompatibleStorageProvider implements IStorageProvider {
     };
   }
 
-  public async getBuffer(storageKey: string): Promise<Buffer> {
+  public async getBuffer(
+    storageKey: string,
+    options?: { verifyChecksum?: boolean; expectedChecksumSha256?: string }
+  ): Promise<Buffer> {
     const url = this.getObjectUrl(storageKey);
     const emptyPayloadHash = crypto.createHash('sha256').update('').digest('hex');
     const signedHeaders = this.signRequest('GET', url, {}, emptyPayloadHash);
@@ -700,7 +825,16 @@ export class S3CompatibleStorageProvider implements IStorageProvider {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    const buffer = Buffer.from(arrayBuffer);
+
+    if (options?.expectedChecksumSha256 || options?.verifyChecksum) {
+      const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
+      if (options.expectedChecksumSha256 && options.expectedChecksumSha256 !== actualHash) {
+        throw new StorageIntegrityError(storageKey, options.expectedChecksumSha256, actualHash);
+      }
+    }
+
+    return buffer;
   }
 
   public async getStream(

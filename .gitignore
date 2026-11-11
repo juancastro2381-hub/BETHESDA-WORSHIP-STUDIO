@@ -30,6 +30,8 @@ backend/storage/audio/*
 !backend/storage/audio/.gitkeep
 backend/storage/documents/*
 !backend/storage/documents/.gitkeep
+backend/storage/outputs/*
+!backend/storage/outputs/.gitkeep
 /storage/
 
 

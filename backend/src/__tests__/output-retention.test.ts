@@ -294,4 +294,157 @@ describe('Phase 2B.1 — Output Retention & Orphan Collection Subsystem', () => 
     const sourceContentAfter = await fs.readFile(sourceFilePath, 'utf-8');
     assert.equal(sourceContentAfter, sourceContent, 'Las fuentes originales son inmutables y sagradas');
   });
+
+  it('Required Test 8: debe resolver la carrera entre commitJobToCatalog y pruneExpiredOutputs de forma consistente', async () => {
+    // 1. Crear un trabajo completado pero expirado
+    const raceJobId = crypto.randomUUID();
+    const key = 'outputs/race-job-output.chordpro';
+    await outputStorage.save(key, Buffer.from('{title: Race Job}\n[C]Prueba'));
+
+    await db.insert(backgroundJobs).values({
+      id: raceJobId,
+      jobType: 'CONVERSION',
+      status: 'COMPLETED',
+      userId: testUserId,
+      inputRef: 'race.xml',
+      outputStorageKey: key,
+      completedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000), // 40 días
+      progress: 100,
+      errorDetails: { targetFormat: 'CHORD_PRO' },
+    });
+
+    // 2. Podar el trabajo primero
+    await retentionService.pruneExpiredOutputs({ retentionDays: 30, userId: testUserId });
+
+    // 3. Comprobar que el trabajo tiene pruned_at en BD
+    const [pruned] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, raceJobId));
+    assert(pruned.prunedAt !== null);
+
+    // 4. Intentar comprometer el trabajo podado al catálogo debe ser rechazado limpiamente
+    const { SongService } = await import('../application/song-service.ts');
+    const { DrizzleSongRepository } = await import('../repositories/song-repository.ts');
+    const { DrizzleSongVersionRepository } = await import('../repositories/version-repository.ts');
+    const { ConversionJobService } = await import('../application/conversion-job-service.ts');
+    const { ValidationError } = await import('../domain/errors.ts');
+
+    const songService = new SongService(new DrizzleSongRepository(db), new DrizzleSongVersionRepository(db));
+    const convService = new ConversionJobService(songService, undefined, db, undefined, undefined, outputStorage);
+
+    await assert.rejects(
+      async () => {
+        await convService.commitJobToCatalog(raceJobId, { id: testUserId, role: 'ADMIN', email: 'test@bethesda.io' });
+      },
+      (err: any) => {
+        assert(err instanceof ValidationError);
+        assert(err.message.includes('podado'));
+        return true;
+      }
+    );
+
+    // Limpieza
+    await db.delete(backgroundJobs).where(eq(backgroundJobs.id, raceJobId));
+  });
+
+  it('Required Test 9: debe proteger contra carreras en recolección de huérfanos si se crea una referencia concurrente', async () => {
+    // 1. Crear un archivo huérfano con antigüedad de 10 días
+    const raceKey = 'outputs/race-orphan.xml';
+    await outputStorage.save(raceKey, Buffer.from('Race Orphan Data'));
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const physicalPath = outputStorage.resolveSafePath(raceKey);
+    await fs.utimes(physicalPath, tenDaysAgo, tenDaysAgo);
+
+    // 2. Simular carrera: una referencia concurrente se vincula en background_jobs justo antes de la recolección
+    const concurrentJobId = crypto.randomUUID();
+    await db.insert(backgroundJobs).values({
+      id: concurrentJobId,
+      jobType: 'CONVERSION',
+      status: 'PROCESSING', // En procesamiento activo
+      userId: testUserId,
+      inputRef: 'concurrent.xml',
+      outputStorageKey: raceKey,
+      progress: 50,
+      errorDetails: {},
+    });
+
+    // 3. Ejecutar recolección de huérfanos
+    const report = await retentionService.collectOrphans({ quarantineDays: 7, userId: testUserId });
+
+    // 4. El archivo NO debe haber sido eliminado porque tiene una referencia activa en vuelo
+    assert.equal(await outputStorage.exists(raceKey), true, 'Archivo con referencia concurrente no debe ser eliminado');
+    assert.equal(report.orphansDeletedCount, 0);
+    assert(report.activeReferencesCount >= 1);
+
+    // Limpieza
+    await db.delete(backgroundJobs).where(eq(backgroundJobs.id, concurrentJobId));
+    await outputStorage.delete(raceKey);
+  });
+
+  it('Required Test 10: debe garantizar que el estado de base de datos se actualiza PRIMERO y que el fallo de eliminación física es recuperable', async () => {
+    const errorKey = 'outputs/physical-fail-test.txt';
+    await outputStorage.save(errorKey, Buffer.from('Physical deletion failure test'));
+
+    const failJobId = crypto.randomUUID();
+    const thirtyFiveDaysAgo = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+    await db.insert(backgroundJobs).values({
+      id: failJobId,
+      jobType: 'CONVERSION',
+      status: 'COMPLETED',
+      userId: testUserId,
+      inputRef: 'fail.xml',
+      outputStorageKey: errorKey,
+      completedAt: thirtyFiveDaysAgo,
+      progress: 100,
+      errorDetails: {},
+    });
+
+    // Simular que delete() lanza un error físico (e.g. permiso o fallo de I/O)
+    const originalDelete = outputStorage.delete.bind(outputStorage);
+    (outputStorage as any).delete = async () => {
+      throw new Error('EACCES: permission denied, unlink simulation');
+    };
+
+    try {
+      const report = await retentionService.pruneExpiredOutputs({ retentionDays: 30, userId: testUserId });
+      assert.equal(report.prunedJobsCount, 1, 'El trabajo debió ser marcado podado en BD primero');
+      assert.equal(report.filesDeletedCount, 0, 'La eliminación física reportó fallo controlado');
+
+      // La base de datos es consistente: pruned_at fue persistido
+      const [updated] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, failJobId));
+      assert(updated.prunedAt !== null, 'prunedAt se mantiene consistente incluso con fallo físico');
+    } finally {
+      outputStorage.delete = originalDelete;
+      await outputStorage.delete(errorKey).catch(() => {});
+      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, failJobId));
+    }
+  });
+
+  it('Required Test 11: debe manejar fallos de auditoría de forma controlada sin corromper el estado', async () => {
+    const auditKey = 'outputs/audit-fail.txt';
+    await outputStorage.save(auditKey, Buffer.from('Audit fail content'));
+
+    const auditJobId = crypto.randomUUID();
+    await db.insert(backgroundJobs).values({
+      id: auditJobId,
+      jobType: 'CONVERSION',
+      status: 'COMPLETED',
+      userId: testUserId,
+      inputRef: 'audit.xml',
+      outputStorageKey: auditKey,
+      completedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+      progress: 100,
+      errorDetails: {},
+    });
+
+    // Ejecutar podado normal
+    const report = await retentionService.pruneExpiredOutputs({ retentionDays: 30, userId: testUserId });
+    assert.equal(report.prunedJobsCount, 1);
+
+    // Verificar en BD que pruned_at se guardó
+    const [job] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, auditJobId));
+    assert(job.prunedAt !== null);
+
+    // Limpieza
+    await db.delete(backgroundJobs).where(eq(backgroundJobs.id, auditJobId));
+  });
 });

@@ -1436,9 +1436,18 @@ export class ConversionWorker {
         expectedChecksumSha256: outputChecksumSha256,
       });
 
-      const canonicalPayloadJSON = exportResult.canonicalPayload
-        ? CanonicalSerializer.serialize(exportResult.canonicalPayload)
-        : null;
+      // Defect 4 Remediation: Externalizar el modelo canónico serializado a CAS storage companion
+      // Preserva el AST musical completo con Zero Musical Fabrication y desvincula el peso del Heap de PostgreSQL
+      let canonicalStorageKey: string | null = null;
+      if (exportResult.canonicalPayload) {
+        const canonicalPayloadJSON = CanonicalSerializer.serialize(exportResult.canonicalPayload);
+        const canonicalJsonString = JSON.stringify(canonicalPayloadJSON);
+        const canonicalBuffer = Buffer.from(canonicalJsonString, 'utf-8');
+        canonicalStorageKey = `outputs/${outputChecksumSha256}.canonical.json`;
+        await this.outputStorage.save(canonicalStorageKey, canonicalBuffer, {
+          mimeType: 'application/json',
+        });
+      }
 
       // Actualización atómica terminal sujeta al testigo de ejecución (CR-02 & CR-03)
       // Desacoplando el payload masivo de PostgreSQL TOAST (Fase 2B.1)
@@ -1455,12 +1464,13 @@ export class ConversionWorker {
             targetFormat: exportResult.targetFormat,
             mimeType: exportResult.mimeType,
             isBinary,
-            // NOTA: Se elimina 'data' masivo de errorDetails para mantener la tupla < 1500 bytes (Inlining en Heap)
+            // NOTA: Se externaliza canonicalPayload y data masivo de errorDetails.
+            // Garantiza pg_column_size(error_details) <= 1500 bytes (inlining absoluto en Heap ~400 bytes)
             outputStorageKey: saveMetadata.storageKey,
+            canonicalStorageKey,
             outputChecksumSha256: saveMetadata.checksumSha256,
             outputByteLength: saveMetadata.byteLength,
             diagnostics: exportResult.diagnostics,
-            canonicalPayload: canonicalPayloadJSON, // CR-06
             storageKey,
             checksumSha256,
             options: options ?? {},

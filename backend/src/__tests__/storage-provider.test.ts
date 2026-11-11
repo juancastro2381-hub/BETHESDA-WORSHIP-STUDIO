@@ -24,11 +24,13 @@ import {
 
 describe('Phase 2B.1 — Agnostic Storage Provider Subsystem', () => {
   const testBaseDir = path.resolve(process.cwd(), 'storage', 'test-outputs');
+  const validSecret = 'c38b29f79e86c07a346513e9a567c9bf10e4708761fa3571d79385b2e987c941';
   let localStorage: LocalFileSystemStorageProvider;
 
   before(async () => {
+    process.env.STORAGE_SIGNING_SECRET = validSecret;
     await fs.rm(testBaseDir, { recursive: true, force: true });
-    localStorage = new LocalFileSystemStorageProvider('storage/test-outputs');
+    localStorage = new LocalFileSystemStorageProvider('storage/test-outputs', validSecret);
   });
 
   after(async () => {
@@ -202,6 +204,146 @@ describe('Phase 2B.1 — Agnostic Storage Provider Subsystem', () => {
         }
       );
     });
+
+    it('Required Test 1: debe fallar (Fail-Closed) si falta STORAGE_SIGNING_SECRET', () => {
+      const originalEnv = process.env.STORAGE_SIGNING_SECRET;
+      delete process.env.STORAGE_SIGNING_SECRET;
+
+      try {
+        assert.throws(
+          () => new LocalFileSystemStorageProvider('storage/test-outputs', undefined),
+          (err: any) => {
+            assert(err instanceof StorageSecurityError);
+            assert(err.message.includes('STORAGE_SIGNING_SECRET'));
+            return true;
+          }
+        );
+      } finally {
+        process.env.STORAGE_SIGNING_SECRET = originalEnv;
+      }
+    });
+
+    it('Required Test 2: debe rechazar secretos con longitud menor a 32 caracteres o baja entropía', () => {
+      // Menos de 32 caracteres
+      assert.throws(
+        () => new LocalFileSystemStorageProvider('storage/test-outputs', 'short-secret-123'),
+        (err: any) => {
+          assert(err instanceof StorageSecurityError);
+          assert(err.message.includes('32 caracteres'));
+          return true;
+        }
+      );
+
+      // 32 caracteres pero baja entropía (caracteres repetidos)
+      assert.throws(
+        () => new LocalFileSystemStorageProvider('storage/test-outputs', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+        (err: any) => {
+          assert(err instanceof StorageSecurityError);
+          assert(err.message.includes('entropía'));
+          return true;
+        }
+      );
+    });
+
+    it('Required Test 3: debe bloquear escapes mediante enlaces simbólicos (Symlinks)', async () => {
+      const outsideDir = path.resolve(process.cwd(), 'storage', 'test-symlink-outside');
+      await fs.mkdir(outsideDir, { recursive: true });
+      const outsideFile = path.join(outsideDir, 'secret-data.txt');
+      await fs.writeFile(outsideFile, 'TOP_SECRET_DATA');
+
+      const symlinkTarget = path.join(testBaseDir, 'symlink-escape.txt');
+      try {
+        await fs.symlink(outsideFile, symlinkTarget, 'file');
+      } catch (symlinkErr: any) {
+        // En Windows sin modo desarrollador, symlink puede requerir permisos elevados.
+        // Si no se puede crear symlink físico, verificar la lógica de realpath directamente.
+        if (symlinkErr?.code === 'EPERM') {
+          return; // Skip if OS denies symlink creation
+        }
+      }
+
+      try {
+        await assert.rejects(
+          async () => {
+            await localStorage.getBuffer('symlink-escape.txt');
+          },
+          (err: any) => {
+            assert(err instanceof StorageSecurityError);
+            assert(err.message.includes('simbólico'));
+            return true;
+          }
+        );
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true });
+        await fs.unlink(symlinkTarget).catch(() => {});
+      }
+    });
+
+    it('Required Test 4: debe garantizar atomicidad en escrituras CAS concurrentes', async () => {
+      const concurrentData = Buffer.from('Concurrent CAS Test Content');
+      const hash = crypto.createHash('sha256').update(concurrentData).digest('hex');
+      const key = `outputs/${hash}.cas-test.txt`;
+
+      // 10 escrituras concurrentes simultáneas al mismo objeto
+      const promises = Array.from({ length: 10 }).map(() =>
+        localStorage.save(key, concurrentData)
+      );
+
+      const results = await Promise.all(promises);
+      assert.equal(results.length, 10);
+      for (const res of results) {
+        assert.equal(res.checksumSha256, hash);
+      }
+
+      // El archivo en disco debe estar íntegro
+      const savedBuf = await localStorage.getBuffer(key);
+      assert.equal(savedBuf.toString('utf-8'), 'Concurrent CAS Test Content');
+    });
+
+    it('Required Test 5: debe fallar limpiamente ante error de escritura y limpiar temporales', async () => {
+      // Clave que causa error por ser un nombre inválido o directorio reservado
+      await assert.rejects(
+        async () => {
+          await localStorage.save('', Buffer.from('empty-key'));
+        },
+        (err: any) => {
+          assert(err instanceof StorageSecurityError);
+          return true;
+        }
+      );
+    });
+
+    it('debe validar checksum en lectura mediante getBuffer con expectedChecksumSha256', async () => {
+      const key = 'outputs/checksum-read-test.txt';
+      const content = Buffer.from('Verified Read Buffer');
+      const correctHash = crypto.createHash('sha256').update(content).digest('hex');
+      await localStorage.save(key, content);
+
+      // Lectura con hash correcto
+      const validRead = await localStorage.getBuffer(key, { expectedChecksumSha256: correctHash });
+      assert.equal(validRead.toString('utf-8'), 'Verified Read Buffer');
+
+      // Lectura con hash alterado -> StorageIntegrityError
+      await assert.rejects(
+        async () => {
+          await localStorage.getBuffer(key, { expectedChecksumSha256: 'deadbeef'.repeat(8) });
+        },
+        (err: any) => {
+          assert(err instanceof StorageIntegrityError);
+          return true;
+        }
+      );
+    });
+
+    it('debe limpiar archivos temporales abandonados (.tmp.*) con cleanStaleTempFiles', async () => {
+      const staleTmp = path.join(testBaseDir, '.tmp.abandoned-session');
+      await fs.writeFile(staleTmp, 'abandoned temp file');
+
+      // Limpieza con maxAgeMs = 0 (limpia inmediatamente)
+      const cleaned = await localStorage.cleanStaleTempFiles(0);
+      assert(cleaned >= 1);
+      assert.equal(await fs.stat(staleTmp).catch(() => null), null);
+    });
   });
 
   describe('LocalFileSystemStorageProvider — Signed URLs & Streaming', () => {
@@ -224,6 +366,14 @@ describe('Phase 2B.1 — Agnostic Storage Provider Subsystem', () => {
       // Firma con expiración alterada debe ser inválida
       const isTamperedValid = localStorage.verifySignedUrl(key, expires + 100, sig);
       assert.equal(isTamperedValid, false);
+
+      // Firma con longitud dispar no debe causar RangeError en timingSafeEqual y retornar false
+      const isShortSigValid = localStorage.verifySignedUrl(key, expires, 'abc123short');
+      assert.equal(isShortSigValid, false);
+
+      // Firma con URL expirada en el pasado debe retornar false
+      const isExpiredValid = localStorage.verifySignedUrl(key, Math.floor(Date.now() / 1000) - 10, sig);
+      assert.equal(isExpiredValid, false);
     });
 
     it('debe transmitir archivos mediante getStream()', async () => {

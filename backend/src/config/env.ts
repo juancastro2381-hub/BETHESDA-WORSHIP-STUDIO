@@ -4,9 +4,15 @@
  */
 
 import * as dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 // Si la ejecución proviene del ejecutor de pruebas (node/tsx --test), forzar NODE_ENV a 'test'
 const isTestExecution =
@@ -50,6 +56,11 @@ const envSchema = z
     // Workstream A: Almacenamiento seguro de audio
     AUDIO_STORAGE_PATH: z.string().default('storage/audio'),
     MAX_AUDIO_FILE_SIZE_BYTES: z.coerce.number().default(50 * 1024 * 1024), // 50MB (Decisión U-03)
+
+    // Phase 2B.1: Almacenamiento seguro y firma de URLs HMAC (CR-01 Remediation)
+    STORAGE_SIGNING_SECRET: z
+      .string()
+      .min(32, 'STORAGE_SIGNING_SECRET debe tener al menos 32 caracteres (256 bits) para HMAC-SHA256'),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test' && !data.TEST_DATABASE_URL) {

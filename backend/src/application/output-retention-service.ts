@@ -88,14 +88,17 @@ export class OutputRetentionService {
   }
 
   /**
-   * Ejecuta el podado de artefactos generados que han expirado su ventana de retención (CR-04).
+   * Ejecuta el podado de artefactos generados que han expirado su ventana de retención (CR-04 & CR-08 Remediation).
    * 
-   * Criterios:
-   * - status IN ('COMPLETED', 'FAILED', 'REVIEW_REQUIRED')
-   * - output_storage_key IS NOT NULL
-   * - pruned_at IS NULL
-   * - completed_at < NOW() - retentionDays
-   * - lease_expires_at IS NULL OR lease_expires_at < NOW()
+   * Protocolo Transaccional Seguro de Dos Fases (Defect 2 Remediation):
+   * 1. FASE DB PRIMERO: Bloqueo de fila y transición atómica de pruned_at = NOW() en la base de datos.
+   *    Esto garantiza que ninguna solicitud concurrente de descarga (/download) ni persistencia en catálogo
+   *    (commitJobToCatalog) pueda referenciar un artefacto podado.
+   * 2. COMPROBACIÓN DE REFERENCIAS COMPARTIDAS (CAS DEDUPLICATION): Se verifica si otros trabajos no podados
+   *    o registros en song_sources continúan vinculados a la clave de almacenamiento.
+   * 3. ELIMINACIÓN FÍSICA Y AUDITORÍA: Solo si no restan referencias activas se procede a la eliminación física.
+   *    Si la eliminación física falla, el estado de la base de datos se mantiene consistente (pruned_at persiste)
+   *    y el archivo en disco podrá ser recolectado por el colector de huérfanos de forma idempotente.
    */
   public async pruneExpiredOutputs(options?: {
     retentionDays?: number;
@@ -151,7 +154,43 @@ export class OutputRetentionService {
       const storageKey = job.outputStorageKey!;
 
       try {
-        // 2. Verificar si existen otras referencias activas en background_jobs a esta misma storageKey
+        let fileDeleted = false;
+        let otherRefCount = 0;
+        let deletionError: string | null = null;
+
+        // FASE 1: Transición transaccional en Base de Datos PRIMERO
+        let transitioned = false;
+        if (!dryRun) {
+          const [updated] = await this.db
+            .update(backgroundJobs)
+            .set({
+              prunedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(backgroundJobs.id, job.id),
+                isNull(backgroundJobs.prunedAt),
+                lt(backgroundJobs.completedAt, cutoffDate),
+                or(
+                  isNull(backgroundJobs.leaseExpiresAt),
+                  lt(backgroundJobs.leaseExpiresAt, now)
+                )
+              )
+            )
+            .returning({ id: backgroundJobs.id });
+
+          if (!updated) {
+            // El trabajo fue tomado por un worker concurrente o ya fue podado
+            continue;
+          }
+          transitioned = true;
+        } else {
+          transitioned = true;
+        }
+
+        // FASE 2: Comprobación de referencias compartidas (CAS Deduplication)
+        // Como el trabajo actual ya tiene pruned_at = now, no cuenta como referencia activa
         const [activeOtherJobs] = await this.db
           .select({ count: sql<number>`count(*)::int` })
           .from(backgroundJobs)
@@ -163,28 +202,33 @@ export class OutputRetentionService {
             )
           );
 
-        // 3. Verificar si el catálogo (song_sources) tiene vinculada esta misma storageKey
         const [activeSources] = await this.db
           .select({ count: sql<number>`count(*)::int` })
           .from(songSources)
           .where(eq(songSources.storagePath, storageKey));
 
-        const otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
-        let fileDeleted = false;
+        otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
 
+        // FASE 3: Eliminación física idempotente (Solo si cero referencias activas)
         if (otherRefCount === 0) {
-          // No existen más referencias: procedemos a eliminar físicamente el archivo de salida
           if (!dryRun) {
             try {
               await this.outputStorage.delete(storageKey);
               fileDeleted = true;
               report.filesDeletedCount++;
-            } catch (delErr) {
+
+              // También eliminar el archivo canónico companion si existe
+              const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
+              if (await this.outputStorage.exists(canonicalKey)) {
+                await this.outputStorage.delete(canonicalKey).catch(() => {});
+              }
+            } catch (delErr: any) {
               if (delErr instanceof StorageNotFoundError) {
-                // Ya no existía en disco, se considera purgado limpiamente
-                fileDeleted = false;
+                fileDeleted = false; // Ya no existía en disco (idempotencia)
               } else {
-                throw delErr;
+                deletionError = delErr?.message ?? String(delErr);
+                // Fail-soft: La base de datos es consistente (pruned_at establecido).
+                // El archivo físico huérfano será limpiado por el recolector de huérfanos.
               }
             }
           } else {
@@ -192,35 +236,33 @@ export class OutputRetentionService {
             report.filesDeletedCount++;
           }
         } else {
-          // Retenido en disco porque otro trabajo o el catálogo aún lo referencia (Deduplicación CAS)
           report.filesRetainedDueToSharedRef++;
         }
 
-        // 4. Marcar el trabajo como podado en la base de datos
-        if (!dryRun) {
-          await this.db
-            .update(backgroundJobs)
-            .set({
-              prunedAt: now,
-              updatedAt: now,
-            })
-            .where(eq(backgroundJobs.id, job.id));
-
-          // 5. Registrar evento de auditoría
-          await this.db.insert(auditLogs).values({
-            eventType: 'CONVERSION_OUTPUT_PRUNED',
-            userId: options?.userId ?? null,
-            resource: `background_jobs/${job.id}`,
-            metadata: {
+        // FASE 4: Registro de auditoría
+        if (!dryRun && transitioned) {
+          try {
+            await this.db.insert(auditLogs).values({
+              eventType: 'CONVERSION_OUTPUT_PRUNED',
+              userId: options?.userId ?? null,
+              resource: `background_jobs/${job.id}`,
+              metadata: {
+                jobId: job.id,
+                storageKey,
+                checksumSha256: job.outputChecksumSha256,
+                fileDeleted,
+                sharedReferencesRemaining: otherRefCount,
+                retentionDays: days,
+                completedAt: job.completedAt?.toISOString(),
+                deletionError,
+              },
+            });
+          } catch (auditErr: any) {
+            report.errors.push({
               jobId: job.id,
-              storageKey,
-              checksumSha256: job.outputChecksumSha256,
-              fileDeleted,
-              sharedReferencesRemaining: otherRefCount,
-              retentionDays: days,
-              completedAt: job.completedAt?.toISOString(),
-            },
-          });
+              error: `Fallo al registrar auditoría de podado: ${auditErr?.message ?? String(auditErr)}`,
+            });
+          }
         }
 
         report.prunedJobsCount++;
@@ -293,7 +335,33 @@ export class OutputRetentionService {
             continue;
           }
 
-          // 3. Verificar referencias en background_jobs
+          // 3. Verificar si es un archivo companion canónico (*.canonical.json)
+          if (key.endsWith('.canonical.json')) {
+            const baseHash = path.basename(key, '.canonical.json');
+            const [compJob] = await this.db
+              .select({ id: backgroundJobs.id })
+              .from(backgroundJobs)
+              .where(
+                and(
+                  eq(backgroundJobs.outputChecksumSha256, baseHash),
+                  isNull(backgroundJobs.prunedAt)
+                )
+              )
+              .limit(1);
+
+            const [compSource] = await this.db
+              .select({ id: songSources.id })
+              .from(songSources)
+              .where(eq(songSources.checksumSha256, baseHash))
+              .limit(1);
+
+            if (compJob || compSource) {
+              report.activeReferencesCount++;
+              continue;
+            }
+          }
+
+          // 4. Verificar referencias en background_jobs
           const [jobRef] = await this.db
             .select({ id: backgroundJobs.id })
             .from(backgroundJobs)
@@ -305,7 +373,7 @@ export class OutputRetentionService {
             )
             .limit(1);
 
-          // 4. Verificar referencias en song_sources
+          // 5. Verificar referencias en song_sources
           const [sourceRef] = await this.db
             .select({ id: songSources.id })
             .from(songSources)
@@ -317,26 +385,75 @@ export class OutputRetentionService {
             continue;
           }
 
-          // 5. El archivo no tiene referencias en base de datos y superó la cuarentena: es un huérfano confirmado
+          // 6. Verificación inmediata pre-eliminación contra referencias concurrentes en vuelo (Defect 3 Remediation)
+          const [freshJobRef] = await this.db
+            .select({ id: backgroundJobs.id })
+            .from(backgroundJobs)
+            .where(
+              and(
+                or(
+                  eq(backgroundJobs.outputStorageKey, key),
+                  eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
+                ),
+                or(
+                  isNull(backgroundJobs.prunedAt),
+                  inArray(backgroundJobs.status, ['PENDING', 'PROCESSING'])
+                )
+              )
+            )
+            .limit(1);
+
+          const [freshSourceRef] = await this.db
+            .select({ id: songSources.id })
+            .from(songSources)
+            .where(
+              or(
+                eq(songSources.storagePath, key),
+                eq(songSources.checksumSha256, meta.checksumSha256)
+              )
+            )
+            .limit(1);
+
+          if (freshJobRef || freshSourceRef) {
+            report.activeReferencesCount++;
+            continue;
+          }
+
+          // 7. El archivo no tiene referencias en base de datos y superó la cuarentena: es un huérfano confirmado
           let deleted = false;
           if (!dryRun) {
-            await this.outputStorage.delete(key);
-            deleted = true;
-            report.orphansDeletedCount++;
+            try {
+              await this.outputStorage.delete(key);
+              deleted = true;
+              report.orphansDeletedCount++;
+            } catch (delErr: any) {
+              if (delErr instanceof StorageNotFoundError) {
+                deleted = false;
+              } else {
+                throw delErr;
+              }
+            }
 
             // Registrar en auditoría
-            await this.db.insert(auditLogs).values({
-              eventType: 'ORPHAN_OUTPUT_COLLECTED',
-              userId: options?.userId ?? null,
-              resource: `storage/${key}`,
-              metadata: {
+            try {
+              await this.db.insert(auditLogs).values({
+                eventType: 'ORPHAN_OUTPUT_COLLECTED',
+                userId: options?.userId ?? null,
+                resource: `storage/${key}`,
+                metadata: {
+                  storageKey: key,
+                  byteLength: meta.byteLength,
+                  checksumSha256: meta.checksumSha256,
+                  fileCreatedAt: meta.createdAt.toISOString(),
+                  quarantineDays: days,
+                },
+              });
+            } catch (auditErr: any) {
+              report.errors.push({
                 storageKey: key,
-                byteLength: meta.byteLength,
-                checksumSha256: meta.checksumSha256,
-                fileCreatedAt: meta.createdAt.toISOString(),
-                quarantineDays: days,
-              },
-            });
+                error: `Fallo al registrar auditoría de huérfano: ${auditErr?.message ?? String(auditErr)}`,
+              });
+            }
           } else {
             deleted = true;
             report.orphansDeletedCount++;

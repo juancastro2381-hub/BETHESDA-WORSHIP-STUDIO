@@ -14,9 +14,13 @@
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import pg from 'pg';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, pool } from '../db/index.ts';
+import * as schema from '../db/schema.ts';
 import { setlists, songs, users } from '../db/schema.ts';
+import { env } from '../config/env.ts';
 import { DrizzleSetlistRepository } from '../repositories/setlist-repository.ts';
 import { SetlistService } from '../application/setlist-service.ts';
 import { ConflictError } from '../domain/errors.ts';
@@ -33,6 +37,8 @@ import type {
   UpdateSetlistDTO,
   UpdateSetlistItemDTO,
 } from '../domain/setlist-types.ts';
+
+const { Pool } = pg;
 
 /**
  * Mock asíncrono en memoria para documentar la evidencia histórica de auditoría.
@@ -129,6 +135,23 @@ class ConcurrentMockSetlistRepository implements ISetlistRepository {
   public async updateStatus(id: string, status: SetlistStatus): Promise<SetlistEntity | null> {
     const s = this.setlists.get(id);
     if (!s) return null;
+
+    if (status === 'ACTIVE' && this.activeBarrierPromise) {
+      // Simula una lectura no transaccional previa a la escritura (ventana TOCTOU histórica)
+      const activeBeforeBarrier = Array.from(this.setlists.values()).find(
+        (item) => item.status === 'ACTIVE' && item.id !== id
+      );
+      this.activeListCalls++;
+      if (this.activeListCalls >= 2) {
+        this.activeBarrierResolve?.();
+      } else {
+        await this.activeBarrierPromise;
+      }
+      if (activeBeforeBarrier) {
+        throw new ConflictError(`Ya existe un setlist en estado ACTIVE ('${activeBeforeBarrier.title}').`);
+      }
+    }
+
     const updated = { ...s, status, updatedAt: new Date() };
     this.setlists.set(id, updated);
     return updated;
@@ -168,10 +191,37 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
   const realService = new SetlistService(realRepository);
   const testSetlistIds = new Set<string>();
 
+  // Dos pools de conexiones independientes a PostgreSQL para garantizar concurrencia real entre sesiones distintas
+  const connectionString = env.NODE_ENV === 'test' ? (env.TEST_DATABASE_URL as string) : env.DATABASE_URL;
+  let poolConn1: pg.Pool;
+  let poolConn2: pg.Pool;
+  let dbConn1: ReturnType<typeof drizzle<typeof schema>>;
+  let dbConn2: ReturnType<typeof drizzle<typeof schema>>;
+  let repoConn1: DrizzleSetlistRepository;
+  let repoConn2: DrizzleSetlistRepository;
+  let serviceConn1: SetlistService;
+  let serviceConn2: SetlistService;
+
   let initialSongCount: number;
   let initialUserCount: number;
 
+  async function getActiveCountFromPostgres(): Promise<number> {
+    const res = await pool.query<{ active_count: number }>(
+      "SELECT count(*)::int AS active_count FROM setlists WHERE status = 'ACTIVE'"
+    );
+    return res.rows[0]?.active_count ?? 0;
+  }
+
   before(async () => {
+    poolConn1 = new Pool({ connectionString, max: 2 });
+    poolConn2 = new Pool({ connectionString, max: 2 });
+    dbConn1 = drizzle(poolConn1, { schema });
+    dbConn2 = drizzle(poolConn2, { schema });
+    repoConn1 = new DrizzleSetlistRepository(dbConn1);
+    repoConn2 = new DrizzleSetlistRepository(dbConn2);
+    serviceConn1 = new SetlistService(repoConn1);
+    serviceConn2 = new SetlistService(repoConn2);
+
     const [songCountRes] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(songs);
@@ -192,6 +242,9 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
         .delete(setlists)
         .where(inArray(setlists.id, Array.from(testSetlistIds)));
     }
+
+    await poolConn1.end();
+    await poolConn2.end();
 
     const [currentSongCountRes] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -229,69 +282,62 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
         concurrentService.transitionStatus(setlistB.id, 'ACTIVE'),
       ]);
 
-      assert.strictEqual(resA.status, 'fulfilled', 'Petición A fue aprobada por SetlistService');
-      assert.strictEqual(resB.status, 'fulfilled', 'Petición B fue aprobada por SetlistService');
+      assert.strictEqual(resA.status, 'fulfilled', 'Petición A fue aprobada por mock sin transacción');
+      assert.strictEqual(resB.status, 'fulfilled', 'Petición B fue aprobada por mock sin transacción');
 
       const activeInRepo = Array.from(mockRepo.setlists.values()).filter((s) => s.status === 'ACTIVE');
       assert.strictEqual(
         activeInRepo.length,
         2,
-        'Evidencia histórica: sin restricción en base de datos, SetlistService en memoria permitía dos ACTIVE simultáneos.'
+        'Evidencia histórica: sin transacción ni restricción en base de datos, lecturas separadas permitían dos ACTIVE simultáneos.'
       );
     });
   });
 
   // ==========================================================================
-  // SECCIÓN 2: COMPORTAMIENTO REMEDIADO EN POSTGRESQL (POST-REMEDIATION VERIFICATION)
+  // SECCIÓN 2: COMPORTAMIENTO REMEDIADO EN POSTGRESQL (CONEXIONES INDEPENDIENTES)
   // ==========================================================================
 
-  describe('2. Post-Remediation Verification (Database Constraint & Repository)', () => {
+  describe('2. Post-Remediation Verification (Independent PostgreSQL Connections & Atomic Transactions)', () => {
     it('2.1 should enforce partial unique index in PostgreSQL: reject 2nd ACTIVE insert directly with 23505', async () => {
-      const [rowA] = await db
+      const [rowA] = await dbConn1
         .insert(setlists)
         .values({ title: 'CANDIDATO_ACTIVO_1', status: 'ACTIVE' })
         .returning();
-      testSetlistIds.add(rowA.id);
+      testSetlistIds.add(rowA!.id);
 
-      assert.strictEqual(rowA.status, 'ACTIVE');
+      assert.strictEqual(rowA!.status, 'ACTIVE');
 
-      // El segundo insert con status ACTIVE DEBE ser rechazado por PostgreSQL a nivel de motor
+      // El segundo insert con status ACTIVE en la segunda conexión independiente DEBE ser rechazado por PostgreSQL (23505)
       await assert.rejects(
         async () => {
-          const [rowB] = await db
+          const [rowB] = await dbConn2
             .insert(setlists)
             .values({ title: 'CANDIDATO_ACTIVO_2', status: 'ACTIVE' })
             .returning();
           if (rowB) testSetlistIds.add(rowB.id);
         },
         (err: any) => {
-          const is23505 = err?.code === '23505' || err?.message?.includes('idx_setlists_single_active');
-          return is23505;
+          return err?.code === '23505' || err?.message?.includes('idx_setlists_single_active');
         }
       );
 
-      // Confirmar que en la base de datos existe exactamente 1 registro ACTIVE
-      const activeRows = await db
-        .select()
-        .from(setlists)
-        .where(inArray(setlists.id, [rowA.id]));
-      assert.strictEqual(activeRows.length, 1);
-      assert.strictEqual(activeRows[0].status, 'ACTIVE');
+      assert.strictEqual(await getActiveCountFromPostgres(), 1);
 
-      // Limpieza del registro activo para las siguientes pruebas
-      await db.delete(setlists).where(eq(setlists.id, rowA.id));
-      testSetlistIds.delete(rowA.id);
+      await db.delete(setlists).where(eq(setlists.id, rowA!.id));
+      testSetlistIds.delete(rowA!.id);
     });
 
-    it('2.2 should translate PostgreSQL 23505 into domain ConflictError in DrizzleSetlistRepository', async () => {
-      const setlistA = await realRepository.create({ title: 'Culto Oficial A', status: 'ACTIVE' });
+    it('2.2 should reject activation while another setlist is already ACTIVE across independent connections', async () => {
+      const setlistA = await serviceConn1.createSetlist({ title: 'Culto Oficial A', status: 'ACTIVE' });
+      const setlistB = await serviceConn1.createSetlist({ title: 'Culto Oficial B', status: 'PLANNING' });
       testSetlistIds.add(setlistA.id);
+      testSetlistIds.add(setlistB.id);
 
-      // Intentar crear un segundo setlist directamente con status ACTIVE a través del repositorio
+      // 1. Intentar activar setlistB desde la conexión 2 mientras setlistA ya está ACTIVE
       await assert.rejects(
         async () => {
-          const setlistB = await realRepository.create({ title: 'Culto Oficial B', status: 'ACTIVE' });
-          if (setlistB) testSetlistIds.add(setlistB.id);
+          await serviceConn2.transitionStatus(setlistB.id, 'ACTIVE');
         },
         (err: unknown) => {
           return (
@@ -302,44 +348,51 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
         }
       );
 
-      // Limpieza
-      await db.delete(setlists).where(eq(setlists.id, setlistA.id));
+      // 2. Intentar crear un tercer setlist directamente como ACTIVE desde la conexión 2
+      await assert.rejects(
+        async () => {
+          const setlistC = await serviceConn2.createSetlist({ title: 'Culto Oficial C', status: 'ACTIVE' });
+          if (setlistC) testSetlistIds.add(setlistC.id);
+        },
+        (err: unknown) => {
+          return (
+            err instanceof ConflictError &&
+            err.message.includes('Ya existe un setlist en estado ACTIVE') &&
+            err.message.includes('Culto Oficial A')
+          );
+        }
+      );
+
+      assert.strictEqual(await getActiveCountFromPostgres(), 1);
+      const checkB = await serviceConn1.getSetlist(setlistB.id);
+      assert.strictEqual(checkB.status, 'PLANNING');
+
+      await db.delete(setlists).where(inArray(setlists.id, [setlistA.id, setlistB.id]));
       testSetlistIds.delete(setlistA.id);
+      testSetlistIds.delete(setlistB.id);
     });
 
-    it('2.3 should ensure exactly ONE succeeds and exactly ONE fails with ConflictError under concurrent activation', async () => {
-      const setlistA = await realRepository.create({ title: 'Culto Domingo Mañana', status: 'PLANNING' });
-      const setlistB = await realRepository.create({ title: 'Culto Domingo Noche', status: 'PLANNING' });
+    it('2.3 should handle two concurrent activation requests for DIFFERENT setlists over independent PostgreSQL connections (exactly 1 succeeds, 1 fails with ConflictError)', async () => {
+      // Verificar que poolConn1 y poolConn2 utilizan procesos backend distintos en PostgreSQL
+      const [pid1Res, pid2Res] = await Promise.all([
+        poolConn1.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'),
+        poolConn2.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'),
+      ]);
+      assert.notStrictEqual(
+        pid1Res.rows[0]?.pid,
+        pid2Res.rows[0]?.pid,
+        'Las conexiones independientes deben ejecutarse en backends PostgreSQL distintos.'
+      );
+
+      const setlistA = await serviceConn1.createSetlist({ title: 'Culto Domingo Mañana', status: 'PLANNING' });
+      const setlistB = await serviceConn2.createSetlist({ title: 'Culto Domingo Noche', status: 'PLANNING' });
       testSetlistIds.add(setlistA.id);
       testSetlistIds.add(setlistB.id);
 
-      // Para poner a prueba la protección de base de datos incluso si el chequeo de aplicación se intercalara:
-      let barrierResolve: () => void;
-      const barrierPromise = new Promise<void>((resolve) => {
-        barrierResolve = resolve;
-      });
-
-      let listCalls = 0;
-      const interceptedRepo: ISetlistRepository = Object.create(realRepository);
-      interceptedRepo.list = async (filter?: SetlistFilterOptions): Promise<{ items: SetlistSummaryEntity[]; total: number }> => {
-        const res = await realRepository.list(filter);
-        if (filter?.status === 'ACTIVE') {
-          listCalls++;
-          if (listCalls >= 2) {
-            barrierResolve();
-          } else {
-            await barrierPromise;
-          }
-        }
-        return res;
-      };
-
-      const raceService = new SetlistService(interceptedRepo);
-
-      // Disparar ambas activaciones concurrentemente
+      // Disparar ambas activaciones simultáneamente sobre conexiones PostgreSQL independientes
       const [resA, resB] = await Promise.allSettled([
-        raceService.transitionStatus(setlistA.id, 'ACTIVE'),
-        raceService.transitionStatus(setlistB.id, 'ACTIVE'),
+        serviceConn1.transitionStatus(setlistA.id, 'ACTIVE'),
+        serviceConn2.transitionStatus(setlistB.id, 'ACTIVE'),
       ]);
 
       const fulfilled = [resA, resB].filter((r) => r.status === 'fulfilled');
@@ -360,40 +413,158 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
         'El mensaje de error debe indicar claramente el conflicto de estado ACTIVE.'
       );
 
-      // 3. PostgreSQL NUNCA termina con dos filas ACTIVE: la base de datos contiene exactamente UN setlist ACTIVE
-      const activeRowsInDb = await db
-        .select()
-        .from(setlists)
-        .where(inArray(setlists.id, [setlistA.id, setlistB.id]));
-
-      const activeCount = activeRowsInDb.filter((r) => r.status === 'ACTIVE').length;
+      // 3. Verificar directamente en PostgreSQL que el conteo final de ACTIVE es exactamente 1
       assert.strictEqual(
-        activeCount,
+        await getActiveCountFromPostgres(),
         1,
         'PostgreSQL debe contener exactamente UN registro en estado ACTIVE.'
       );
 
-      // Limpieza
+      const rowsInDb = await db
+        .select()
+        .from(setlists)
+        .where(inArray(setlists.id, [setlistA.id, setlistB.id]));
+      const activeCount = rowsInDb.filter((r) => r.status === 'ACTIVE').length;
+      const planningCount = rowsInDb.filter((r) => r.status === 'PLANNING').length;
+      assert.strictEqual(activeCount, 1);
+      assert.strictEqual(planningCount, 1);
+
       await db.delete(setlists).where(inArray(setlists.id, [setlistA.id, setlistB.id]));
       testSetlistIds.delete(setlistA.id);
       testSetlistIds.delete(setlistB.id);
     });
 
-    it('2.4 should permit UNLIMITED coexistence of setlists in PLANNING, COMPLETED, and ARCHIVED', async () => {
-      // 3 setlists en PLANNING
-      const p1 = await realRepository.create({ title: 'Plan 1', status: 'PLANNING' });
-      const p2 = await realRepository.create({ title: 'Plan 2', status: 'PLANNING' });
-      const p3 = await realRepository.create({ title: 'Plan 3', status: 'PLANNING' });
+    it('2.4 should serialize two concurrent activation requests for the SAME setlist over independent PostgreSQL connections (SELECT ... FOR UPDATE)', async () => {
+      const setlistSame = await serviceConn1.createSetlist({
+        title: 'Culto Único Concurrente',
+        status: 'PLANNING',
+      });
+      testSetlistIds.add(setlistSame.id);
 
-      // 3 setlists en COMPLETED
-      const c1 = await realRepository.create({ title: 'Comp 1', status: 'COMPLETED' });
-      const c2 = await realRepository.create({ title: 'Comp 2', status: 'COMPLETED' });
-      const c3 = await realRepository.create({ title: 'Comp 3', status: 'COMPLETED' });
+      const [res1, res2] = await Promise.allSettled([
+        serviceConn1.transitionStatus(setlistSame.id, 'ACTIVE'),
+        serviceConn2.transitionStatus(setlistSame.id, 'ACTIVE'),
+      ]);
 
-      // 3 setlists en ARCHIVED
-      const a1 = await realRepository.create({ title: 'Arch 1', status: 'ARCHIVED' });
-      const a2 = await realRepository.create({ title: 'Arch 2', status: 'ARCHIVED' });
-      const a3 = await realRepository.create({ title: 'Arch 3', status: 'ARCHIVED' });
+      // Gracias al bloqueo de fila (SELECT ... FOR UPDATE) e idempotencia del mismo estado,
+      // ambas peticiones se serializan sin corrupción y el setlist queda ACTIVE exactamente una vez
+      assert.strictEqual(res1.status, 'fulfilled');
+      assert.strictEqual(res2.status, 'fulfilled');
+      assert.strictEqual(res1.value.status, 'ACTIVE');
+      assert.strictEqual(res2.value.status, 'ACTIVE');
+
+      assert.strictEqual(
+        await getActiveCountFromPostgres(),
+        1,
+        'El conteo de setlists ACTIVE en PostgreSQL debe ser exactamente 1.'
+      );
+
+      await db.delete(setlists).where(eq(setlists.id, setlistSame.id));
+      testSetlistIds.delete(setlistSame.id);
+    });
+
+    it('2.5 should perform complete transaction rollback after an activation conflict, preserving previous state in PostgreSQL', async () => {
+      const setlistActive = await serviceConn1.createSetlist({
+        title: 'Culto Activo Vigente',
+        status: 'ACTIVE',
+      });
+      const setlistCandidate = await serviceConn1.createSetlist({
+        title: 'Título Original Intacto',
+        notes: 'Notas Originales Intactas',
+        status: 'PLANNING',
+      });
+      testSetlistIds.add(setlistActive.id);
+      testSetlistIds.add(setlistCandidate.id);
+
+      // Caso A: Activación rechazada por servicio/repositorio preserva el estado PLANNING
+      await assert.rejects(
+        async () => {
+          await serviceConn2.transitionStatus(setlistCandidate.id, 'ACTIVE');
+        },
+        (err: unknown) => err instanceof ConflictError
+      );
+
+      // Caso B: Transacción multi-operación en conexión 2 que modifica metadatos y luego choca con idx_setlists_single_active
+      await assert.rejects(
+        async () => {
+          await dbConn2.transaction(async (tx) => {
+            await tx
+              .update(setlists)
+              .set({
+                title: 'TÍTULO CORRUPTO NO CONFIRMADO',
+                notes: 'NOTAS NO CONFIRMADAS',
+              })
+              .where(eq(setlists.id, setlistCandidate.id));
+
+            // Este UPDATE viola el índice único parcial idx_setlists_single_active (23505) y fuerza rollback
+            await tx
+              .update(setlists)
+              .set({ status: 'ACTIVE' })
+              .where(eq(setlists.id, setlistCandidate.id));
+          });
+        },
+        (err: any) => err?.code === '23505' || err?.message?.includes('idx_setlists_single_active')
+      );
+
+      // Verificar directamente contra PostgreSQL que el rollback preservó el estado previo intacto
+      const dbVerify = await pool.query<{ title: string; notes: string; status: string }>(
+        'SELECT title, notes, status FROM setlists WHERE id = $1',
+        [setlistCandidate.id]
+      );
+      assert.strictEqual(dbVerify.rows.length, 1);
+      assert.strictEqual(dbVerify.rows[0]!.status, 'PLANNING', 'El estado debe permanecer en PLANNING tras rollback.');
+      assert.strictEqual(
+        dbVerify.rows[0]!.title,
+        'Título Original Intacto',
+        'El título modificado dentro de la transacción abortada debe revertirse.'
+      );
+      assert.strictEqual(
+        dbVerify.rows[0]!.notes,
+        'Notas Originales Intactas',
+        'Las notas modificadas dentro de la transacción abortada deben revertirse.'
+      );
+      assert.strictEqual(await getActiveCountFromPostgres(), 1);
+
+      await db.delete(setlists).where(inArray(setlists.id, [setlistActive.id, setlistCandidate.id]));
+      testSetlistIds.delete(setlistActive.id);
+      testSetlistIds.delete(setlistCandidate.id);
+    });
+
+    it('2.6 should ensure sequential and concurrent deactivation + activation transitions never violate single-ACTIVE invariant', async () => {
+      const setlistA = await serviceConn1.createSetlist({ title: 'Culto Turno 1', status: 'ACTIVE' });
+      const setlistB = await serviceConn2.createSetlist({ title: 'Culto Turno 2', status: 'PLANNING' });
+      testSetlistIds.add(setlistA.id);
+      testSetlistIds.add(setlistB.id);
+
+      assert.strictEqual(await getActiveCountFromPostgres(), 1);
+
+      // Desactivar A en conexión 1 y activar B en conexión 2
+      const deactivatedA = await serviceConn1.transitionStatus(setlistA.id, 'COMPLETED');
+      assert.strictEqual(deactivatedA.status, 'COMPLETED');
+      assert.strictEqual(await getActiveCountFromPostgres(), 0);
+
+      const activatedB = await serviceConn2.transitionStatus(setlistB.id, 'ACTIVE');
+      assert.strictEqual(activatedB.status, 'ACTIVE');
+      assert.strictEqual(await getActiveCountFromPostgres(), 1);
+
+      await db.delete(setlists).where(inArray(setlists.id, [setlistA.id, setlistB.id]));
+      testSetlistIds.delete(setlistA.id);
+      testSetlistIds.delete(setlistB.id);
+      assert.strictEqual(await getActiveCountFromPostgres(), 0);
+    });
+
+    it('2.7 should permit UNLIMITED coexistence of setlists in PLANNING, COMPLETED, and ARCHIVED', async () => {
+      const p1 = await realService.createSetlist({ title: 'Plan 1', status: 'PLANNING' });
+      const p2 = await realService.createSetlist({ title: 'Plan 2', status: 'PLANNING' });
+      const p3 = await realService.createSetlist({ title: 'Plan 3', status: 'PLANNING' });
+
+      const c1 = await realService.createSetlist({ title: 'Comp 1', status: 'COMPLETED' });
+      const c2 = await realService.createSetlist({ title: 'Comp 2', status: 'COMPLETED' });
+      const c3 = await realService.createSetlist({ title: 'Comp 3', status: 'COMPLETED' });
+
+      const a1 = await realService.createSetlist({ title: 'Arch 1', status: 'ARCHIVED' });
+      const a2 = await realService.createSetlist({ title: 'Arch 2', status: 'ARCHIVED' });
+      const a3 = await realService.createSetlist({ title: 'Arch 3', status: 'ARCHIVED' });
 
       const createdIds = [p1.id, p2.id, p3.id, c1.id, c2.id, c3.id, a1.id, a2.id, a3.id];
       createdIds.forEach((id) => testSetlistIds.add(id));
@@ -404,8 +575,8 @@ describe('Phase 2C — WS4: Concurrency Remediation & Verification Suite', () =>
         .where(inArray(setlists.id, createdIds));
 
       assert.strictEqual(rowsInDb.length, 9, 'Todos los 9 setlists deben coexistir en PostgreSQL sin conflicto.');
+      assert.strictEqual(await getActiveCountFromPostgres(), 0);
 
-      // Limpieza
       await db.delete(setlists).where(inArray(setlists.id, createdIds));
       createdIds.forEach((id) => testSetlistIds.delete(id));
     });

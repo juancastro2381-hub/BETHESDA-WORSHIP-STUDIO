@@ -82,7 +82,7 @@ export const CreateSetlistBodySchema = z.object({
     .max(255, 'El título no puede exceder 255 caracteres.'),
   scheduledDateTime: z
     .string()
-    .datetime({ message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
+    .datetime({ offset: true, message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
     .optional()
     .nullable(),
   directorUserId: z
@@ -106,7 +106,7 @@ export const UpdateSetlistBodySchema = z.object({
     .optional(),
   scheduledDateTime: z
     .string()
-    .datetime({ message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
+    .datetime({ offset: true, message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
     .optional()
     .nullable(),
   directorUserId: z
@@ -134,7 +134,7 @@ export const DuplicateSetlistBodySchema = z.object({
     .max(255, 'El título no puede exceder 255 caracteres.'),
   scheduledDateTime: z
     .string()
-    .datetime({ message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
+    .datetime({ offset: true, message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
     .optional()
     .nullable(),
   isTemplate: z.boolean().optional(),

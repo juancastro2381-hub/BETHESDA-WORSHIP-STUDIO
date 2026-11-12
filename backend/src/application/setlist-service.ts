@@ -36,12 +36,14 @@ import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.
  * - COMPLETED -> ARCHIVED
  * - ARCHIVED -> (ninguna transición saliente permitida)
  */
-const ALLOWED_STATUS_TRANSITIONS: Record<SetlistStatus, readonly SetlistStatus[]> = {
+export const ALLOWED_STATUS_TRANSITIONS: Record<SetlistStatus, readonly SetlistStatus[]> = {
   PLANNING: ['ACTIVE', 'ARCHIVED'],
   ACTIVE: ['COMPLETED', 'PLANNING'],
   COMPLETED: ['ARCHIVED'],
   ARCHIVED: [],
 } as const;
+
+const VALID_SETLIST_STATUSES = new Set<SetlistStatus>(['PLANNING', 'ACTIVE', 'COMPLETED', 'ARCHIVED']);
 
 export class SetlistService {
   public constructor(
@@ -61,11 +63,19 @@ export class SetlistService {
     const trimmedTitle = dto.title.trim();
     const targetStatus = dto.status ?? 'PLANNING';
 
-    // Si se intenta crear directamente en estado ACTIVE, validar la invariante global única
-    if (targetStatus === 'ACTIVE') {
-      await this.assertNoOtherActiveSetlist();
+    if (!VALID_SETLIST_STATUSES.has(targetStatus)) {
+      throw new ValidationError(`Estado de setlist inválido: '${String(targetStatus)}'.`);
     }
 
+    if (dto.scheduledDateTime !== undefined && dto.scheduledDateTime !== null) {
+      const parsedDate = dto.scheduledDateTime instanceof Date ? dto.scheduledDateTime : new Date(dto.scheduledDateTime);
+      if (isNaN(parsedDate.getTime())) {
+        throw new ValidationError('La fecha y hora programada del setlist es inválida.');
+      }
+    }
+
+    // La invariante de único setlist ACTIVE se aplica atómicamente dentro de la transacción
+    // de base de datos del repositorio y mediante el índice único parcial idx_setlists_single_active.
     return await this.setlistRepo.create({
       ...dto,
       title: trimmedTitle,
@@ -99,6 +109,13 @@ export class SetlistService {
       dto.title = dto.title.trim();
     }
 
+    if (dto.scheduledDateTime !== undefined && dto.scheduledDateTime !== null) {
+      const parsedDate = dto.scheduledDateTime instanceof Date ? dto.scheduledDateTime : new Date(dto.scheduledDateTime);
+      if (isNaN(parsedDate.getTime())) {
+        throw new ValidationError('La fecha y hora programada del setlist es inválida.');
+      }
+    }
+
     const updated = await this.setlistRepo.update(id, dto);
     if (!updated) {
       throw new NotFoundError('Setlist', id);
@@ -126,6 +143,13 @@ export class SetlistService {
       throw new ValidationError('El título para el nuevo setlist es obligatorio.');
     }
 
+    if (dto.scheduledDateTime !== undefined && dto.scheduledDateTime !== null) {
+      const parsedDate = dto.scheduledDateTime instanceof Date ? dto.scheduledDateTime : new Date(dto.scheduledDateTime);
+      if (isNaN(parsedDate.getTime())) {
+        throw new ValidationError('La fecha y hora programada para el duplicado es inválida.');
+      }
+    }
+
     const existing = await this.setlistRepo.findById(id);
     if (!existing) {
       throw new NotFoundError('Setlist', id);
@@ -138,43 +162,17 @@ export class SetlistService {
   }
 
   // ==========================================================================
-  // 2. MÁQUINA DE ESTADOS LITÚRGICOS (TRANSICIÓN DE ESTADO)
+  // 2. MÁQUINA DE ESTADOS LITÚRGICOS (TRANSICIÓN DE ESTADO ATÓMICA)
   // ==========================================================================
 
   public async transitionStatus(id: string, newStatus: SetlistStatus): Promise<SetlistEntity> {
-    const existing = await this.setlistRepo.findById(id);
-    if (!existing) {
-      throw new NotFoundError('Setlist', id);
+    if (!VALID_SETLIST_STATUSES.has(newStatus)) {
+      throw new ValidationError(`Estado de setlist inválido: '${String(newStatus)}'.`);
     }
 
-    // Regla de Idempotencia: si el setlist ya se encuentra en el estado solicitado, retornar sin mutar
-    if (existing.status === newStatus) {
-      return {
-        id: existing.id,
-        title: existing.title,
-        scheduledDateTime: existing.scheduledDateTime,
-        status: existing.status,
-        directorUserId: existing.directorUserId,
-        notes: existing.notes,
-        isTemplate: existing.isTemplate,
-        createdAt: existing.createdAt,
-        updatedAt: existing.updatedAt,
-      };
-    }
-
-    // Regla B: Validación estricta de la máquina de estados
-    const allowed = ALLOWED_STATUS_TRANSITIONS[existing.status];
-    if (!allowed || !allowed.includes(newStatus)) {
-      throw new ConflictError(
-        `Transición de estado litúrgico no permitida: no se puede cambiar de '${existing.status}' a '${newStatus}'.`
-      );
-    }
-
-    // Regla A: Invariante de único setlist en estado ACTIVE
-    if (newStatus === 'ACTIVE') {
-      await this.assertNoOtherActiveSetlist(id);
-    }
-
+    // La lectura bloqueante (SELECT ... FOR UPDATE), la validación de la máquina de estados (Regla B)
+    // y el cumplimiento de la invariante de único setlist ACTIVE (Regla A + idx_setlists_single_active)
+    // se ejecutan atómicamente dentro de una sola transacción en el repositorio.
     const updated = await this.setlistRepo.updateStatus(id, newStatus);
     if (!updated) {
       throw new NotFoundError('Setlist', id);
@@ -318,21 +316,6 @@ export class SetlistService {
   // ==========================================================================
   // HELPERS PRIVADOS DE DOMINIO Y REGLAS DE NEGOCIO
   // ==========================================================================
-
-  /**
-   * Garantiza la Regla A: solo puede haber un setlist en estado ACTIVE simultáneamente.
-   * Si ya existe otro setlist activo, rechaza la operación con ConflictError.
-   */
-  private async assertNoOtherActiveSetlist(excludeId?: string): Promise<void> {
-    const activeList = await this.setlistRepo.list({ status: 'ACTIVE', limit: 5 });
-    const currentActive = activeList.items.find((item) => item.id !== excludeId);
-
-    if (currentActive) {
-      throw new ConflictError(
-        `Ya existe un setlist en estado ACTIVE ('${currentActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
-      );
-    }
-  }
 
   /**
    * Garantiza la Regla C: inmutabilidad histórica de setlists en COMPLETED o ARCHIVED.

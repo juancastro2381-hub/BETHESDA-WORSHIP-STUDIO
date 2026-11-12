@@ -184,24 +184,39 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
       const scheduledDateTime = dto.scheduledDateTime
         ? (dto.scheduledDateTime instanceof Date ? dto.scheduledDateTime : new Date(dto.scheduledDateTime))
         : null;
+      const targetStatus: SetlistStatus = dto.status ?? 'PLANNING';
 
-      const [created] = await this.db
-        .insert(setlists)
-        .values({
-          title: dto.title.trim(),
-          scheduledDateTime,
-          status: dto.status ?? 'PLANNING',
-          directorUserId: dto.directorUserId ?? null,
-          notes: dto.notes ?? null,
-          isTemplate: dto.isTemplate ?? false,
-        })
-        .returning();
+      return await this.db.transaction(async (tx) => {
+        if (targetStatus === 'ACTIVE') {
+          const existingActiveRes = await tx.execute(
+            sql`SELECT id, title FROM setlists WHERE status = 'ACTIVE' FOR UPDATE`
+          );
+          const existingActive = existingActiveRes.rows?.[0] as { id: string; title: string } | undefined;
+          if (existingActive) {
+            throw new ConflictError(
+              `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+            );
+          }
+        }
 
-      if (!created) {
-        throw new PersistenceError('No se pudo insertar el registro del setlist.');
-      }
+        const [created] = await tx
+          .insert(setlists)
+          .values({
+            title: dto.title.trim(),
+            scheduledDateTime,
+            status: targetStatus,
+            directorUserId: dto.directorUserId ?? null,
+            notes: dto.notes ?? null,
+            isTemplate: dto.isTemplate ?? false,
+          })
+          .returning();
 
-      return this.mapToSetlistEntity(created);
+        if (!created) {
+          throw new PersistenceError('No se pudo insertar el registro del setlist.');
+        }
+
+        return this.mapToSetlistEntity(created);
+      });
     } catch (error) {
       return await this.handleUniqueActiveConflict(error, `Error al crear setlist: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -246,16 +261,85 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
 
   public async updateStatus(id: string, status: SetlistStatus): Promise<SetlistEntity | null> {
     try {
-      const [updated] = await this.db
-        .update(setlists)
-        .set({
-          status,
-          updatedAt: new Date(),
-        })
-        .where(eq(setlists.id, id))
-        .returning();
+      return await this.db.transaction(async (tx) => {
+        // 1. Bloquear la fila objetivo (FOR UPDATE) para serializar transiciones concurrentes sobre el mismo setlist
+        const targetLock = await tx.execute(
+          sql`SELECT id, title, status, scheduled_date_time, director_user_id, notes, is_template, created_at, updated_at FROM setlists WHERE id = ${id} FOR UPDATE`
+        );
+        const targetRow = targetLock.rows?.[0] as
+          | {
+              id: string;
+              title: string;
+              status: SetlistStatus;
+              scheduled_date_time: Date | string | null;
+              director_user_id: string | null;
+              notes: string | null;
+              is_template: boolean;
+              created_at: Date | string;
+              updated_at: Date | string;
+            }
+          | undefined;
 
-      return updated ? this.mapToSetlistEntity(updated) : null;
+        if (!targetRow) {
+          return null;
+        }
+
+        const currentStatus = targetRow.status;
+
+        // 2. Idempotencia bajo bloqueo de fila: si ya está en el estado destino, retornar sin mutar
+        if (currentStatus === status) {
+          return {
+            id: targetRow.id,
+            title: targetRow.title,
+            scheduledDateTime: targetRow.scheduled_date_time ? new Date(targetRow.scheduled_date_time) : null,
+            status: currentStatus,
+            directorUserId: targetRow.director_user_id,
+            notes: targetRow.notes,
+            isTemplate: Boolean(targetRow.is_template),
+            createdAt: new Date(targetRow.created_at),
+            updatedAt: new Date(targetRow.updated_at),
+          };
+        }
+
+        // 3. Regla B: Validar máquina de estados dentro de la transacción atómica
+        const allowedTransitions: Record<SetlistStatus, readonly SetlistStatus[]> = {
+          PLANNING: ['ACTIVE', 'ARCHIVED'],
+          ACTIVE: ['COMPLETED', 'PLANNING'],
+          COMPLETED: ['ARCHIVED'],
+          ARCHIVED: [],
+        };
+        const allowed = allowedTransitions[currentStatus];
+        if (!allowed || !allowed.includes(status)) {
+          throw new ConflictError(
+            `Transición de estado litúrgico no permitida: no se puede cambiar de '${currentStatus}' a '${status}'.`
+          );
+        }
+
+        // 4. Regla A: Invariante de único setlist ACTIVE verificada dentro de la transacción + índice único parcial idx_setlists_single_active
+        if (status === 'ACTIVE') {
+          const existingActiveRes = await tx.execute(
+            sql`SELECT id, title FROM setlists WHERE status = 'ACTIVE' AND id <> ${id} FOR UPDATE`
+          );
+          const existingActive = existingActiveRes.rows?.[0] as { id: string; title: string } | undefined;
+          if (existingActive) {
+            throw new ConflictError(
+              `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+            );
+          }
+        }
+
+        // 5. Ejecutar actualización atómica (respaldada en motor por idx_setlists_single_active)
+        const [updated] = await tx
+          .update(setlists)
+          .set({
+            status,
+            updatedAt: new Date(),
+          })
+          .where(eq(setlists.id, id))
+          .returning();
+
+        return updated ? this.mapToSetlistEntity(updated) : null;
+      });
     } catch (error) {
       return await this.handleUniqueActiveConflict(error, `Error al actualizar estado del setlist '${id}': ${error instanceof Error ? error.message : String(error)}`);
     }

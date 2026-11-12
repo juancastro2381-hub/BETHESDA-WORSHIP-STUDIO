@@ -104,7 +104,7 @@ describe('Phase 2C — Liturgical Setlist Management, Worship Services & Music S
   });
 
   // =========================================================================
-  // 2. ZERO-FABRICATION READING FORMAT RESOLUTION (SECCIÓN 4.3 & 4.5)
+  // 2. ZERO-FABRICATION READING FORMAT RESOLUTION & CRITICAL FINDING A
   // =========================================================================
 
   it('2.1 should validate reading formats against real CanonicalMusicPayload content (Zero-Fabrication)', () => {
@@ -113,25 +113,140 @@ describe('Phase 2C — Liturgical Setlist Management, Worship Services & Music S
     const guitar = instrumentRegistry.getOrThrow('acoustic_guitar');
     const piano = instrumentRegistry.getOrThrow('acoustic_piano');
 
-    // En obra completa con guitarra, los 4 formatos son válidos
-    assert.equal(resolveReadingFormatForSong('SCORE', fullSong, guitar).isAvailable, true);
-    assert.equal(resolveReadingFormatForSong('CHORD_SHEET', fullSong, guitar).isAvailable, true);
-    assert.equal(resolveReadingFormatForSong('LYRICS', fullSong, guitar).isAvailable, true);
-    assert.equal(resolveReadingFormatForSong('TAB', fullSong, guitar).isAvailable, true);
+    // En obra completa con guitarra, los 4 formatos son válidos y exponen requestedFormat === resolvedFormat
+    for (const fmt of ['SCORE', 'CHORD_SHEET', 'LYRICS', 'TAB'] as const) {
+      const resolved = resolveReadingFormatForSong(fmt, fullSong, guitar);
+      assert.equal(resolved.isAvailable, true);
+      assert.equal(resolved.requestedFormat, fmt);
+      assert.equal(resolved.resolvedFormat, fmt);
+      assert.notEqual(resolved.primary, null);
+    }
 
-    // En piano (sin cuerdas/trastes), TAB se rechaza sin fabricar tablatura
+    // En piano (sin cuerdas/trastes), TAB se rechaza sin fabricar tablatura ni exponer otro formato
     const tabOnPiano = resolveReadingFormatForSong('TAB', fullSong, piano);
     assert.equal(tabOnPiano.isAvailable, false);
+    assert.equal(tabOnPiano.requestedFormat, 'TAB');
+    assert.equal(tabOnPiano.resolvedFormat, null);
+    assert.equal(tabOnPiano.primary, null);
+    assert.deepEqual(tabOnPiano.secondary, []);
     assert.ok(tabOnPiano.unavailabilityReason);
 
-    // En Lead Sheet sin notas, SCORE y TAB se rechazan sin inventar notas
+    // En Lead Sheet sin notas, SCORE y TAB se rechazan sin inventar notas ni caer en STAFF_NOTATION
     const scoreOnLeadSheet = resolveReadingFormatForSong('SCORE', leadSheet, guitar);
     const tabOnLeadSheet = resolveReadingFormatForSong('TAB', leadSheet, guitar);
     const chordsOnLeadSheet = resolveReadingFormatForSong('CHORD_SHEET', leadSheet, guitar);
 
     assert.equal(scoreOnLeadSheet.isAvailable, false);
+    assert.equal(scoreOnLeadSheet.resolvedFormat, null);
+    assert.equal(scoreOnLeadSheet.primary, null);
+
     assert.equal(tabOnLeadSheet.isAvailable, false);
+    assert.equal(tabOnLeadSheet.resolvedFormat, null);
+    assert.equal(tabOnLeadSheet.primary, null);
+
     assert.equal(chordsOnLeadSheet.isAvailable, true);
+    assert.equal(chordsOnLeadSheet.resolvedFormat, 'CHORD_SHEET');
+    assert.equal(chordsOnLeadSheet.primary, 'CHORDS');
+  });
+
+  it('2.2 should NEVER silently substitute definitions[0] when requested format is missing from definitions or unrecognized (Critical Finding A)', () => {
+    const fullSong = GOLDEN_SCENARIO_PRESETS.SCENARIO_A.canonicalSongFactory();
+    const guitar = instrumentRegistry.getOrThrow('acoustic_guitar');
+
+    // Caso 1: El formato solicitado ('TAB') está ausente de las definiciones suministradas
+    const partialDefinitions = [
+      {
+        id: 'STAFF_NOTATION' as const,
+        label: 'Partitura Completa',
+        description: 'Pentagrama',
+        icon: '🎼',
+        primary: 'STANDARD_NOTATION' as const,
+        secondary: ['CHORDS' as const, 'LYRICS' as const],
+        isAvailable: true,
+      },
+    ];
+
+    const missingFromDefs = resolveReadingFormatForSong('TAB', fullSong, guitar, partialDefinitions);
+    assert.equal(missingFromDefs.requestedFormat, 'TAB');
+    assert.equal(missingFromDefs.resolvedFormat, null);
+    assert.equal(missingFromDefs.selectorId, null);
+    assert.equal(missingFromDefs.primary, null, 'Nunca debe exponer STANDARD_NOTATION cuando se solicitó TAB');
+    assert.deepEqual(missingFromDefs.secondary, []);
+    assert.equal(missingFromDefs.isAvailable, false);
+    assert.ok(
+      missingFromDefs.unavailabilityReason?.includes('TAB'),
+      'Debe explicar explícitamente por qué el formato solicitado no está disponible'
+    );
+
+    // Caso 2: Definiciones vacías
+    const emptyDefs = resolveReadingFormatForSong('SCORE', fullSong, guitar, []);
+    assert.equal(emptyDefs.requestedFormat, 'SCORE');
+    assert.equal(emptyDefs.resolvedFormat, null);
+    assert.equal(emptyDefs.selectorId, null);
+    assert.equal(emptyDefs.primary, null);
+    assert.equal(emptyDefs.isAvailable, false);
+    assert.ok(emptyDefs.unavailabilityReason);
+
+    // Caso 3: Formato no reconocido en tiempo de ejecución
+    const unknownFormat = resolveReadingFormatForSong(
+      'NASHVILLE_NUMBER' as unknown as 'SCORE',
+      fullSong,
+      guitar
+    );
+    assert.equal(unknownFormat.resolvedFormat, null);
+    assert.equal(unknownFormat.selectorId, null);
+    assert.equal(unknownFormat.primary, null);
+    assert.equal(unknownFormat.isAvailable, false);
+    assert.ok(unknownFormat.unavailabilityReason);
+  });
+
+  it('2.3 should not apply incompatible saved user preference when instrument or canonical song lacks support (Section 4.D)', () => {
+    const leadSheet = createLeadSheetWithoutNotes();
+    const piano = instrumentRegistry.getOrThrow('acoustic_piano');
+
+    const incompatibleUserPref: UserViewPreferenceData = {
+      userId: 'musician-2',
+      instrumentId: 'acoustic_guitar',
+      primaryRepresentation: 'TABLATURE',
+      secondaryRepresentations: ['CHORDS'],
+      chordNotationSystem: 'STANDARD',
+      transpositionSemitones: 0,
+      capoFret: 0,
+      clefOverride: null,
+      preferFlats: false,
+    };
+
+    const setlistItemWithChords: FrontendSetlistItem = {
+      id: 'item-chords',
+      setlistId: 'setlist-1',
+      sequenceOrder: 1,
+      itemType: 'SONG',
+      songId: 'song-lead',
+      song: { id: 'song-lead', title: 'Lead Sheet', artist: null, defaultKey: 'C', defaultBpm: 90, timeSignature: '4/4', status: 'APPROVED' },
+      targetKey: 'C',
+      targetBpm: 90,
+      preferredFormat: 'CHORD_SHEET',
+      transitionType: 'STOP',
+      momentTitle: null,
+      durationMinutes: null,
+      musicalKey: null,
+      notesForTeam: null,
+      createdAt: '2026-11-12T00:00:00.000Z',
+      updatedAt: '2026-11-12T00:00:00.000Z',
+    };
+
+    // En piano + leadSheet sin notas, TABLATURE es incompatible; cae de forma segura a la sugerencia compatible CHORD_SHEET
+    const res = resolveEffectiveStandView({
+      userPreferences: incompatibleUserPref,
+      setlistItem: setlistItemWithChords,
+      song: leadSheet,
+      instrumentProfile: piano,
+      currentPrimary: 'CHORDS',
+      currentSecondary: ['LYRICS'],
+    });
+
+    assert.notEqual(res.primaryRepresentation, 'TABLATURE');
+    assert.equal(res.primaryRepresentation, 'CHORDS');
   });
 
   // =========================================================================
@@ -148,7 +263,7 @@ describe('Phase 2C — Liturgical Setlist Management, Worship Services & Music S
       sequenceOrder: 1,
       itemType: 'SONG',
       songId: 'song-1',
-      song: { id: 'song-1', title: 'Cántico', artist: null, defaultKey: 'G', defaultBpm: 120 },
+      song: { id: 'song-1', title: 'Cántico', artist: null, defaultKey: 'G', defaultBpm: 120, timeSignature: '4/4', status: 'APPROVED' },
       targetKey: 'A',
       targetBpm: 124,
       preferredInstrument: 'Guitarra Acústica',
@@ -203,7 +318,7 @@ describe('Phase 2C — Liturgical Setlist Management, Worship Services & Music S
       sequenceOrder: 2,
       itemType: 'SONG',
       songId: 'song-1',
-      song: { id: 'song-1', title: 'Cántico', artist: null, defaultKey: 'G', defaultBpm: 120 },
+      song: { id: 'song-1', title: 'Cántico', artist: null, defaultKey: 'G', defaultBpm: 120, timeSignature: '4/4', status: 'APPROVED' },
       targetKey: 'G',
       targetBpm: 120,
       preferredInstrument: 'Guitarra Eléctrica',
@@ -242,7 +357,7 @@ describe('Phase 2C — Liturgical Setlist Management, Worship Services & Music S
       sequenceOrder: 3,
       itemType: 'SONG',
       songId: 'song-lead',
-      song: { id: 'song-lead', title: 'Lead Sheet', artist: null, defaultKey: 'C', defaultBpm: 90 },
+      song: { id: 'song-lead', title: 'Lead Sheet', artist: null, defaultKey: 'C', defaultBpm: 90, timeSignature: '4/4', status: 'APPROVED' },
       targetKey: 'C',
       targetBpm: 90,
       preferredFormat: 'TAB', // Incompatible porque leadSheet no tiene notas melódicas

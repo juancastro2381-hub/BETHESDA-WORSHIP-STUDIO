@@ -81,13 +81,23 @@ class InMemorySetlistRepository implements ISetlistRepository {
   }
 
   public async create(dto: CreateSetlistDTO): Promise<SetlistEntity> {
+    const targetStatus = dto.status ?? 'PLANNING';
+    if (targetStatus === 'ACTIVE') {
+      const existingActive = Array.from(this.setlists.values()).find((s) => s.status === 'ACTIVE');
+      if (existingActive) {
+        throw new ConflictError(
+          `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+        );
+      }
+    }
+
     const id = `setlist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date();
     const entity: SetlistEntity = {
       id,
       title: dto.title,
       scheduledDateTime: dto.scheduledDateTime ? new Date(dto.scheduledDateTime) : null,
-      status: dto.status ?? 'PLANNING',
+      status: targetStatus,
       directorUserId: dto.directorUserId ?? null,
       notes: dto.notes ?? null,
       isTemplate: dto.isTemplate ?? false,
@@ -146,6 +156,34 @@ class InMemorySetlistRepository implements ISetlistRepository {
   public async updateStatus(id: string, status: SetlistStatus): Promise<SetlistEntity | null> {
     const setlist = this.setlists.get(id);
     if (!setlist) return null;
+
+    if (setlist.status === status) {
+      return { ...setlist };
+    }
+
+    const allowedTransitions: Record<SetlistStatus, readonly SetlistStatus[]> = {
+      PLANNING: ['ACTIVE', 'ARCHIVED'],
+      ACTIVE: ['COMPLETED', 'PLANNING'],
+      COMPLETED: ['ARCHIVED'],
+      ARCHIVED: [],
+    };
+    const allowed = allowedTransitions[setlist.status];
+    if (!allowed || !allowed.includes(status)) {
+      throw new ConflictError(
+        `Transición de estado litúrgico no permitida: no se puede cambiar de '${setlist.status}' a '${status}'.`
+      );
+    }
+
+    if (status === 'ACTIVE') {
+      const existingActive = Array.from(this.setlists.values()).find(
+        (s) => s.status === 'ACTIVE' && s.id !== id
+      );
+      if (existingActive) {
+        throw new ConflictError(
+          `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+        );
+      }
+    }
 
     const updated: SetlistEntity = {
       ...setlist,

@@ -96,35 +96,112 @@ export function selectorIdToReadingFormat(id: ReadingFormatId): FrontendReadingF
 
 export interface ResolvedFormatMapping {
   readonly readingFormat: FrontendReadingFormat;
-  readonly selectorId: ReadingFormatId;
-  readonly label: string;
-  readonly primary: ViewRepresentation;
+  readonly requestedFormat: FrontendReadingFormat;
+  readonly resolvedFormat: FrontendReadingFormat | null;
+  readonly selectorId: ReadingFormatId | null;
+  readonly label: string | null;
+  readonly primary: ViewRepresentation | null;
   readonly secondary: ViewRepresentation[];
   readonly isAvailable: boolean;
   readonly unavailabilityReason?: string;
 }
 
+const VIEW_REPRESENTATION_TO_READING_FORMAT: Partial<Record<ViewRepresentation, FrontendReadingFormat>> = {
+  STANDARD_NOTATION: 'SCORE',
+  CHORDS: 'CHORD_SHEET',
+  LYRICS: 'LYRICS',
+  TABLATURE: 'TAB',
+};
+
 /**
  * Evalúa un formato de lectura frente al contenido canónico real de la canción y el instrumento.
- * Nunca fabrica notas, acordes ni tablaturas inexistentes.
+ * Nunca fabrica notas, acordes ni tablaturas inexistentes, ni sustituye silenciosamente un
+ * formato ausente o incompatible por otro distinto.
  */
 export function resolveReadingFormatForSong(
   format: FrontendReadingFormat,
   song: CanonicalMusicPayload,
-  instrumentProfile: InstrumentProfile
+  instrumentProfile: InstrumentProfile,
+  definitionsOverride?: readonly FormatDefinition[]
 ): ResolvedFormatMapping {
-  const definitions: FormatDefinition[] = computeFormatDefinitions(song, instrumentProfile);
-  const targetId = READING_FORMAT_TO_SELECTOR_ID[format];
-  const matched = definitions.find((d) => d.id === targetId) ?? definitions[0]!;
+  const definitions: readonly FormatDefinition[] =
+    definitionsOverride ?? computeFormatDefinitions(song, instrumentProfile);
+  const targetId: ReadingFormatId | undefined = Object.prototype.hasOwnProperty.call(
+    READING_FORMAT_TO_SELECTOR_ID,
+    format
+  )
+    ? READING_FORMAT_TO_SELECTOR_ID[format]
+    : undefined;
+
+  if (!targetId) {
+    return {
+      readingFormat: format,
+      requestedFormat: format,
+      resolvedFormat: null,
+      selectorId: null,
+      label: null,
+      primary: null,
+      secondary: [],
+      isAvailable: false,
+      unavailabilityReason: `El formato de lectura solicitado "${String(format)}" no es reconocido por el sistema.`,
+    };
+  }
+
+  const matched = definitions.find((d) => d.id === targetId);
+  if (!matched) {
+    return {
+      readingFormat: format,
+      requestedFormat: format,
+      resolvedFormat: null,
+      selectorId: null,
+      label: null,
+      primary: null,
+      secondary: [],
+      isAvailable: false,
+      unavailabilityReason: `El formato solicitado "${format}" (${targetId}) no se encuentra en las definiciones de formato disponibles.`,
+    };
+  }
+
+  if (!matched.isAvailable) {
+    return {
+      readingFormat: format,
+      requestedFormat: format,
+      resolvedFormat: null,
+      selectorId: matched.id,
+      label: matched.label,
+      primary: null,
+      secondary: [],
+      isAvailable: false,
+      unavailabilityReason:
+        matched.unavailabilityReason ??
+        `El formato "${matched.label}" no está disponible para esta canción e instrumento.`,
+    };
+  }
+
+  const resolvedFormat = SELECTOR_ID_TO_READING_FORMAT[matched.id] ?? null;
+  if (resolvedFormat !== format) {
+    return {
+      readingFormat: format,
+      requestedFormat: format,
+      resolvedFormat: null,
+      selectorId: matched.id,
+      label: matched.label,
+      primary: null,
+      secondary: [],
+      isAvailable: false,
+      unavailabilityReason: `El formato resuelto no coincide con el formato solicitado "${format}".`,
+    };
+  }
 
   return {
     readingFormat: format,
+    requestedFormat: format,
+    resolvedFormat,
     selectorId: matched.id,
     label: matched.label,
     primary: matched.primary,
     secondary: [...matched.secondary],
-    isAvailable: matched.isAvailable,
-    ...(matched.unavailabilityReason ? { unavailabilityReason: matched.unavailabilityReason } : {}),
+    isAvailable: true,
   };
 }
 
@@ -143,11 +220,14 @@ export interface EffectiveStandViewResolution {
 }
 
 /**
- * Resuelve la configuración visual efectiva en el atril respetando la autonomía del músico:
- * 1. Si el músico tiene preferencias guardadas (userPreferences !== null), prevalecen siempre.
- * 2. Si no tiene preferencias guardadas y la entrada del setlist sugiere un formato disponible,
- *    se aplica la sugerencia del director sin mutar el estado global ni las preferencias de otros.
- * 3. En caso contrario, se conserva la representación por defecto del perfil de instrumento.
+ * Resuelve la configuración visual efectiva en el atril respetando la autonomía del músico
+ * y la integridad canónica (Zero-Fabrication):
+ * 1. Si el músico tiene preferencias guardadas (userPreferences !== null) y su representación
+ *    primaria es compatible con el instrumento y los datos canónicos de la obra, prevalecen siempre.
+ * 2. Si no tiene preferencias guardadas (o su preferencia es incompatible con el instrumento/obra)
+ *    y la entrada del setlist sugiere un formato disponible, se aplica la sugerencia del director
+ *    sin mutar el estado global ni las preferencias de otros.
+ * 3. En caso contrario, se conserva la representación compatible del perfil de instrumento.
  */
 export function resolveEffectiveStandView(params: {
   readonly userPreferences: UserViewPreferenceData | null;
@@ -177,22 +257,37 @@ export function resolveEffectiveStandView(params: {
     suggestedFormatReason = mappedSuggestion.unavailabilityReason;
   }
 
-  // Regla 1: Las preferencias individuales del músico prevalecen siempre en su atril
+  // Regla 1: Las preferencias individuales del músico prevalecen en su atril si son compatibles con la obra e instrumento
   if (userPreferences !== null) {
-    return {
-      source: 'USER_PREFERENCE',
-      primaryRepresentation: userPreferences.primaryRepresentation as ViewRepresentation,
-      secondaryRepresentations: [
-        ...(userPreferences.secondaryRepresentations as ViewRepresentation[]),
-      ],
-      suggestedFormat,
-      suggestedFormatAvailable,
-      ...(suggestedFormatReason ? { suggestedFormatReason } : {}),
-    };
+    const prefPrimary = userPreferences.primaryRepresentation as ViewRepresentation;
+    const prefFormat = VIEW_REPRESENTATION_TO_READING_FORMAT[prefPrimary];
+    const prefCheck = prefFormat
+      ? resolveReadingFormatForSong(prefFormat, song, instrumentProfile)
+      : null;
+
+    if (prefCheck && prefCheck.isAvailable && prefCheck.primary !== null) {
+      const validSecondary = (userPreferences.secondaryRepresentations as ViewRepresentation[]).filter(
+        (secRep) => {
+          if (secRep === prefPrimary) return false;
+          const secFormat = VIEW_REPRESENTATION_TO_READING_FORMAT[secRep];
+          if (!secFormat) return false;
+          return resolveReadingFormatForSong(secFormat, song, instrumentProfile).isAvailable;
+        }
+      );
+
+      return {
+        source: 'USER_PREFERENCE',
+        primaryRepresentation: prefCheck.primary,
+        secondaryRepresentations: validSecondary,
+        suggestedFormat,
+        suggestedFormatAvailable,
+        ...(suggestedFormatReason ? { suggestedFormatReason } : {}),
+      };
+    }
   }
 
-  // Regla 2: Sin preferencia personal, usar sugerencia de la entrada si es compatible con el contenido real
-  if (mappedSuggestion && mappedSuggestion.isAvailable) {
+  // Regla 2: Sin preferencia personal aplicable, usar sugerencia de la entrada si es compatible con el contenido real
+  if (mappedSuggestion && mappedSuggestion.isAvailable && mappedSuggestion.primary !== null) {
     return {
       source: 'SETLIST_SUGGESTION',
       primaryRepresentation: mappedSuggestion.primary,
@@ -202,7 +297,7 @@ export function resolveEffectiveStandView(params: {
     };
   }
 
-  // Regla 3: Mantener configuración del instrumento actual
+  // Regla 3: Mantener configuración del instrumento actual (verificando compatibilidad canónica)
   return {
     source: 'INSTRUMENT_DEFAULT',
     primaryRepresentation: currentPrimary,

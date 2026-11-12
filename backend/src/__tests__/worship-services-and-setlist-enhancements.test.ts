@@ -465,12 +465,66 @@ describe('Phase 2C — Worship Services, Setlist Duplication/Templates & Per-Ent
       createdSetlistIds.add(dup.json().data.id);
       assert.strictEqual(dup.json().data.status, 'PLANNING');
     });
+
+    it('3.5 performs atomic rollback on intermediate failure during DrizzleSetlistRepository.duplicate (no orphaned setlist or items)', async () => {
+      const { DrizzleSetlistRepository } = await import('../repositories/setlist-repository.ts');
+      const { db } = await import('../db/index.ts');
+
+      const source = await createSetlist(`${PREFIX} Origen Rollback`);
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/setlists/${source.id}/items`,
+        headers: auth('WORSHIP_LEADER'),
+        payload: { itemType: 'SONG', songId: canonicalSongId, targetKey: 'E', targetBpm: 80 },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/setlists/${source.id}/items`,
+        headers: auth('WORSHIP_LEADER'),
+        payload: { itemType: 'SERVICE_MOMENT', momentTitle: 'Oración Intermedia', durationMinutes: 5 },
+      });
+
+      const abortedTitle = `${PREFIX} Clonar Abortado En Medio`;
+      let insertCalls = 0;
+
+      // Proxy sobre db.transaction para inyectar un fallo al insertar el 2do ítem dentro de duplicate()
+      const faultyDb = Object.create(db);
+      faultyDb.transaction = async (cb: (tx: any) => Promise<any>) => {
+        return await db.transaction(async (realTx) => {
+          const proxyTx = Object.create(realTx);
+          proxyTx.insert = (table: any) => {
+            insertCalls++;
+            // Llamada 1: insert en setlists; Llamada 2: 1er ítem; Llamada 3: 2do ítem -> falla intermedia
+            if (insertCalls === 3) {
+              throw new Error('Simulated intermediate failure during setlist_items copy');
+            }
+            return realTx.insert(table);
+          };
+          return await cb(proxyTx);
+        });
+      };
+
+      const faultyRepo = new DrizzleSetlistRepository(faultyDb);
+      await assert.rejects(
+        async () => {
+          await faultyRepo.duplicate(source.id, abortedTitle);
+        },
+        (err: Error) => err.message.includes('Simulated intermediate failure')
+      );
+
+      const orphanCheck = await pool.query('SELECT id FROM setlists WHERE title = $1', [abortedTitle]);
+      assert.strictEqual(
+        orphanCheck.rows.length,
+        0,
+        'El rollback atómico de DrizzleSetlistRepository.duplicate debe garantizar cero setlists o ítems huérfanos.'
+      );
+    });
   });
 
   // ==========================================================================
-  // 4. CONFIGURACIÓN MUSICAL POR ENTRADA
+  // 4. CONFIGURACIÓN MUSICAL, ZONAS HORARIAS, PREFERENCIAS Y MIGRACIÓN
   // ==========================================================================
-  describe('4. Per-Entry Musical Configuration (Zero canonical mutation)', () => {
+  describe('4. Per-Entry Musical Configuration, Timezones, User Preference Isolation & Schema Integrity', () => {
     it('4.1 updates preferred instrument/tuning/format and rejects unknown reading formats', async () => {
       const setlist = await createSetlist(`${PREFIX} Config`);
       const item = await app.inject({
@@ -501,7 +555,117 @@ describe('Phase 2C — Worship Services, Setlist Duplication/Templates & Per-Ent
       assert.strictEqual(bad.statusCode, 400);
     });
 
-    it('4.2 canonical song row remains byte-identical after all Phase 2C operations', async () => {
+    it('4.2 preserves timezone offsets accurately and rejects invalid dates across services and setlists (Section 4.C)', async () => {
+      const bogotaOffsetIso = '2026-12-24T19:30:00-05:00';
+      const expectedUtcMillis = Date.parse(bogotaOffsetIso);
+
+      const svcRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/worship-services',
+        headers: auth('WORSHIP_LEADER'),
+        payload: {
+          name: `${PREFIX} Servicio Nochebuena`,
+          serviceType: 'Culto Especial',
+          scheduledAt: bogotaOffsetIso,
+        },
+      });
+      assert.strictEqual(svcRes.statusCode, 201, svcRes.body);
+      const svcData = svcRes.json().data;
+      createdServiceIds.add(svcData.id);
+      assert.strictEqual(Date.parse(svcData.scheduledAt), expectedUtcMillis, 'El instante UTC con offset debe preservarse exactamente');
+
+      const slRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/setlists',
+        headers: auth('WORSHIP_LEADER'),
+        payload: {
+          title: `${PREFIX} Setlist Con Offset`,
+          scheduledDateTime: bogotaOffsetIso,
+        },
+      });
+      assert.strictEqual(slRes.statusCode, 201, slRes.body);
+      const slData = slRes.json().data;
+      createdSetlistIds.add(slData.id);
+      assert.strictEqual(Date.parse(slData.scheduledDateTime), expectedUtcMillis);
+
+      const badSlDate = await app.inject({
+        method: 'POST',
+        url: '/api/v1/setlists',
+        headers: auth('WORSHIP_LEADER'),
+        payload: {
+          title: `${PREFIX} Setlist Fecha Inválida`,
+          scheduledDateTime: '2026-13-45T99:00:00Z',
+        },
+      });
+      assert.strictEqual(badSlDate.statusCode, 400);
+    });
+
+    it('4.3 isolates individual musician preferences without cross-user leakage (Section 4.D)', async () => {
+      // Musician (users.MUSICIAN) vs Admin (users.ADMIN) guardando preferencias independientes
+      const saveMusician = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/users/me/preferences',
+        headers: auth('MUSICIAN'),
+        payload: {
+          instrumentId: 'acoustic_guitar',
+          primaryRepresentation: 'TABLATURE',
+          secondaryRepresentations: ['CHORDS'],
+          chordNotationSystem: 'STANDARD',
+          transpositionSemitones: 2,
+          capoFret: 2,
+          clefOverride: null,
+          preferFlats: false,
+        },
+      });
+      assert.strictEqual(saveMusician.statusCode, 200, saveMusician.body);
+
+      const saveLeader = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/users/me/preferences',
+        headers: auth('WORSHIP_LEADER'),
+        payload: {
+          instrumentId: 'acoustic_piano',
+          primaryRepresentation: 'CHORDS',
+          secondaryRepresentations: ['LYRICS'],
+          chordNotationSystem: 'LATIN',
+          transpositionSemitones: -1,
+          capoFret: 0,
+          clefOverride: null,
+          preferFlats: true,
+        },
+      });
+      assert.strictEqual(saveLeader.statusCode, 200, saveLeader.body);
+
+      const getMusician = await app.inject({
+        method: 'GET',
+        url: '/api/v1/users/me/preferences',
+        headers: auth('MUSICIAN'),
+      });
+      const getLeader = await app.inject({
+        method: 'GET',
+        url: '/api/v1/users/me/preferences',
+        headers: auth('WORSHIP_LEADER'),
+      });
+
+      assert.strictEqual(getMusician.json().data.primaryRepresentation, 'TABLATURE');
+      assert.strictEqual(getMusician.json().data.capoFret, 2);
+      assert.strictEqual(getLeader.json().data.primaryRepresentation, 'CHORDS');
+      assert.strictEqual(getLeader.json().data.chordNotationSystem, 'LATIN');
+    });
+
+    it('4.4 verifies Phase 2C database migration columns, indexes, and foreign keys in PostgreSQL (Section 4.E)', async () => {
+      const idxRes = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE tablename IN ('worship_services', 'setlists')`
+      );
+      const indexNames = new Set(idxRes.rows.map((r) => r.indexname));
+      assert.ok(indexNames.has('idx_worship_services_status'));
+      assert.ok(indexNames.has('idx_worship_services_scheduled'));
+      assert.ok(indexNames.has('idx_worship_services_setlist'));
+      assert.ok(indexNames.has('idx_setlists_is_template'));
+      assert.ok(indexNames.has('idx_setlists_single_active'));
+    });
+
+    it('4.5 canonical song row remains byte-identical after all Phase 2C operations', async () => {
       const res = await pool.query('SELECT * FROM songs WHERE id = $1', [canonicalSongId]);
       assert.deepStrictEqual(res.rows[0], canonicalSongSnapshot);
     });

@@ -338,7 +338,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const handleQuickSelectFormat = useCallback(
     (format: FrontendReadingFormat) => {
       const check = resolveReadingFormatForSong(format, activeSong, instrumentProfile);
-      if (!check.isAvailable) {
+      if (!check.isAvailable || check.resolvedFormat !== format || check.primary === null) {
         setStandFormatWarning(check.unavailabilityReason ?? 'Formato no disponible para esta obra.');
         return;
       }

@@ -17,7 +17,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { eq, and } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, pool } from '../db/index.ts';
 import { backgroundJobs, songSources, auditLogs, users } from '../db/schema.ts';
 import { OutputRetentionService } from '../application/output-retention-service.ts';
 import { LocalFileSystemStorageProvider } from '../domain/storage/storage-provider.ts';
@@ -59,6 +59,7 @@ describe('Phase 2B.1 — Output Retention & Orphan Collection Subsystem', () => 
     await db.delete(users).where(eq(users.id, testUserId));
     await fs.rm(testOutputDir, { recursive: true, force: true });
     await fs.rm(testSourceDir, { recursive: true, force: true });
+    await pool.end();
   });
 
   it('debe podar archivos generados con completed_at > 30 días y marcar pruned_at con auditoría', async () => {

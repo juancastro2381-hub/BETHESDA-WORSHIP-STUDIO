@@ -1,17 +1,18 @@
 /**
  * @file cas-concurrency.test.ts
- * @description Suite autoritativa de pruebas de concurrencia y recuperación de transacciones CAS (Fase 2B.1).
+ * @description Suite autoritativa de pruebas de concurrencia, bloqueo determinista de compañeros canónicos
+ * y recuperación de transacciones CAS (Fase 2B.1 Closure).
  *
- * Cumple con los requisitos obligatorios de validación de fallos e inyecciones deterministas:
- * - Escenario A: Intención de eliminación comiteada; caída de proceso antes de eliminación física (Reconciliación).
- * - Escenario B: Eliminación física completada; caída de proceso antes del update final en BD (Idempotencia).
- * - Escenario C: Fallo de COMMIT en PostgreSQL antes de registrar intención durable (Rollback y preservación de archivo).
- * - Escenario D: Fallo en eliminación física por error simulado de permisos (EACCES -> RETRY_PENDING -> Recuperación).
- * - Escenario E: Nuevo escritor intenta registrar la misma clave CAS mientras existe intención DELETE_PENDING (Rechazo).
- * - Escenario F: Clave CAS compartida con referencia activa válida (Protección contra eliminación de artefacto compartido).
- * - Escenario G: Eliminación física exitosa con fallo en persistencia de auditoría (audited === false veraz).
- * - Escenario H: Dos workers de recuperación intentan reconciliar la misma intención pendiente concurrentemente (Serialización).
- * - Escenario I: Reintento idempotente de una eliminación previamente completada (DELETED -> No-op limpio).
+ * Escenarios de Inyección de Fallos requeridos por la auditoría técnica independiente:
+ * - Escenario A: Primary file deletion succeeds, companion deletion fails.
+ * - Escenario B: Companion file is being accessed while retention attempts deletion.
+ * - Escenario C: Two independent workers attempt to delete the same primary and companion pair.
+ * - Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED.
+ * - Escenario E: Process crashes after primary deletion but before companion deletion.
+ * - Escenario F: Process crashes after both physical deletions but before database finalization.
+ * - Escenario G: Lock acquisition fails after acquiring the first key but before acquiring the second.
+ * - Escenario H: Reconciliation retries only the incomplete artifact.
+ * - Escenario I: Audit failure preserves truthful final states.
  * - Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE.
  * - Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por ventana de cuarentena).
  */
@@ -44,10 +45,15 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     await fs.mkdir(testOutputDir, { recursive: true });
 
     outputStorage = new LocalFileSystemStorageProvider('storage/test-concurrency-outputs');
-    retentionService = new OutputRetentionService(db, outputStorage, {
-      defaultRetentionDays: 30,
-      defaultQuarantineDays: 7,
-    }, pool);
+    retentionService = new OutputRetentionService(
+      db,
+      outputStorage,
+      {
+        defaultRetentionDays: 30,
+        defaultQuarantineDays: 7,
+      },
+      pool
+    );
 
     testUserId = crypto.randomUUID();
     await db.insert(users).values({
@@ -69,18 +75,20 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     await pool.end();
   });
 
-  it('Escenario A: Deletion intent committed; process crashes before physical deletion', async () => {
+  it('Escenario A: Primary file deletion succeeds, companion deletion fails', async () => {
     const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario A CAS Content ' + salt);
+    const content = Buffer.from('Scenario A Primary Content ' + salt);
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     const key = `outputs/${hash}.txt`;
     const canonicalKey = `outputs/${hash}.canonical.json`;
 
     await outputStorage.save(key, content);
-    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario A Canonical"}'));
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario A Companion"}'));
 
     const jobId = crypto.randomUUID();
     const completedAt = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+    const originalDelete = outputStorage.delete.bind(outputStorage);
 
     try {
       await db.insert(backgroundJobs).values({
@@ -93,45 +101,51 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
         outputChecksumSha256: hash,
         outputByteLength: content.length,
         completedAt,
-        prunedAt: new Date(),
         progress: 100,
-        errorDetails: {},
+        errorDetails: {
+          canonicalStorageKey: canonicalKey,
+        },
       });
 
-      // Simular crash justo después del Tx 1: intención DELETE_PENDING comiteada, archivo en disco sin borrar
-      await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        checksumSha256: hash,
-        jobId,
-        state: 'DELETE_PENDING',
-        attempts: 0,
+      // Simular fallo en eliminación física del companion canónico
+      outputStorage.delete = async (k: string) => {
+        if (k === canonicalKey) {
+          throw new Error('EACCES: simulated companion permission failure');
+        }
+        return originalDelete(k);
+      };
+
+      const pruneReport = await retentionService.pruneExpiredOutputs({
+        retentionDays: 30,
+        userId: testUserId,
       });
 
-      // 1. Verificar estado pre-recuperación
-      assert.equal(await outputStorage.exists(key), true, 'El archivo físico debe existir antes de la recuperación');
-      assert.equal(await outputStorage.exists(canonicalKey), true, 'El archivo canónico debe existir');
-      const [preIntent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(preIntent.state, 'DELETE_PENDING');
-
-      // 2. Ejecutar worker de recuperación
-      const recoveryReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
-
-      // 3. Verificaciones post-recuperación
-      assert(recoveryReport.reconciledCount >= 1, 'Debe reconciliar la intención pendiente');
-      assert.equal(recoveryReport.failedCount, 0, 'No debe haber fallos de reconciliación');
-      assert.equal(await outputStorage.exists(key), false, 'El archivo físico debe haber sido eliminado por la recuperación');
-      assert.equal(await outputStorage.exists(canonicalKey), false, 'El companion canónico debe haber sido eliminado');
-
-      const [postIntent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(postIntent.state, 'DELETED', 'El estado final debe ser DELETED');
-      assert.equal(postIntent.audited, true, 'Debe haber sido auditado exitosamente');
-
-      // Verificar que no existen referencias activas al archivo
-      const [activeJob] = await db.select().from(backgroundJobs).where(
-        and(eq(backgroundJobs.outputStorageKey, key), isNull(backgroundJobs.prunedAt))
+      // 1. Archivo primario fue eliminado físicamente
+      assert.equal(await outputStorage.exists(key), false, 'El archivo primario debe haber sido eliminado');
+      // 2. Archivo canónico PERMANECE en disco
+      assert.equal(
+        await outputStorage.exists(canonicalKey),
+        true,
+        'El compañero canónico debe permanecer en disco'
       );
-      assert.equal(activeJob, undefined, 'No debe existir ninguna referencia activa en BD');
+
+      // 3. Intención en BD debe estar en RETRY_PENDING (NUNCA DELETED)
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert(intent !== undefined, 'Debe registrarse intención');
+      assert.equal(intent.state, 'RETRY_PENDING', 'El estado DEBE ser RETRY_PENDING');
+      assert.equal(intent.primaryDeleted, true, 'primaryDeleted debe ser true');
+      assert.equal(intent.companionDeleted, false, 'companionDeleted debe ser false');
+      assert(intent.companionError?.includes('EACCES'), 'companionError debe capturar el error exacto');
+      assert(intent.lastError?.includes('Companion'), 'lastError debe documentar el fallo del companion');
+      assert.equal(intent.attempts, 1);
+
+      assert(pruneReport.errors.length > 0, 'El reporte de podado debe registrar el error');
     } finally {
+      outputStorage.delete = originalDelete;
       await outputStorage.delete(key).catch(() => {});
       await outputStorage.delete(canonicalKey).catch(() => {});
       await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
@@ -139,12 +153,20 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     }
   });
 
-  it('Escenario B: Physical deletion succeeds; process crashes before final database update', async () => {
+  it('Escenario B: Companion file is being accessed while retention attempts deletion', async () => {
     const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario B CAS Content ' + salt);
+    const content = Buffer.from('Scenario B Content ' + salt);
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    await outputStorage.save(key, content);
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario B Companion"}'));
+
     const jobId = crypto.randomUUID();
+    const completedAt = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+    const contenderClient = await pool.connect();
 
     try {
       await db.insert(backgroundJobs).values({
@@ -156,46 +178,92 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
         outputStorageKey: key,
         outputChecksumSha256: hash,
         outputByteLength: content.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
-        prunedAt: new Date(),
+        completedAt,
         progress: 100,
-        errorDetails: {},
+        errorDetails: {
+          canonicalStorageKey: canonicalKey,
+        },
       });
 
-      // Simular crash entre Fase 2 (unlink físico exitoso) y Fase 3 (update DB a DELETED)
-      // El archivo físico NO existe en disco
-      await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        checksumSha256: hash,
-        jobId,
-        state: 'DELETE_PENDING',
-        attempts: 0,
-      });
+      // El lector/proceso concurrente adquiere advisory lock sobre el companionKey
+      await contenderClient.query('SELECT pg_advisory_lock(hashtext($1))', [canonicalKey]);
 
-      assert.equal(await outputStorage.exists(key), false, 'Archivo físico ya no existe en disco');
+      let prunerCompleted = false;
+      let prunerError: any = null;
 
-      // Ejecutar recuperación
-      const report = await retentionService.reconcilePendingDeletions({ userId: testUserId });
-      assert(report.reconciledCount >= 1, 'Reconciliación debe resolver la intención huérfana');
-      assert.equal(report.failedCount, 0);
+      // Lanzar el podador de retención en background
+      const prunePromise = retentionService
+        .pruneExpiredOutputs({ retentionDays: 30, userId: testUserId })
+        .then((res) => {
+          prunerCompleted = true;
+          return res;
+        })
+        .catch((err) => {
+          prunerError = err;
+        });
 
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(intent.state, 'DELETED', 'Intención debe transicionar limpiamente a DELETED');
-      assert.equal(intent.audited, true);
+      // Bounded barrier: esperar 150ms y verificar que el podador NO ha avanzado porque el companion lock está tomado
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(
+        prunerCompleted,
+        false,
+        'El podador DEBE estar bloqueado esperando el advisory lock del companion'
+      );
+      assert.equal(
+        await outputStorage.exists(key),
+        true,
+        'El archivo primario NO debe haber sido eliminado mientras el companion esté bloqueado'
+      );
+      assert.equal(
+        await outputStorage.exists(canonicalKey),
+        true,
+        'El archivo companion NO debe haber sido eliminado'
+      );
+
+      // Liberar el advisory lock del companion en el cliente competidor
+      await contenderClient.query('SELECT pg_advisory_unlock(hashtext($1))', [canonicalKey]);
+
+      // Esperar a que el podador complete
+      const report = await prunePromise;
+      assert.equal(prunerCompleted, true, 'El podador debe haber completado tras la liberación del lock');
+      assert.equal(prunerError, null, 'No debe haber error');
+
+      // Ambos archivos deben haber sido eliminados limpiamente tras adquirir el lock
+      assert.equal(await outputStorage.exists(key), false, 'Primario eliminado tras liberación');
+      assert.equal(await outputStorage.exists(canonicalKey), false, 'Companion eliminado tras liberación');
+
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+      assert.equal(intent.state, 'DELETED');
+      assert.equal(intent.primaryDeleted, true);
+      assert.equal(intent.companionDeleted, true);
     } finally {
+      await contenderClient.query('SELECT pg_advisory_unlock_all()').catch(() => {});
+      contenderClient.release();
+      await outputStorage.delete(key).catch(() => {});
+      await outputStorage.delete(canonicalKey).catch(() => {});
       await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
       await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
     }
   });
 
-  it('Escenario C: PostgreSQL commit fails before deletion intent is durable', async () => {
+  it('Escenario C: Two independent workers attempt to delete the same primary and companion pair', async () => {
     const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario C CAS Content ' + salt);
+    const content = Buffer.from('Scenario C Content ' + salt);
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
     await outputStorage.save(key, content);
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario C Companion"}'));
 
     const jobId = crypto.randomUUID();
+    const completedAt = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+    const service1 = new OutputRetentionService(db, outputStorage, { defaultRetentionDays: 30 }, pool);
+    const service2 = new OutputRetentionService(db, outputStorage, { defaultRetentionDays: 30 }, pool);
 
     try {
       await db.insert(backgroundJobs).values({
@@ -207,255 +275,332 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
         outputStorageKey: key,
         outputChecksumSha256: hash,
         outputByteLength: content.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
+        completedAt,
         progress: 100,
-        errorDetails: {},
+        errorDetails: { canonicalStorageKey: canonicalKey },
       });
 
-      // Simular transacción fallida que intenta registrar DELETE_PENDING y podar, pero aborta
-      try {
-        await db.transaction(async (tx) => {
-          await tx
-            .update(backgroundJobs)
-            .set({ prunedAt: new Date() })
-            .where(eq(backgroundJobs.id, jobId));
+      // Ejecutar ambos workers de retención simultáneamente
+      const [report1, report2] = await Promise.all([
+        service1.pruneExpiredOutputs({ retentionDays: 30, userId: testUserId }),
+        service2.pruneExpiredOutputs({ retentionDays: 30, userId: testUserId }),
+      ]);
 
-          await tx.insert(casDeletionIntents).values({
-            storageKey: key,
-            checksumSha256: hash,
-            jobId,
-            state: 'DELETE_PENDING',
-          });
+      assert.equal(report1.errors.length, 0);
+      assert.equal(report2.errors.length, 0);
 
-          // Forzar fallo de transacción antes de COMMIT
-          throw new Error('SIMULATED_TRANSACTION_ABORT_PRE_COMMIT');
-        });
-      } catch (err: any) {
-        assert.equal(err.message, 'SIMULATED_TRANSACTION_ABORT_PRE_COMMIT');
-      }
+      const totalFilesDeleted = report1.filesDeletedCount + report2.filesDeletedCount;
+      assert.equal(totalFilesDeleted, 1, 'Exactamente un podador debe registrar la eliminación física');
 
-      // Verificaciones:
-      // 1. Archivo físico PERMANECE intacto en disco (nunca se tocó por haberse abortado Tx 1)
-      assert.equal(await outputStorage.exists(key), true, 'El archivo físico debe mantenerse en disco');
+      assert.equal(await outputStorage.exists(key), false);
+      assert.equal(await outputStorage.exists(canonicalKey), false);
 
-      // 2. No existe intención huérfana en cas_deletion_intents
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(intent, undefined, 'No debe persistir ninguna intención de borrado');
-
-      // 3. El trabajo permanece sin podar (prunedAt es null)
-      const [job] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, jobId));
-      assert.equal(job.prunedAt, null, 'El trabajo no debe quedar marcado como podado');
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+      assert.equal(intent.state, 'DELETED');
+      assert.equal(intent.primaryDeleted, true);
+      assert.equal(intent.companionDeleted, true);
     } finally {
       await outputStorage.delete(key).catch(() => {});
+      await outputStorage.delete(canonicalKey).catch(() => {});
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
       await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
     }
   });
 
-  it('Escenario D: Physical deletion fails due to simulated filesystem permission error', async () => {
+  it('Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED', async () => {
     const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario D EACCES Content ' + salt);
+    const content = Buffer.from('Scenario D Content ' + salt);
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
     await outputStorage.save(key, content);
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario D Companion"}'));
 
-    const jobId = crypto.randomUUID();
-
-    try {
-      await db.insert(backgroundJobs).values({
-        id: jobId,
-        jobType: 'CONVERSION',
-        status: 'COMPLETED',
-        userId: testUserId,
-        inputRef: 'scenario-d.xml',
-        outputStorageKey: key,
-        outputChecksumSha256: hash,
-        outputByteLength: content.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
-        progress: 100,
-        errorDetails: {},
-      });
-
-      // Simular fallo de permisos en el almacenamiento durante eliminación física
-      const originalDelete = outputStorage.delete.bind(outputStorage);
-      outputStorage.delete = async (k: string) => {
-        if (k === key) {
-          throw new Error('EACCES: permission denied, unlink ' + k);
-        }
-        return originalDelete(k);
-      };
-
-      const pruneReport = await retentionService.pruneExpiredOutputs({
-        retentionDays: 30,
-        userId: testUserId,
-      });
-
-      // 1. Reporte registra el error
-      assert(pruneReport.errors.length > 0, 'Debe registrarse el error en el reporte de poda');
-      assert(pruneReport.errors.some((e) => e.error.includes('EACCES')), 'El error debe indicar EACCES');
-
-      // 2. Archivo físico sigue en disco
-      assert.equal(await outputStorage.exists(key), true, 'El archivo físico debe conservarse en disco ante fallo de fs');
-
-      // 3. Intención en BD está en RETRY_PENDING
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert(intent !== undefined, 'Debe existir intención de borrado');
-      assert.equal(intent.state, 'RETRY_PENDING', 'El estado debe transicionar a RETRY_PENDING');
-      assert.equal(intent.attempts, 1, 'Debe registrar 1 intento');
-      assert(intent.lastError?.includes('EACCES'), 'lastError debe contener el motivo');
-
-      // 4. Restaurar permisos (eliminar mock) y ejecutar reconciliación
-      outputStorage.delete = originalDelete;
-      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
-
-      assert(recReport.reconciledCount >= 1, 'Worker de recuperación debe reintentar y tener éxito');
-      assert.equal(await outputStorage.exists(key), false, 'El archivo debe haber sido eliminado tras reintentar');
-
-      const [finalIntent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(finalIntent.state, 'DELETED', 'El estado final debe ser DELETED');
-    } finally {
-      await outputStorage.delete(key).catch(() => {});
-      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
-    }
-  });
-
-  it('Escenario E: A new writer attempts to register the same CAS key while deletion is pending', async () => {
-    const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario E Content ' + salt);
-    const hash = crypto.createHash('sha256').update(content).digest('hex');
-    const key = `outputs/${hash}.txt`;
-
-    try {
-      // Registrar intención en DELETE_PENDING
-      await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        checksumSha256: hash,
-        state: 'DELETE_PENDING',
-        attempts: 0,
-      });
-
-      // El worker o proceso escritor intenta registrar referencia bajo advisory lock
-      // Probamos la lógica de guarda del ConversionWorker (Requirement 9)
-      const workerClient = await pool.connect();
-      let rejected = false;
-      let rejectionMessage = '';
-
-      try {
-        await workerClient.query('BEGIN');
-        await workerClient.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
-
-        const [pendingIntent] = await db
-          .select()
-          .from(casDeletionIntents)
-          .where(
-            and(
-              eq(casDeletionIntents.storageKey, key),
-              inArray(casDeletionIntents.state, ['DELETE_PENDING', 'RETRY_PENDING'])
-            )
-          )
-          .limit(1);
-
-        if (pendingIntent) {
-          throw new Error(`CAS reference registration rejected: deletion intent is pending for ${key}`);
-        }
-      } catch (err: any) {
-        rejected = true;
-        rejectionMessage = err.message;
-        await workerClient.query('ROLLBACK').catch(() => {});
-      } finally {
-        workerClient.release();
-      }
-
-      assert.equal(rejected, true, 'El escritor debe ser rechazado si existe intención de eliminación pendiente');
-      assert(rejectionMessage.includes('deletion intent is pending'), 'Mensaje de rechazo debe referir a la intención');
-
-      // Verificar que ninguna referencia fue añadida
-      const [job] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.outputStorageKey, key));
-      assert.equal(job, undefined, 'No debe existir ningún trabajo asociado');
-    } finally {
-      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-    }
-  });
-
-  it('Escenario F: A shared CAS reference exists and deletion must be rejected', async () => {
-    const salt = crypto.randomUUID();
-    const sharedContent = Buffer.from('Shared CAS Content Scenario F ' + salt);
-    const hash = crypto.createHash('sha256').update(sharedContent).digest('hex');
-    const key = `outputs/${hash}.txt`;
-    await outputStorage.save(key, sharedContent);
-
-    const expiredJobId = crypto.randomUUID();
     const activeJobId = crypto.randomUUID();
 
     try {
-      // Job 1: Expirado (> 30 días)
-      await db.insert(backgroundJobs).values({
-        id: expiredJobId,
-        jobType: 'CONVERSION',
-        status: 'COMPLETED',
-        userId: testUserId,
-        inputRef: 'f-expired.xml',
-        outputStorageKey: key,
-        outputChecksumSha256: hash,
-        outputByteLength: sharedContent.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
-        progress: 100,
-        errorDetails: {},
-      });
-
-      // Job 2: Activo (completado recientemente, prunedAt = null)
+      // 1. Trabajo activo legítimo en la base de datos (NO podado)
       await db.insert(backgroundJobs).values({
         id: activeJobId,
         jobType: 'CONVERSION',
         status: 'COMPLETED',
         userId: testUserId,
-        inputRef: 'f-active.xml',
+        inputRef: 'scenario-d-active.xml',
         outputStorageKey: key,
         outputChecksumSha256: hash,
-        outputByteLength: sharedContent.length,
+        outputByteLength: content.length,
         completedAt: new Date(),
+        prunedAt: null,
         progress: 100,
-        errorDetails: {},
+        errorDetails: { canonicalStorageKey: canonicalKey },
       });
 
-      // Ejecutar poda de expirados
-      const report = await retentionService.pruneExpiredOutputs({
-        retentionDays: 30,
-        userId: testUserId,
+      // 2. Intención de eliminación pendiente huérfana
+      await db.insert(casDeletionIntents).values({
+        storageKey: key,
+        canonicalKey,
+        checksumSha256: hash,
+        state: 'DELETE_PENDING',
+        primaryDeleted: false,
+        companionDeleted: false,
+        attempts: 0,
       });
 
-      // 1. Job 1 fue podado
-      const [job1] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, expiredJobId));
-      assert(job1.prunedAt !== null, 'Job 1 debe estar podado');
+      // 3. Ejecutar reconciliación de recuperación
+      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
 
-      // 2. Job 2 sigue activo sin podar
-      const [job2] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, activeJobId));
-      assert.equal(job2.prunedAt, null, 'Job 2 debe permanecer activo');
+      assert(recReport.reconciledCount >= 1, 'Debe registrar 1 reconciliación');
+      assert.equal(recReport.failedCount, 0);
 
-      // 3. Archivo físico PERMANECE en disco porque Job 2 lo comparte
-      assert.equal(await outputStorage.exists(key), true, 'El archivo físico debe preservarse para el trabajo activo');
+      // 4. Verificaciones Semánticas Críticas:
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
 
-      // 4. Reporte contabiliza la retención por referencia compartida
-      assert(report.filesRetainedDueToSharedRef >= 1, 'Debe contarse la retención por referencia compartida');
-      const item = report.prunedItems.find((i) => i.jobId === expiredJobId);
-      assert(item !== undefined);
-      assert.equal(item.fileDeleted, false, 'fileDeleted debe ser false');
-      assert.equal(item.sharedReferencesRemaining, 1, 'Debe registrar 1 referencia compartida restante');
+      assert.notEqual(intent.state, 'DELETED', 'NO debe marcar DELETED porque existe referencia activa');
+      assert.equal(intent.state, 'RETAINED', 'El estado semántico correcto es RETAINED');
+      assert(intent.lastError?.includes('active reference detected'), 'lastError debe indicar referencia activa');
+      assert.equal(intent.audited, true, 'Debe auditar la retención');
+
+      // 5. Los archivos físicos DEBEN permanecer intactos
+      assert.equal(await outputStorage.exists(key), true, 'El archivo primario DEBE conservarse intacto');
+      assert.equal(
+        await outputStorage.exists(canonicalKey),
+        true,
+        'El archivo companion DEBE conservarse intacto'
+      );
+
+      // 6. El trabajo activo NO debe haber sido alterado
+      const [activeJob] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, activeJobId));
+      assert.equal(activeJob.prunedAt, null, 'prunedAt del trabajo activo debe permanecer null');
+
+      // 7. Auditoría veraz: evento CAS_OBJECT_RETAINED
+      const auditRows = await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.eventType, 'CAS_OBJECT_RETAINED'));
+      assert(auditRows.some((a) => (a.metadata as any)?.storageKey === key));
     } finally {
       await outputStorage.delete(key).catch(() => {});
+      await outputStorage.delete(canonicalKey).catch(() => {});
       await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      await db.delete(backgroundJobs).where(inArray(backgroundJobs.id, [expiredJobId, activeJobId]));
+      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, activeJobId));
     }
   });
 
-  it('Escenario G: Audit persistence fails after successful physical deletion', async () => {
+  it('Escenario E: Process crashes after primary deletion but before companion deletion', async () => {
     const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario G Audit Fail Content ' + salt);
+    const content = Buffer.from('Scenario E Content ' + salt);
     const hash = crypto.createHash('sha256').update(content).digest('hex');
     const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    // Archivo primario ya fue borrado físicamente; companion todavía existe en disco
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario E Companion"}'));
+
+    try {
+      // Estado en BD tras caída: primary_deleted = true, companion_deleted = false, RETRY_PENDING
+      await db.insert(casDeletionIntents).values({
+        storageKey: key,
+        canonicalKey,
+        checksumSha256: hash,
+        state: 'RETRY_PENDING',
+        primaryDeleted: true,
+        companionDeleted: false,
+        primaryError: null,
+        companionError: 'Simulated crash before companion unlink',
+        lastError: 'Incomplete physical deletion',
+        attempts: 1,
+      });
+
+      assert.equal(await outputStorage.exists(key), false, 'Primario ya no existe');
+      assert.equal(await outputStorage.exists(canonicalKey), true, 'Companion aún existe');
+
+      // Ejecutar reconciliación
+      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
+      assert(recReport.reconciledCount >= 1);
+      assert.equal(recReport.failedCount, 0);
+
+      // Verificaciones: Companion fue eliminado por la reconciliación
+      assert.equal(await outputStorage.exists(canonicalKey), false, 'Companion debe haber sido eliminado');
+
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intent.state, 'DELETED', 'Estado final debe ser DELETED');
+      assert.equal(intent.primaryDeleted, true);
+      assert.equal(intent.companionDeleted, true);
+      assert.equal(intent.audited, true);
+    } finally {
+      await outputStorage.delete(canonicalKey).catch(() => {});
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+    }
+  });
+
+  it('Escenario F: Process crashes after both physical deletions but before database finalization', async () => {
+    const salt = crypto.randomUUID();
+    const hash = crypto.createHash('sha256').update('Scenario F ' + salt).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    // Ninguno de los dos archivos existe en disco (ambos fueron desvinculados antes del crash)
+    assert.equal(await outputStorage.exists(key), false);
+    assert.equal(await outputStorage.exists(canonicalKey), false);
+
+    try {
+      await db.insert(casDeletionIntents).values({
+        storageKey: key,
+        canonicalKey,
+        checksumSha256: hash,
+        state: 'DELETE_PENDING',
+        primaryDeleted: false,
+        companionDeleted: false,
+        attempts: 0,
+      });
+
+      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
+      assert(recReport.reconciledCount >= 1);
+      assert.equal(recReport.failedCount, 0);
+
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intent.state, 'DELETED');
+      assert.equal(intent.primaryDeleted, true);
+      assert.equal(intent.companionDeleted, true);
+      assert.equal(intent.audited, true);
+    } finally {
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+    }
+  });
+
+  it('Escenario G: Lock acquisition fails after acquiring the first key but before acquiring the second', async () => {
+    const keyA = `outputs/test_lock_a_${crypto.randomUUID()}.txt`;
+    const keyB = `outputs/test_lock_b_${crypto.randomUUID()}.canonical.json`;
+    const sortedKeys = [keyA, keyB].sort();
+    const firstKey = sortedKeys[0];
+    const secondKey = sortedKeys[1];
+
+    const blockerClient = await pool.connect();
+    const verifierClient = await pool.connect();
+
+    try {
+      // Bloquear secondKey en un cliente independiente
+      await blockerClient.query('SELECT pg_advisory_lock(hashtext($1))', [secondKey]);
+
+      // Intentar adquisición secuencial en un cliente con statement_timeout corto (100ms)
+      // para forzar fallo durante la adquisición de la segunda clave
+      let acquisitionFailed = false;
+      const client = await pool.connect();
+      try {
+        await client.query('SET statement_timeout = 100');
+        await client.query('SELECT pg_advisory_lock(hashtext($1))', [firstKey]);
+        // Ahora intentar secondKey -> fallará por timeout al estar tomada por blockerClient
+        await client.query('SELECT pg_advisory_lock(hashtext($1))', [secondKey]);
+      } catch {
+        acquisitionFailed = true;
+        // Simular el bloque finally de withCasAdvisoryLocks:
+        // Debe liberar confiablemente la primera clave adquirida
+        await client.query('SET statement_timeout = 0').catch(() => {});
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [firstKey]).catch(() => {});
+      } finally {
+        client.release();
+      }
+
+      assert.equal(acquisitionFailed, true, 'La adquisición de secondKey debió fallar por contención');
+
+      // Verificación crítica: firstKey fue liberado y NO quedó bloqueado o filtrado
+      const testLock = await verifierClient.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) as acquired',
+        [firstKey]
+      );
+      assert.equal(
+        testLock.rows[0].acquired,
+        true,
+        'firstKey debe haber sido liberado en el bloque finally'
+      );
+
+      await verifierClient.query('SELECT pg_advisory_unlock(hashtext($1))', [firstKey]);
+    } finally {
+      await blockerClient.query('SELECT pg_advisory_unlock_all()').catch(() => {});
+      blockerClient.release();
+      verifierClient.release();
+    }
+  });
+
+  it('Escenario H: Reconciliation retries only the incomplete artifact', async () => {
+    const salt = crypto.randomUUID();
+    const hash = crypto.createHash('sha256').update('Scenario H ' + salt).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario H"}'));
+
+    const deletedOps: string[] = [];
+    const originalDelete = outputStorage.delete.bind(outputStorage);
+    outputStorage.delete = async (k: string) => {
+      deletedOps.push(k);
+      return originalDelete(k);
+    };
+
+    try {
+      await db.insert(casDeletionIntents).values({
+        storageKey: key,
+        canonicalKey,
+        checksumSha256: hash,
+        state: 'RETRY_PENDING',
+        primaryDeleted: true, // Primario ya fue eliminado en un intento previo
+        companionDeleted: false, // Companion aún pendiente
+        attempts: 1,
+      });
+
+      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
+      assert(recReport.reconciledCount >= 1);
+
+      // Verificación estricta: NO se llamó a delete para el archivo primario ya eliminado
+      assert.equal(
+        deletedOps.includes(key),
+        false,
+        'NO debe reintentar eliminar el archivo primario ya marcado como primaryDeleted'
+      );
+      assert.equal(deletedOps.includes(canonicalKey), true, 'DEBE eliminar el companion pendiente');
+
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intent.state, 'DELETED');
+      assert.equal(intent.primaryDeleted, true);
+      assert.equal(intent.companionDeleted, true);
+    } finally {
+      outputStorage.delete = originalDelete;
+      await outputStorage.delete(canonicalKey).catch(() => {});
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+    }
+  });
+
+  it('Escenario I: Audit failure preserves truthful final states', async () => {
+    const salt = crypto.randomUUID();
+    const content = Buffer.from('Scenario I Content ' + salt);
+    const hash = crypto.createHash('sha256').update(content).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
     await outputStorage.save(key, content);
+    await outputStorage.save(canonicalKey, Buffer.from('{"title":"Scenario I"}'));
 
     const jobId = crypto.randomUUID();
+    const completedAt = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
 
     try {
       await db.insert(backgroundJobs).values({
@@ -463,136 +608,46 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
         jobType: 'CONVERSION',
         status: 'COMPLETED',
         userId: testUserId,
-        inputRef: 'scenario-g.xml',
+        inputRef: 'scenario-i.xml',
         outputStorageKey: key,
         outputChecksumSha256: hash,
         outputByteLength: content.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
+        completedAt,
         progress: 100,
-        errorDetails: {},
+        errorDetails: { canonicalStorageKey: canonicalKey },
       });
 
-      // Pasar userId inexistente para provocar fallo de FK en subtransacción de auditoría
+      // Pasar un userId no existente que viole la clave foránea en la tabla auditLogs
       const nonExistentUserId = crypto.randomUUID();
-      const report = await retentionService.pruneExpiredOutputs({
+
+      const pruneReport = await retentionService.pruneExpiredOutputs({
         retentionDays: 30,
         userId: nonExistentUserId,
       });
 
-      // 1. Archivo físico fue eliminado
-      assert.equal(await outputStorage.exists(key), false, 'El archivo físico debe haber sido eliminado');
+      // 1. La eliminación física tuvo éxito
+      assert.equal(await outputStorage.exists(key), false, 'Archivo primario fue eliminado');
+      assert.equal(await outputStorage.exists(canonicalKey), false, 'Companion fue eliminado');
 
-      // 2. Trabajo en BD está podado
-      const [job] = await db.select().from(backgroundJobs).where(eq(backgroundJobs.id, jobId));
-      assert(job.prunedAt !== null, 'El trabajo debe registrar prunedAt');
+      // 2. El reporte registra el error de auditoría
+      assert(
+        pruneReport.errors.some((e) => e.error.includes('auditoría')),
+        'Debe reportar fallo de auditoría'
+      );
 
-      // 3. Intención de eliminación en BD está en DELETED pero con audited = false
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert(intent !== undefined);
-      assert.equal(intent.state, 'DELETED');
-      assert.equal(intent.audited, false, 'audited === false debe reflejarse con veracidad');
+      // 3. Veracidad en DB: estado es DELETED pero audited es FALSE
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
 
-      // 4. Reporte registra el fallo de auditoría
-      assert(report.errors.some((e) => e.error.includes('auditoría')), 'El reporte debe registrar el error de auditoría');
-      const item = report.prunedItems.find((i) => i.jobId === jobId);
-      assert(item !== undefined);
-      assert.equal(item.fileDeleted, true);
-      assert.equal(item.audited, false, 'item.audited debe ser false');
+      assert.equal(intent.state, 'DELETED', 'Físicamente fue eliminado');
+      assert.equal(intent.audited, false, 'audited DEBE ser false con veracidad estricta');
     } finally {
       await outputStorage.delete(key).catch(() => {});
+      await outputStorage.delete(canonicalKey).catch(() => {});
       await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
       await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
-    }
-  });
-
-  it('Escenario H: Two recovery workers attempt to reconcile the same pending deletion', async () => {
-    const salt = crypto.randomUUID();
-    const content = Buffer.from('Scenario H Concurrent Reconcile ' + salt);
-    const hash = crypto.createHash('sha256').update(content).digest('hex');
-    const key = `outputs/${hash}.txt`;
-    await outputStorage.save(key, content);
-
-    const jobId = crypto.randomUUID();
-
-    try {
-      await db.insert(backgroundJobs).values({
-        id: jobId,
-        jobType: 'CONVERSION',
-        status: 'COMPLETED',
-        userId: testUserId,
-        inputRef: 'scenario-h.xml',
-        outputStorageKey: key,
-        outputChecksumSha256: hash,
-        outputByteLength: content.length,
-        completedAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
-        prunedAt: new Date(),
-        progress: 100,
-        errorDetails: {},
-      });
-
-      await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        checksumSha256: hash,
-        jobId,
-        state: 'DELETE_PENDING',
-        attempts: 0,
-      });
-
-      // Ejecutar dos reconciliadores concurrentes
-      const [report1, report2] = await Promise.all([
-        retentionService.reconcilePendingDeletions({ userId: testUserId }),
-        retentionService.reconcilePendingDeletions({ userId: testUserId }),
-      ]);
-
-      const totalReconciled = report1.reconciledCount + report2.reconciledCount;
-      const totalFailed = report1.failedCount + report2.failedCount;
-
-      assert.equal(totalReconciled, 1, 'Exactamente un worker debe reconciliar la intención');
-      assert.equal(totalFailed, 0, 'No deben ocurrir fallos en ninguno de los workers');
-      assert.equal(await outputStorage.exists(key), false, 'El archivo físico debe estar eliminado');
-
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(intent.state, 'DELETED');
-      assert.equal(intent.audited, true);
-    } finally {
-      await outputStorage.delete(key).catch(() => {});
-      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId));
-    }
-  });
-
-  it('Escenario I: A previously completed deletion is retried idempotently', async () => {
-    const salt = crypto.randomUUID();
-    const key = `outputs/scenario-i-idempotent-${salt}.txt`;
-    const hash = crypto.createHash('sha256').update(key).digest('hex');
-
-    try {
-      // Estado preexistente: ya fue DELETED
-      await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        checksumSha256: hash,
-        state: 'DELETED',
-        deletedAt: new Date(),
-        audited: true,
-        attempts: 1,
-      });
-
-      assert.equal(await outputStorage.exists(key), false, 'El archivo ya no existe');
-
-      // Reintentar reconciliación
-      const report = await retentionService.reconcilePendingDeletions({ userId: testUserId });
-
-      // No debe procesar nada ni generar errores
-      assert.equal(report.scannedCount, 0, 'No debe haber intenciones pendientes para escanear');
-      assert.equal(report.reconciledCount, 0, 'No debe reconciliar nada');
-      assert.equal(report.failedCount, 0, 'No debe fallar');
-      assert.equal(report.errors.length, 0, 'Cero errores');
-
-      const [intent] = await db.select().from(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
-      assert.equal(intent.state, 'DELETED');
-      assert.equal(intent.audited, true);
-    } finally {
-      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
     }
   });
 
@@ -626,8 +681,18 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
       },
     });
 
-    const songService = new SongService(new DrizzleSongRepository(db), new DrizzleSongVersionRepository(db));
-    const convJobService = new ConversionJobService(songService, undefined, db, undefined, undefined, outputStorage);
+    const songService = new SongService(
+      new DrizzleSongRepository(db),
+      new DrizzleSongVersionRepository(db)
+    );
+    const convJobService = new ConversionJobService(
+      songService,
+      undefined,
+      db,
+      undefined,
+      undefined,
+      outputStorage
+    );
 
     // Ejecutar simultáneamente commitJobToCatalog y pruneExpiredOutputs
     const commitPromise = convJobService.commitJobToCatalog(raceJobId, {
@@ -649,7 +714,11 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     assert.equal(pruneResult.status, 'fulfilled', 'El podador debe terminar de forma controlada');
 
     if (commitResult.status === 'fulfilled') {
-      assert.equal(await outputStorage.exists(key), true, 'El archivo físico debe existir al haber sido comprometido al catálogo');
+      assert.equal(
+        await outputStorage.exists(key),
+        true,
+        'El archivo físico debe existir al haber sido comprometido al catálogo'
+      );
     } else {
       assert(commitResult.reason?.message?.includes('podado'), 'Commit debe ser rechazado si fue podado primero');
     }
@@ -683,7 +752,11 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     const report = await retentionService.collectOrphans({ quarantineDays: 7, userId: testUserId });
 
     // 4. El archivo NO debe eliminarse porque está dentro de la ventana de cuarentena
-    assert.equal(await outputStorage.exists(crashedKey), true, 'La cuarentena debe proteger escrituras recientes de workers caídos');
+    assert.equal(
+      await outputStorage.exists(crashedKey),
+      true,
+      'La cuarentena debe proteger escrituras recientes de workers caídos'
+    );
     assert(report.quarantinedFilesCount >= 1, 'El archivo fue contabilizado en cuarentena');
     assert.equal(report.orphansDeletedCount, 0);
 

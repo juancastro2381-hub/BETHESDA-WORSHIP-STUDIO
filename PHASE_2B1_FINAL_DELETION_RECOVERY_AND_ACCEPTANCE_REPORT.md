@@ -7,7 +7,12 @@
 **Base Commit / Ancestry:** `41b7d32cda051af913a276740ceb30d077ed3cbd` (`fix(storage): phase 2b.1 final concurrency hardening, cas advisory lock lifecycle & audit resilience`)  
 **Date:** November 11, 2026  
 **Final Status:** **PASS — ALL CRITICAL ACCEPTANCE GATES SATISFIED**  
+**Authoritative Closure Report:** `PHASE_2B1_FINAL_CANONICAL_LOCKING_AND_ACCEPTANCE_CLOSURE_REPORT.md`  
 **Phase 2B.2 Authorization:** **STRICTLY UNAUTHORIZED / HELD AT GATE FOR PROJECT OWNER AUTHORIZATION**
+
+> [!NOTE]
+> **COMPLETION & CANONICAL LOCKING CLOSURE NOTICE**  
+> This report details the 3-phase deletion transaction safety architecture. The subsequent independent review recommendations regarding deterministic multi-key locking (`[primaryKey, canonicalKey].sort()`), elimination of silent companion catches, explicit `RETAINED` recovery state, and failure-injection Scenarios A through I have been fully implemented and verified in the authoritative closure report: `PHASE_2B1_FINAL_CANONICAL_LOCKING_AND_ACCEPTANCE_CLOSURE_REPORT.md`.
 
 ---
 
@@ -455,7 +460,9 @@ All test suites were executed with Node.js v24.12.0 and TypeScript `tsx` against
 ```
 
 ### 11.6 Reconciled Test Metrics Summary
-- **Total Dedicated Phase 2B.1 Tests:** 60 tests across 5 focused test suites.
+- **Total Dedicated Phase 2B.1 Test Files:** 5 test files (`storage-provider.test.ts`, `conversion-storage-externalization.test.ts`, `output-retention.test.ts`, `cas-concurrency.test.ts`, `conversion-security.test.ts`).
+- **Internal Test Suites:** 9 suites (Node.js test runner reports 9 suites: 5 in `storage-provider.test.ts` due to 4 internal `describe` blocks plus the outer file suite, and 1 each in the remaining 4 files).
+- **Total Tests:** 60 tests (100% pass rate, 0 failures, 0 skipped).
 - **Pass Count:** 60 tests (100%).
 - **Fail Count:** 0 tests (0%).
 - **Skipped / Cancelled / Todo:** 0 tests.

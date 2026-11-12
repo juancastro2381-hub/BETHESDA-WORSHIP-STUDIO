@@ -92,6 +92,7 @@ describe('Phase 2B.1 — Conversion Storage Externalization & TOAST Optimization
     await db.delete(users).where(eq(users.id, testUserId));
     await fs.rm(testOutputDir, { recursive: true, force: true });
     await fs.rm(testSourceDir, { recursive: true, force: true });
+    await pool.end();
   });
 
   it('debe procesar un trabajo de conversión, externalizar el archivo a storage/outputs/ y mantener errorDetails sin data masivo', async () => {

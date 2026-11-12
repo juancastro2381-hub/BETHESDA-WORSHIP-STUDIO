@@ -1448,10 +1448,10 @@ export class ConversionWorker {
       let saveMetadata: StorageMetadata | null = null;
 
       const finalizedJob = await this.db.transaction(async (tx) => {
-        // Bloqueo consultivo determinista sobre la clave CAS y la clave canónica
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${casStorageKey}))`);
-        if (canonicalStorageKey) {
-          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${canonicalStorageKey}))`);
+        // Bloqueo consultivo determinista sobre la clave CAS y la clave canónica en orden lexicográfico estricto
+        const keysToLock = [casStorageKey, canonicalStorageKey].filter((k): k is string => Boolean(k)).sort();
+        for (const key of keysToLock) {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
         }
 
         // Fencing check bajo el lock: verificar testigo de arrendamiento
@@ -1473,11 +1473,14 @@ export class ConversionWorker {
 
         // Requirement 9: A committed deletion intent must prevent new references from being registered against the object.
         const [pendingIntent] = await tx
-          .select({ state: casDeletionIntents.state })
+          .select({ state: casDeletionIntents.state, storageKey: casDeletionIntents.storageKey })
           .from(casDeletionIntents)
           .where(
             and(
-              eq(casDeletionIntents.storageKey, casStorageKey),
+              or(
+                inArray(casDeletionIntents.storageKey, keysToLock),
+                inArray(casDeletionIntents.canonicalKey, keysToLock)
+              ),
               inArray(casDeletionIntents.state, ['DELETE_PENDING', 'RETRY_PENDING'])
             )
           )
@@ -1485,17 +1488,20 @@ export class ConversionWorker {
 
         if (pendingIntent) {
           throw new Error(
-            `Cannot register reference: CAS object "${casStorageKey}" has a pending deletion intent (${pendingIntent.state}).`
+            `Cannot register reference: CAS object "${pendingIntent.storageKey}" has a pending deletion intent (${pendingIntent.state}).`
           );
         }
 
-        // Si existía un intento previo en estado DELETED, se remueve ya que se creará una instancia fresca
+        // Si existía un intento previo resuelto (DELETED, RETAINED, CANCELLED), se limpia ya que se creará una instancia fresca
         await tx
           .delete(casDeletionIntents)
           .where(
             and(
-              eq(casDeletionIntents.storageKey, casStorageKey),
-              eq(casDeletionIntents.state, 'DELETED')
+              or(
+                inArray(casDeletionIntents.storageKey, keysToLock),
+                inArray(casDeletionIntents.canonicalKey, keysToLock)
+              ),
+              inArray(casDeletionIntents.state, ['DELETED', 'RETAINED', 'CANCELLED'])
             )
           );
 

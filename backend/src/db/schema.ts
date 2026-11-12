@@ -820,6 +820,8 @@ export const casDeletionStateEnum = pgEnum('cas_deletion_state', [
   'DELETED',
   'DELETE_FAILED',
   'RETRY_PENDING',
+  'RETAINED',
+  'CANCELLED',
 ]);
 
 export const casDeletionIntents = pgTable(
@@ -827,9 +829,14 @@ export const casDeletionIntents = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     storageKey: varchar('storage_key', { length: 512 }).notNull().unique(),
+    canonicalKey: varchar('canonical_key', { length: 512 }),
     checksumSha256: varchar('checksum_sha256', { length: 64 }),
     jobId: uuid('job_id').references(() => backgroundJobs.id, { onDelete: 'set null' }),
     state: casDeletionStateEnum('state').notNull().default('DELETE_PENDING'),
+    primaryDeleted: boolean('primary_deleted').notNull().default(false),
+    companionDeleted: boolean('companion_deleted').notNull().default(false),
+    primaryError: text('primary_error'),
+    companionError: text('companion_error'),
     attempts: integer('attempts').notNull().default(0),
     maxAttempts: integer('max_attempts').notNull().default(5),
     lastError: text('last_error'),
@@ -841,12 +848,19 @@ export const casDeletionIntents = pgTable(
   (table) => [
     index('idx_cas_deletion_intents_state').on(table.state),
     index('idx_cas_deletion_intents_key').on(table.storageKey),
+    index('idx_cas_deletion_intents_canonical_key').on(table.canonicalKey),
   ]
 );
 
 export type CasDeletionIntentRow = typeof casDeletionIntents.$inferSelect;
 export type NewCasDeletionIntentRow = typeof casDeletionIntents.$inferInsert;
-export type CasDeletionState = 'DELETE_PENDING' | 'DELETED' | 'DELETE_FAILED' | 'RETRY_PENDING';
+export type CasDeletionState =
+  | 'DELETE_PENDING'
+  | 'DELETED'
+  | 'DELETE_FAILED'
+  | 'RETRY_PENDING'
+  | 'RETAINED'
+  | 'CANCELLED';
 
 /**
  * Tabla: omr_proposals

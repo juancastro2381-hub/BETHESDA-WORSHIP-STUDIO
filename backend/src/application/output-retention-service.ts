@@ -102,29 +102,68 @@ export class OutputRetentionService {
   }
 
   /**
-   * Ejecuta una operación bajo un bloqueo consultivo a nivel de sesión en PostgreSQL (pg_advisory_lock).
+   * Obtiene la clave del artefacto canónico compañero (.canonical.json) a partir de la clave primaria.
+   */
+  public static getCompanionKey(primaryKey: string): string | null {
+    if (primaryKey.endsWith('.canonical.json')) {
+      return null;
+    }
+    return primaryKey.replace(/\.[^.]+$/, '.canonical.json');
+  }
+
+  /**
+   * Obtiene todas las claves CAS relacionadas (primaria + compañera canónica si aplica).
+   */
+  public static getRelatedCasKeys(storageKey: string): string[] {
+    const companion = OutputRetentionService.getCompanionKey(storageKey);
+    return companion ? [storageKey, companion] : [storageKey];
+  }
+
+  /**
+   * Ejecuta una operación bajo bloqueos consultivos a nivel de sesión en PostgreSQL (pg_advisory_lock).
    * 
-   * Propiedades del Protocolo de Seguridad:
-   * 1. Exclusión mutua global entre Writers, Pruners, OrphanCollectors y RecoveryWorkers sobre el mismo hash CAS.
-   * 2. Si el proceso o la red fallan, PostgreSQL libera automáticamente el bloqueo al destruirse el socket TCP.
-   * 3. Permite que las transacciones de base de datos comiteen ANTES de tocar el sistema de archivos
-   *    sin retener transacciones SQL abiertas durante operaciones de E/S física (Requirement 13).
+   * Protocolo Determinista de Bloqueo Jerárquico:
+   * 1. Ordenamiento lexicográfico estricto de todas las claves CAS (clave principal + claves canónicas/compañeras).
+   *    Esto elimina matemáticamente cualquier posibilidad de interbloqueo (deadlock) entre workers concurrentes y procesos de retención.
+   * 2. Adquisición secuencial de cada clave bajo la misma conexión de cliente PostgreSQL (PoolClient).
+   * 3. Liberación confiable en bloque 'finally' en orden inverso, manejando fallos parciales de adquisición.
+   * 4. Persistencia del bloqueo a través de transacciones DB intermedias y operaciones de E/S física en disco.
+   */
+  public async withCasAdvisoryLocks<T>(
+    keys: string | string[],
+    operation: (client: PoolClient) => Promise<T>
+  ): Promise<T> {
+    const keyArray = Array.isArray(keys) ? keys : [keys];
+    const sortedKeys = Array.from(new Set(keyArray.filter(Boolean))).sort();
+    const client = await this.pool.connect();
+    const acquiredKeys: string[] = [];
+
+    try {
+      for (const key of sortedKeys) {
+        await client.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
+        acquiredKeys.push(key);
+      }
+      return await operation(client);
+    } finally {
+      for (const key of [...acquiredKeys].reverse()) {
+        try {
+          await client.query('SELECT pg_advisory_unlock(hashtext($1))', [key]);
+        } catch {
+          // Supresión intencional de errores de desbloqueo en cleanup para garantizar liberación del cliente
+        }
+      }
+      client.release();
+    }
+  }
+
+  /**
+   * Wrapper retrocompatible para bloquear una clave individual.
    */
   public async withCasAdvisoryLock<T>(
     storageKey: string,
     operation: (client: PoolClient) => Promise<T>
   ): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('SELECT pg_advisory_lock(hashtext($1))', [storageKey]);
-      try {
-        return await operation(client);
-      } finally {
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [storageKey]).catch(() => {});
-      }
-    } finally {
-      client.release();
-    }
+    return this.withCasAdvisoryLocks([storageKey], operation);
   }
 
   /**
@@ -192,7 +231,10 @@ export class OutputRetentionService {
 
     for (const job of candidateJobs) {
       const storageKey = job.outputStorageKey!;
-      const canonicalKey = storageKey.replace(/\.[^.]+$/, '.canonical.json');
+      const canonicalKey =
+        (job as any).errorDetails?.canonicalStorageKey ??
+        OutputRetentionService.getCompanionKey(storageKey);
+      const keysToLock = [storageKey, canonicalKey].filter((k): k is string => Boolean(k)).sort();
 
       try {
         let fileDeleted = false;
@@ -202,7 +244,7 @@ export class OutputRetentionService {
         let intentCommitted = false;
 
         if (!dryRun) {
-          await this.withCasAdvisoryLock(storageKey, async () => {
+          await this.withCasAdvisoryLocks(keysToLock, async () => {
             // =========================================================================
             // FASE 1: Compromiso de Intención de Eliminación en Base de Datos (Tx 1)
             // =========================================================================
@@ -243,13 +285,18 @@ export class OutputRetentionService {
                 return;
               }
 
-              // Comprobación de referencias compartidas (CAS Deduplication)
+              // Comprobación de referencias compartidas (CAS Deduplication) tanto para primaryKey como para canonicalKey
               const [activeOtherJobs] = await tx
                 .select({ count: sql<number>`count(*)::int` })
                 .from(backgroundJobs)
                 .where(
                   and(
-                    eq(backgroundJobs.outputStorageKey, storageKey),
+                    or(
+                      eq(backgroundJobs.outputStorageKey, storageKey),
+                      canonicalKey ? eq(backgroundJobs.outputStorageKey, canonicalKey) : sql`false`,
+                      sql`(${backgroundJobs.errorDetails}->>'outputStorageKey' = ${storageKey})`,
+                      canonicalKey ? sql`(${backgroundJobs.errorDetails}->>'canonicalStorageKey' = ${canonicalKey})` : sql`false`
+                    ),
                     isNull(backgroundJobs.prunedAt),
                     not(eq(backgroundJobs.id, job.id))
                   )
@@ -258,7 +305,12 @@ export class OutputRetentionService {
               const [activeSources] = await tx
                 .select({ count: sql<number>`count(*)::int` })
                 .from(songSources)
-                .where(eq(songSources.storagePath, storageKey));
+                .where(
+                  or(
+                    eq(songSources.storagePath, storageKey),
+                    canonicalKey ? eq(songSources.storagePath, canonicalKey) : sql`false`
+                  )
+                );
 
               otherRefCount = (activeOtherJobs?.count ?? 0) + (activeSources?.count ?? 0);
 
@@ -268,9 +320,12 @@ export class OutputRetentionService {
                   .insert(casDeletionIntents)
                   .values({
                     storageKey,
+                    canonicalKey,
                     checksumSha256: job.outputChecksumSha256,
                     jobId: job.id,
                     state: 'DELETE_PENDING',
+                    primaryDeleted: false,
+                    companionDeleted: false,
                     attempts: 0,
                     createdAt: now,
                     updatedAt: now,
@@ -278,7 +333,13 @@ export class OutputRetentionService {
                   .onConflictDoUpdate({
                     target: casDeletionIntents.storageKey,
                     set: {
+                      canonicalKey,
                       state: 'DELETE_PENDING',
+                      primaryDeleted: false,
+                      companionDeleted: false,
+                      primaryError: null,
+                      companionError: null,
+                      lastError: null,
                       jobId: job.id,
                       updatedAt: now,
                     },
@@ -296,49 +357,83 @@ export class OutputRetentionService {
             // FASE 2: Eliminación Física en Almacenamiento (SIN TRANSACCIÓN DB ABIERTA)
             // =========================================================================
             // Cumple con el Requirement 13: Cero transacciones DB retenidas durante E/S física
-            try {
-              const wasDeleted = await this.outputStorage.delete(storageKey);
-              if (wasDeleted) {
-                fileDeleted = true;
-              }
+            // NUNCA suprime errores de eliminación del compañero canónico (.catch(() => {}))
+            let primaryDeleted = false;
+            let companionDeleted = !canonicalKey;
+            let primaryError: string | null = null;
+            let companionError: string | null = null;
 
-              if (await this.outputStorage.exists(canonicalKey)) {
-                await this.outputStorage.delete(canonicalKey).catch(() => {});
-              }
+            try {
+              await this.outputStorage.delete(storageKey);
+              primaryDeleted = true;
             } catch (delErr: any) {
               if (delErr instanceof StorageNotFoundError) {
-                fileDeleted = false; // Idempotencia si el archivo ya no existía
+                primaryDeleted = true; // Idempotencia si el archivo ya no existía
               } else {
-                deletionError = delErr?.message ?? String(delErr);
+                primaryDeleted = false;
+                primaryError = delErr?.message ?? String(delErr);
+              }
+            }
+
+            if (canonicalKey) {
+              try {
+                const exists = await this.outputStorage.exists(canonicalKey);
+                if (exists) {
+                  await this.outputStorage.delete(canonicalKey);
+                }
+                companionDeleted = true;
+              } catch (compErr: any) {
+                if (compErr instanceof StorageNotFoundError) {
+                  companionDeleted = true;
+                } else {
+                  companionDeleted = false;
+                  companionError = compErr?.message ?? String(compErr);
+                }
               }
             }
 
             // =========================================================================
             // FASE 3: Persistencia de Estado Terminal y Auditoría (Tx 2)
             // =========================================================================
-            if (deletionError) {
-              // Si la eliminación física falló, registrar estado reintentable (RETRY_PENDING)
+            if (!primaryDeleted || !companionDeleted) {
+              const combinedError = [
+                primaryError ? `Primary (${storageKey}): ${primaryError}` : null,
+                companionError ? `Companion (${canonicalKey}): ${companionError}` : null,
+              ].filter(Boolean).join('; ');
+
+              deletionError = combinedError;
+
+              // Si la eliminación física fue incompleta, registrar estado reintentable (RETRY_PENDING)
               await this.db
                 .update(casDeletionIntents)
                 .set({
                   state: 'RETRY_PENDING',
+                  primaryDeleted,
+                  companionDeleted,
+                  primaryError,
+                  companionError,
+                  lastError: combinedError,
                   attempts: sql`${casDeletionIntents.attempts} + 1`,
-                  lastError: deletionError,
                   updatedAt: new Date(),
                 })
                 .where(eq(casDeletionIntents.storageKey, storageKey));
 
               report.errors.push({
                 jobId: job.id,
-                error: `Fallo físico de eliminación (registrado RETRY_PENDING): ${deletionError}`,
+                error: `Fallo físico parcial o total (registrado RETRY_PENDING): ${combinedError}`,
               });
             } else {
-              // Eliminación física completada: actualizar intención a DELETED
+              // Eliminación física de todos los artefactos completada: actualizar intención a DELETED
               await this.db.transaction(async (tx) => {
                 await tx
                   .update(casDeletionIntents)
                   .set({
                     state: 'DELETED',
+                    primaryDeleted: true,
+                    companionDeleted: true,
+                    primaryError: null,
+                    companionError: null,
+                    lastError: null,
                     deletedAt: new Date(),
                     updatedAt: new Date(),
                   })
@@ -354,12 +449,15 @@ export class OutputRetentionService {
                       metadata: {
                         jobId: job.id,
                         storageKey,
+                        canonicalKey,
                         checksumSha256: job.outputChecksumSha256,
-                        fileDeleted,
+                        fileDeleted: true,
+                        primaryDeleted: true,
+                        companionDeleted: true,
                         sharedReferencesRemaining: otherRefCount,
                         retentionDays: days,
                         completedAt: job.completedAt?.toISOString(),
-                        deletionError,
+                        deletionError: null,
                       },
                     });
                   });
@@ -377,6 +475,8 @@ export class OutputRetentionService {
                   });
                 }
               });
+
+              fileDeleted = true;
             }
           });
         } else {
@@ -466,7 +566,10 @@ export class OutputRetentionService {
           let audited = false;
 
           if (!dryRun) {
-            await this.withCasAdvisoryLock(key, async () => {
+            const canonicalKey = OutputRetentionService.getCompanionKey(key);
+            const keysToLock = OutputRetentionService.getRelatedCasKeys(key).sort();
+
+            await this.withCasAdvisoryLocks(keysToLock, async () => {
               let otherRefCount = 0;
               let intentCommitted = false;
               let deletionError: string | null = null;
@@ -509,7 +612,12 @@ export class OutputRetentionService {
                   .from(backgroundJobs)
                   .where(
                     and(
-                      eq(backgroundJobs.outputStorageKey, key),
+                      or(
+                        eq(backgroundJobs.outputStorageKey, key),
+                        canonicalKey ? eq(backgroundJobs.outputStorageKey, canonicalKey) : sql`false`,
+                        sql`(${backgroundJobs.errorDetails}->>'outputStorageKey' = ${key})`,
+                        canonicalKey ? sql`(${backgroundJobs.errorDetails}->>'canonicalStorageKey' = ${canonicalKey})` : sql`false`
+                      ),
                       isNull(backgroundJobs.prunedAt)
                     )
                   )
@@ -518,7 +626,12 @@ export class OutputRetentionService {
                 const [sourceRef] = await tx
                   .select({ id: songSources.id })
                   .from(songSources)
-                  .where(eq(songSources.storagePath, key))
+                  .where(
+                    or(
+                      eq(songSources.storagePath, key),
+                      canonicalKey ? eq(songSources.storagePath, canonicalKey) : sql`false`
+                    )
+                  )
                   .limit(1);
 
                 if (jobRef || sourceRef) {
@@ -534,6 +647,7 @@ export class OutputRetentionService {
                     and(
                       or(
                         eq(backgroundJobs.outputStorageKey, key),
+                        canonicalKey ? eq(backgroundJobs.outputStorageKey, canonicalKey) : sql`false`,
                         eq(backgroundJobs.outputChecksumSha256, meta.checksumSha256)
                       ),
                       or(
@@ -550,6 +664,7 @@ export class OutputRetentionService {
                   .where(
                     or(
                       eq(songSources.storagePath, key),
+                      canonicalKey ? eq(songSources.storagePath, canonicalKey) : sql`false`,
                       eq(songSources.checksumSha256, meta.checksumSha256)
                     )
                   )
@@ -565,8 +680,11 @@ export class OutputRetentionService {
                   .insert(casDeletionIntents)
                   .values({
                     storageKey: key,
+                    canonicalKey,
                     checksumSha256: meta.checksumSha256,
                     state: 'DELETE_PENDING',
+                    primaryDeleted: false,
+                    companionDeleted: false,
                     attempts: 0,
                     createdAt: now,
                     updatedAt: now,
@@ -574,7 +692,13 @@ export class OutputRetentionService {
                   .onConflictDoUpdate({
                     target: casDeletionIntents.storageKey,
                     set: {
+                      canonicalKey,
                       state: 'DELETE_PENDING',
+                      primaryDeleted: false,
+                      companionDeleted: false,
+                      primaryError: null,
+                      companionError: null,
+                      lastError: null,
                       updatedAt: now,
                     },
                   });
@@ -590,36 +714,71 @@ export class OutputRetentionService {
               // FASE 2: Eliminación Física en Almacenamiento (SIN TRANSACCIÓN DB ABIERTA)
               // =========================================================================
               // Cumple con el Requirement 13: Cero transacciones DB retenidas durante E/S física
+              let primaryDeleted = false;
+              let companionDeleted = !canonicalKey;
+              let primaryError: string | null = null;
+              let companionError: string | null = null;
+
               try {
                 const wasDeleted = await this.outputStorage.delete(key);
+                primaryDeleted = true;
                 if (wasDeleted) {
                   deleted = true;
                 }
               } catch (delErr: any) {
                 if (delErr instanceof StorageNotFoundError) {
-                  deleted = false;
+                  primaryDeleted = true;
                 } else {
-                  deletionError = delErr?.message ?? String(delErr);
+                  primaryDeleted = false;
+                  primaryError = delErr?.message ?? String(delErr);
+                }
+              }
+
+              if (canonicalKey) {
+                try {
+                  const exists = await this.outputStorage.exists(canonicalKey);
+                  if (exists) {
+                    await this.outputStorage.delete(canonicalKey);
+                  }
+                  companionDeleted = true;
+                } catch (compErr: any) {
+                  if (compErr instanceof StorageNotFoundError) {
+                    companionDeleted = true;
+                  } else {
+                    companionDeleted = false;
+                    companionError = compErr?.message ?? String(compErr);
+                  }
                 }
               }
 
               // =========================================================================
               // FASE 3: Persistencia de Estado Terminal y Auditoría (Tx 2)
               // =========================================================================
-              if (deletionError) {
+              if (!primaryDeleted || !companionDeleted) {
+                const combinedError = [
+                  primaryError ? `Primary (${key}): ${primaryError}` : null,
+                  companionError ? `Companion (${canonicalKey}): ${companionError}` : null,
+                ].filter(Boolean).join('; ');
+
+                deletionError = combinedError;
+
                 await this.db
                   .update(casDeletionIntents)
                   .set({
                     state: 'RETRY_PENDING',
+                    primaryDeleted,
+                    companionDeleted,
+                    primaryError,
+                    companionError,
+                    lastError: combinedError,
                     attempts: sql`${casDeletionIntents.attempts} + 1`,
-                    lastError: deletionError,
                     updatedAt: new Date(),
                   })
                   .where(eq(casDeletionIntents.storageKey, key));
 
                 report.errors.push({
                   storageKey: key,
-                  error: `Fallo físico de eliminación huérfano (registrado RETRY_PENDING): ${deletionError}`,
+                  error: `Fallo físico de eliminación huérfano (registrado RETRY_PENDING): ${combinedError}`,
                 });
               } else {
                 await this.db.transaction(async (tx) => {
@@ -627,6 +786,11 @@ export class OutputRetentionService {
                     .update(casDeletionIntents)
                     .set({
                       state: 'DELETED',
+                      primaryDeleted: true,
+                      companionDeleted: true,
+                      primaryError: null,
+                      companionError: null,
+                      lastError: null,
                       deletedAt: new Date(),
                       updatedAt: new Date(),
                     })
@@ -641,6 +805,7 @@ export class OutputRetentionService {
                         resource: `storage/${key}`,
                         metadata: {
                           storageKey: key,
+                          canonicalKey,
                           byteLength: meta.byteLength,
                           checksumSha256: meta.checksumSha256,
                           fileCreatedAt: meta.createdAt.toISOString(),
@@ -722,26 +887,41 @@ export class OutputRetentionService {
     report.scannedCount = pendingIntents.length;
 
     for (const intent of pendingIntents) {
+      const primaryKey = intent.storageKey;
+      const canonicalKey =
+        intent.canonicalKey ?? OutputRetentionService.getCompanionKey(primaryKey);
+      const keysToLock = [primaryKey, canonicalKey].filter((k): k is string => Boolean(k)).sort();
+
       try {
-        await this.withCasAdvisoryLock(intent.storageKey, async () => {
+        await this.withCasAdvisoryLocks(keysToLock, async () => {
           // Re-consultar estado actual bajo el lock
           const [current] = await this.db
             .select()
             .from(casDeletionIntents)
-            .where(eq(casDeletionIntents.storageKey, intent.storageKey))
+            .where(eq(casDeletionIntents.storageKey, primaryKey))
             .limit(1);
 
-          if (!current || current.state === 'DELETED') {
+          if (
+            !current ||
+            current.state === 'DELETED' ||
+            current.state === 'RETAINED' ||
+            current.state === 'CANCELLED'
+          ) {
             return; // Ya reconciliado de forma idempotente
           }
 
-          // Verificar si un nuevo worker registró una referencia legítima
+          // Verificar si un nuevo worker o proceso registró una referencia legítima
           const [activeJob] = await this.db
             .select({ id: backgroundJobs.id })
             .from(backgroundJobs)
             .where(
               and(
-                eq(backgroundJobs.outputStorageKey, intent.storageKey),
+                or(
+                  eq(backgroundJobs.outputStorageKey, primaryKey),
+                  canonicalKey ? eq(backgroundJobs.outputStorageKey, canonicalKey) : sql`false`,
+                  sql`(${backgroundJobs.errorDetails}->>'outputStorageKey' = ${primaryKey})`,
+                  canonicalKey ? sql`(${backgroundJobs.errorDetails}->>'canonicalStorageKey' = ${canonicalKey})` : sql`false`
+                ),
                 isNull(backgroundJobs.prunedAt)
               )
             )
@@ -750,73 +930,43 @@ export class OutputRetentionService {
           const [activeSource] = await this.db
             .select({ id: songSources.id })
             .from(songSources)
-            .where(eq(songSources.storagePath, intent.storageKey))
+            .where(
+              or(
+                eq(songSources.storagePath, primaryKey),
+                canonicalKey ? eq(songSources.storagePath, canonicalKey) : sql`false`
+              )
+            )
             .limit(1);
 
           if (activeJob || activeSource) {
-            // Existe referencia activa: resolver la intención a DELETED
-            await this.db
-              .update(casDeletionIntents)
-              .set({ state: 'DELETED', updatedAt: new Date() })
-              .where(eq(casDeletionIntents.storageKey, intent.storageKey));
-            return;
-          }
-
-          // Eliminación física (Filesystem Only - sin transacción DB)
-          let deletionError: string | null = null;
-          let fileDeleted = false;
-          try {
-            const wasDeleted = await this.outputStorage.delete(intent.storageKey);
-            if (wasDeleted) fileDeleted = true;
-
-            const canonicalKey = intent.storageKey.replace(/\.[^.]+$/, '.canonical.json');
-            if (await this.outputStorage.exists(canonicalKey)) {
-              await this.outputStorage.delete(canonicalKey).catch(() => {});
-            }
-          } catch (delErr: any) {
-            if (delErr instanceof StorageNotFoundError) {
-              fileDeleted = false;
-            } else {
-              deletionError = delErr?.message ?? String(delErr);
-            }
-          }
-
-          if (deletionError) {
-            const nextAttempts = current.attempts + 1;
-            const nextState = nextAttempts >= current.maxAttempts ? 'DELETE_FAILED' : 'RETRY_PENDING';
-            await this.db
-              .update(casDeletionIntents)
-              .set({
-                state: nextState,
-                attempts: nextAttempts,
-                lastError: deletionError,
-                updatedAt: new Date(),
-              })
-              .where(eq(casDeletionIntents.storageKey, intent.storageKey));
-
-            report.failedCount++;
-            report.errors.push({ storageKey: intent.storageKey, error: deletionError });
-          } else {
+            // CRITICAL RECOVERY SEMANTICS: Existe referencia activa.
+            // Transición explícita a 'RETAINED' (NUNCA a 'DELETED').
+            // El artefacto físico se conserva intacto porque está en uso legítimo.
             await this.db.transaction(async (tx) => {
               await tx
                 .update(casDeletionIntents)
                 .set({
-                  state: 'DELETED',
-                  deletedAt: new Date(),
+                  state: 'RETAINED',
+                  lastError: `Deletion cancelled: active reference detected (job: ${activeJob?.id ?? 'none'}, source: ${activeSource?.id ?? 'none'})`,
                   updatedAt: new Date(),
                 })
-                .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+                .where(eq(casDeletionIntents.storageKey, primaryKey));
 
               try {
                 await tx.transaction(async (subTx) => {
                   await subTx.insert(auditLogs).values({
-                    eventType: 'CONVERSION_OUTPUT_DELETION_RECONCILED',
+                    eventType: 'CAS_OBJECT_RETAINED',
                     userId: options?.userId ?? null,
-                    resource: `storage/${intent.storageKey}`,
+                    resource: `storage/${primaryKey}`,
                     metadata: {
-                      storageKey: intent.storageKey,
-                      checksumSha256: intent.checksumSha256,
-                      jobId: intent.jobId,
+                      storageKey: primaryKey,
+                      canonicalKey,
+                      checksumSha256: current.checksumSha256,
+                      jobId: current.jobId,
+                      activeJobId: activeJob?.id ?? null,
+                      activeSourceId: activeSource?.id ?? null,
+                      reason:
+                        'Active reference detected during recovery reconciliation; deletion cancelled and object retained.',
                       reconciledAt: new Date().toISOString(),
                     },
                   });
@@ -824,10 +974,126 @@ export class OutputRetentionService {
                 await tx
                   .update(casDeletionIntents)
                   .set({ audited: true })
-                  .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+                  .where(eq(casDeletionIntents.storageKey, primaryKey));
               } catch (auditErr: any) {
                 report.errors.push({
-                  storageKey: intent.storageKey,
+                  storageKey: primaryKey,
+                  error: `Fallo al registrar auditoría de retención: ${auditErr?.message ?? String(auditErr)}`,
+                });
+              }
+            });
+            report.reconciledCount++;
+            return;
+          }
+
+          // No hay referencias activas: reintentar SOLO los artefactos incompletos
+          let primaryDeleted = current.primaryDeleted;
+          let companionDeleted = current.companionDeleted || !canonicalKey;
+          let primaryError: string | null = null;
+          let companionError: string | null = null;
+
+          if (!primaryDeleted) {
+            try {
+              await this.outputStorage.delete(primaryKey);
+              primaryDeleted = true;
+            } catch (delErr: any) {
+              if (delErr instanceof StorageNotFoundError) {
+                primaryDeleted = true; // Idempotencia
+              } else {
+                primaryDeleted = false;
+                primaryError = delErr?.message ?? String(delErr);
+              }
+            }
+          }
+
+          if (canonicalKey && !companionDeleted) {
+            try {
+              const exists = await this.outputStorage.exists(canonicalKey);
+              if (exists) {
+                await this.outputStorage.delete(canonicalKey);
+              }
+              companionDeleted = true;
+            } catch (compErr: any) {
+              if (compErr instanceof StorageNotFoundError) {
+                companionDeleted = true;
+              } else {
+                companionDeleted = false;
+                companionError = compErr?.message ?? String(compErr);
+              }
+            }
+          }
+
+          if (!primaryDeleted || !companionDeleted) {
+            const nextAttempts = current.attempts + 1;
+            const nextState =
+              nextAttempts >= current.maxAttempts ? 'DELETE_FAILED' : 'RETRY_PENDING';
+            const combinedError = [
+              primaryError ? `Primary (${primaryKey}): ${primaryError}` : null,
+              companionError ? `Companion (${canonicalKey}): ${companionError}` : null,
+            ]
+              .filter(Boolean)
+              .join('; ');
+
+            await this.db
+              .update(casDeletionIntents)
+              .set({
+                state: nextState,
+                attempts: nextAttempts,
+                primaryDeleted,
+                companionDeleted,
+                primaryError: primaryError ?? current.primaryError,
+                companionError: companionError ?? current.companionError,
+                lastError: combinedError || current.lastError,
+                updatedAt: new Date(),
+              })
+              .where(eq(casDeletionIntents.storageKey, primaryKey));
+
+            report.failedCount++;
+            report.errors.push({
+              storageKey: primaryKey,
+              error: combinedError || 'Incomplete deletion',
+            });
+          } else {
+            // Ambos artefactos físicamente eliminados o ausentes: persistir DELETED y auditar
+            await this.db.transaction(async (tx) => {
+              await tx
+                .update(casDeletionIntents)
+                .set({
+                  state: 'DELETED',
+                  primaryDeleted: true,
+                  companionDeleted: true,
+                  primaryError: null,
+                  companionError: null,
+                  lastError: null,
+                  deletedAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(eq(casDeletionIntents.storageKey, primaryKey));
+
+              try {
+                await tx.transaction(async (subTx) => {
+                  await subTx.insert(auditLogs).values({
+                    eventType: 'CONVERSION_OUTPUT_DELETION_RECONCILED',
+                    userId: options?.userId ?? null,
+                    resource: `storage/${primaryKey}`,
+                    metadata: {
+                      storageKey: primaryKey,
+                      canonicalKey,
+                      checksumSha256: current.checksumSha256,
+                      jobId: current.jobId,
+                      primaryDeleted: true,
+                      companionDeleted: true,
+                      reconciledAt: new Date().toISOString(),
+                    },
+                  });
+                });
+                await tx
+                  .update(casDeletionIntents)
+                  .set({ audited: true })
+                  .where(eq(casDeletionIntents.storageKey, primaryKey));
+              } catch (auditErr: any) {
+                report.errors.push({
+                  storageKey: primaryKey,
                   error: `Fallo al registrar auditoría de reconciliación: ${auditErr?.message ?? String(auditErr)}`,
                 });
               }

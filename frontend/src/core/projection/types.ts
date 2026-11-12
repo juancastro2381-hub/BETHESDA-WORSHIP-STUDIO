@@ -51,8 +51,8 @@ export interface TabPosition {
   readonly fret: number;
   /** Altura canónica real */
   readonly canonicalPitch: Pitch;
-  /** Duración en ticks del evento */
-  readonly durationTicks: number;
+  /** Duración en ticks del evento (o null si es no medido) */
+  readonly durationTicks: number | null;
   /** Voz polifónica */
   readonly voice: number;
   /** Referencia de la afinación utilizada */

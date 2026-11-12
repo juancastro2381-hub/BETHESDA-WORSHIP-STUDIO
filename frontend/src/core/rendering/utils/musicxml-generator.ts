@@ -116,9 +116,9 @@ ${partsXml}
         }
         xml += `          <octave>${octave}</octave>\n`;
         xml += `        </pitch>\n`;
-        xml += `        <duration>${note.durationTicks}</duration>\n`;
+        xml += `        <duration>${note.durationTicks ?? 480}</duration>\n`;
         xml += `        <voice>${note.voice}</voice>\n`;
-        xml += `        <type>${MusicXmlGenerator.ticksToNoteType(note.durationTicks)}</type>\n`;
+        xml += `        <type>${MusicXmlGenerator.ticksToNoteType(note.durationTicks ?? 480)}</type>\n`;
         if (isGrandStaff) {
           xml += `        <staff>${note.staff}</staff>\n`;
         }

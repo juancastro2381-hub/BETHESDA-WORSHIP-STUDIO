@@ -69,7 +69,7 @@ export class AlphaTexGenerator {
 
         const stringNum = tabCoord ? tabCoord.stringNumber : 1;
         const fretNum = tabCoord ? tabCoord.fret : 0;
-        const dur = AlphaTexGenerator.ticksToDuration(note.durationTicks);
+        const dur = AlphaTexGenerator.ticksToDuration(note.durationTicks ?? 480);
 
         const props: string[] = [];
         if (chordEvent) {

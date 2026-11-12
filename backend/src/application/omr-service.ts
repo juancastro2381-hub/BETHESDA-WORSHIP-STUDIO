@@ -753,7 +753,7 @@ export class OmrService {
           } else if (typeof l.beat === 'number') {
             syllableOffset = Math.max(0, (l.beat - 1) * currentTimeSig.beatDurationTicks);
           } else if (noteEvents.length > 0 && lIdx < noteEvents.length) {
-            syllableOffset = noteEvents[lIdx]!.startTick - measureStartTick;
+            syllableOffset = (noteEvents[lIdx]?.startTick ?? 0) - measureStartTick;
           } else {
             syllableOffset = Math.round((lIdx / lyricCount) * measureDurationTicks);
           }

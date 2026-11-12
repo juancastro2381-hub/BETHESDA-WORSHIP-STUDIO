@@ -335,11 +335,11 @@ export class FormatCapabilitiesEvaluator {
         return {
           category: 'TABLATURE_ASCII',
           label: 'Tablatura en Texto ASCII (.tab)',
-          state: 'NOT_SUPPORTED',
-          description: 'Tablatura textual de guitarra o bajo.',
-          canConvert: false,
+          state: 'SUPPORTED',
+          description: 'Tablatura textual estándar para guitarra y bajo.',
+          canConvert: true,
           advisoryNotice:
-            'La ingesta y conversión directa de tablaturas ASCII no está soportada en esta fase. El cálculo y generación de tablaturas está planificado para la Fase 2B.',
+            'Tablatura ASCII reconocida. Conversión a tablatura canónica, cifrado y texto disponible. Exportación a MIDI bloqueada si no posee timing explícito (Cero Fabricación).',
         };
       case 'WRITTEN_NOTES':
         return {
@@ -505,22 +505,7 @@ export class FormatCapabilitiesEvaluator {
       return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
     }
 
-    // 3. Tablatura ASCII (No Soportada en Ingesta)
-    if (isTablature) {
-      const tabReason =
-        'La ingesta y conversión directa de tablaturas ASCII (.tab) no está soportada en esta versión. El motor de tablatura está planificado para la Fase 2B.';
-      musicXmlCap.blockingReason = tabReason;
-      musicXmlCap.capabilityState = 'NOT_SUPPORTED';
-      midiCap.blockingReason = tabReason;
-      midiCap.capabilityState = 'NOT_SUPPORTED';
-      chordProCap.blockingReason = tabReason;
-      chordProCap.capabilityState = 'NOT_SUPPORTED';
-      lyricsCap.blockingReason = tabReason;
-      lyricsCap.capabilityState = 'NOT_SUPPORTED';
-      return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
-    }
-
-    // 4. Fuentes Estructuradas (MusicXML, MIDI, ChordPro, TXT Lyrics, Notas escritas)
+    // 3. Fuentes Estructuradas (MusicXML, MIDI, ChordPro, TXT Lyrics, Notas escritas, Tablatura)
     if (sourceCategory === 'STRUCTURED_MUSICXML') {
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'NATIVE';
@@ -537,6 +522,10 @@ export class FormatCapabilitiesEvaluator {
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
       lyricsCap.capabilityState = 'SUPPORTED';
+
+      tabCap.isAvailable = true;
+      tabCap.statusBadge = 'CONVERTED';
+      tabCap.capabilityState = 'SUPPORTED';
     } else if (sourceCategory === 'STRUCTURED_MIDI') {
       midiCap.isAvailable = true;
       midiCap.statusBadge = 'NATIVE';
@@ -553,6 +542,10 @@ export class FormatCapabilitiesEvaluator {
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
       lyricsCap.capabilityState = 'SUPPORTED';
+
+      tabCap.isAvailable = true;
+      tabCap.statusBadge = 'CONVERTED';
+      tabCap.capabilityState = 'SUPPORTED';
     } else if (sourceCategory === 'STRUCTURED_CHORDPRO') {
       chordProCap.isAvailable = true;
       chordProCap.statusBadge = 'NATIVE';
@@ -573,6 +566,12 @@ export class FormatCapabilitiesEvaluator {
       midiCap.capabilityState = 'NOT_SUPPORTED';
       midiCap.blockingReason =
         'No es posible generar MIDI melódico desde un cifrado ChordPro sin notas, pues violaría el principio de CERO invención de melodía.';
+
+      tabCap.isAvailable = false;
+      tabCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+      tabCap.capabilityState = 'NOT_SUPPORTED';
+      tabCap.blockingReason =
+        'Un archivo ChordPro sin notas melódicas no puede convertirse a tablatura melódica sin violar Cero Fabricación.';
     } else if (sourceCategory === 'TXT_LYRICS') {
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'NATIVE';
@@ -591,6 +590,12 @@ export class FormatCapabilitiesEvaluator {
       midiCap.capabilityState = 'NOT_SUPPORTED';
       midiCap.blockingReason =
         'Un archivo de solo letra no contiene notas melódicas ni acordes. No se generará un archivo MIDI con melodías inventadas.';
+
+      tabCap.isAvailable = false;
+      tabCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+      tabCap.capabilityState = 'NOT_SUPPORTED';
+      tabCap.blockingReason =
+        'Un archivo de solo letra no contiene notas ni digitaciones para tablatura.';
     } else if (sourceCategory === 'WRITTEN_NOTES') {
       musicXmlCap.isAvailable = true;
       musicXmlCap.statusBadge = 'CONVERTED';
@@ -607,6 +612,45 @@ export class FormatCapabilitiesEvaluator {
       lyricsCap.isAvailable = true;
       lyricsCap.statusBadge = 'CONVERTED';
       lyricsCap.capabilityState = 'SUPPORTED';
+
+      tabCap.isAvailable = true;
+      tabCap.statusBadge = 'CONVERTED';
+      tabCap.capabilityState = 'SUPPORTED';
+    } else if (sourceCategory === 'TABLATURE_ASCII') {
+      tabCap.isAvailable = true;
+      tabCap.statusBadge = 'NATIVE';
+      tabCap.capabilityState = 'SUPPORTED';
+      tabCap.blockingReason = undefined;
+
+      chordProCap.isAvailable = true;
+      chordProCap.statusBadge = 'CONVERTED';
+      chordProCap.capabilityState = 'SUPPORTED';
+
+      lyricsCap.isAvailable = true;
+      lyricsCap.statusBadge = 'CONVERTED';
+      lyricsCap.capabilityState = 'SUPPORTED';
+
+      musicXmlCap.isAvailable = true;
+      musicXmlCap.statusBadge = 'CONVERTED';
+      musicXmlCap.capabilityState = 'SUPPORTED';
+
+      const allNotes = payload?.getAllNotes() ?? [];
+      const hasTiming =
+        allNotes.length > 0 &&
+        allNotes.every((n) => n.startTick !== null && n.durationTicks !== null) &&
+        (payload?.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance !== 'NONE';
+
+      if (hasTiming) {
+        midiCap.isAvailable = true;
+        midiCap.statusBadge = 'CONVERTED';
+        midiCap.capabilityState = 'SUPPORTED';
+      } else {
+        midiCap.isAvailable = false;
+        midiCap.statusBadge = 'BLOCKED_ZERO_FABRICATION';
+        midiCap.capabilityState = 'NOT_SUPPORTED';
+        midiCap.blockingReason =
+          'No es posible exportar a MIDI desde una tablatura sin ritmo explícito (CERO fabricación de duraciones).';
+      }
     }
 
     // 5. Ajustes Dinámicos según Contenido Real del Payload Canónico (si está disponible)

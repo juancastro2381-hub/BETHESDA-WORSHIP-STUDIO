@@ -27,8 +27,8 @@ export interface DerivedNoteInit {
   id: string;
   canonicalPitch: Pitch;
   writtenPitch: Pitch;
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
   voice?: number | undefined;
   staff?: number | undefined;
   velocity?: number | undefined;
@@ -42,8 +42,8 @@ export class DerivedNote {
   public readonly id: string;
   public readonly canonicalPitch: Pitch;
   public readonly writtenPitch: Pitch;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly voice: number;
   public readonly staff: number;
   public readonly velocity: number;

@@ -183,17 +183,19 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
           canonicalPitch: note.canonicalPitch.toString(),
           writtenPitch: note.writtenPitch.toString(),
           tie: note.tie,
-          durationTicks: note.durationTicks,
+          durationTicks: note.durationTicks ?? 480,
         };
 
-        let existingBeat = beats.find((b) => b.startTick === note.startTick);
+        const effectiveStart = note.startTick ?? 0;
+        let existingBeat = beats.find((b) => b.startTick === effectiveStart);
         if (!existingBeat) {
-          existingBeat = {
-            startTick: note.startTick,
-            durationTicks: note.durationTicks,
+          const newBeat: AlphaTabBeatData = {
+            startTick: effectiveStart,
+            durationTicks: note.durationTicks ?? 480,
             notes: [],
           };
-          beats.push(existingBeat);
+          beats.push(newBeat);
+          existingBeat = newBeat;
         }
         existingBeat.notes.push(noteData);
       }

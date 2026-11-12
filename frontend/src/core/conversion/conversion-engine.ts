@@ -16,6 +16,7 @@ import {
   CanonicalToLyricsSerializer,
   CanonicalToMidiSerializer,
   CanonicalToMusicXmlSerializer,
+  CanonicalToTablatureSerializer,
 } from './exporters/index.ts';
 import {
   type ConversionDiagnostic,
@@ -58,15 +59,13 @@ export class ConversionEngine {
       };
     }
 
-    // 2. Verificar si la fuente corresponde a categorías diferidas para Fase 2B o no soportadas
+    // 2. Verificar si la fuente corresponde a categorías diferidas para fases posteriores
     if (
       sourceCategory === 'AUDIO_RECORDING' ||
       sourceCategory === 'VIDEO_REFERENCE' ||
       sourceCategory === 'PDF_SCORE' ||
-      sourceCategory === 'IMAGE_SCORE' ||
-      sourceCategory === 'TABLATURE_ASCII'
+      sourceCategory === 'IMAGE_SCORE'
     ) {
-      const isTab = sourceCategory === 'TABLATURE_ASCII';
       return {
         success: false,
         targetFormat: options.targetFormat,
@@ -75,11 +74,9 @@ export class ConversionEngine {
         content: '',
         diagnostics: [
           {
-            code: isTab ? 'TABLATURE_INGESTION_UNSUPPORTED' : 'SOURCE_CATEGORY_DEFERRED_PHASE',
+            code: 'SOURCE_CATEGORY_DEFERRED_PHASE',
             severity: 'ERROR',
-            message: isTab
-              ? 'La ingesta y conversión directa de tablaturas ASCII (.tab) no está soportada en esta versión. El motor de tablatura está planificado para la Fase 2B.'
-              : `La fuente de tipo "${sourceCategory}" requiere transcripción de audio (Demucs/Basic Pitch) u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
+            message: `La fuente de tipo "${sourceCategory}" requiere transcripción de audio (Demucs/Basic Pitch) u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
           },
         ],
       };
@@ -189,22 +186,7 @@ export class ConversionEngine {
         break;
 
       case 'TABLATURE':
-        result = {
-          success: false,
-          targetFormat: 'TABLATURE',
-          filename: `${this.sanitizeFilename(transformedPayload.title)}.tab`,
-          mimeType: 'text/plain',
-          content: '',
-          canonicalPayload: transformedPayload,
-          diagnostics: [
-            {
-              code: 'TABLATURE_DEFERRED_PHASE',
-              severity: 'ERROR',
-              message:
-                'El cálculo polifónico de digitaciones óptimas de tablatura está programado para Fase 2B.',
-            },
-          ],
-        };
+        result = CanonicalToTablatureSerializer.serialize(transformedPayload);
         break;
 
       default:

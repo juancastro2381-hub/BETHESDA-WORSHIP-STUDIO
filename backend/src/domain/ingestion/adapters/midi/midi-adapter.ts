@@ -328,7 +328,7 @@ export class MidiIngestionAdapter implements IIngestionAdapter {
         const notes = measureVoiceNotes.get(mvKey) ?? [];
 
         // Ordenar notas por startTick y pitch
-        notes.sort((a, b) => a.startTick - b.startTick || a.pitch.midiNumber - b.pitch.midiNumber);
+        notes.sort((a, b) => ((a.startTick ?? -1) - (b.startTick ?? -1)) || (a.pitch.midiNumber - b.pitch.midiNumber));
 
         if (notes.length === 0) {
           // Cero silencios artificiales: voz vacía en vez de fabricar Rest

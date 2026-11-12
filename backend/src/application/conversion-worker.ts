@@ -1319,14 +1319,10 @@ export class ConversionWorker {
         sourceCategory === 'AUDIO_RECORDING' ||
         sourceCategory === 'VIDEO_REFERENCE' ||
         sourceCategory === 'PDF_SCORE' ||
-        sourceCategory === 'IMAGE_SCORE' ||
-        sourceCategory === 'TABLATURE_ASCII'
+        sourceCategory === 'IMAGE_SCORE'
       ) {
-        const isTab = sourceCategory === 'TABLATURE_ASCII';
-        const errCode = isTab ? 'TABLATURE_INGESTION_UNSUPPORTED' : 'SOURCE_CATEGORY_DEFERRED_PHASE';
-        const deferredError = isTab
-          ? `La ingesta y conversión directa de tablaturas ASCII (.tab) no está soportada en esta versión. El motor de tablatura está planificado para la Fase 2B.`
-          : `La fuente "${filename}" (${sourceCategory}) requiere transcripción o digitalización óptica diferida para Fase 2B.`;
+        const errCode = 'SOURCE_CATEGORY_DEFERRED_PHASE';
+        const deferredError = `La fuente "${filename}" (${sourceCategory}) requiere transcripción o digitalización óptica diferida para Fase 2B.`;
         await this.failJobFenced(jobId, executionToken, errCode, deferredError);
         return {
           success: false,

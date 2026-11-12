@@ -8,6 +8,7 @@
 import { ChordProImporter } from './chordpro/chordpro-importer.ts';
 import { IngestionResult, type MusicImporter } from './importer-contract.ts';
 import { MusicXmlImporter } from './musicxml/musicxml-importer.ts';
+import { AsciiTabImporter } from '../tablature/ascii-tab-importer.ts';
 import { ProvenanceManager } from './provenance.ts';
 import { type ImportFormat, type ImportOptions } from './types.ts';
 
@@ -15,15 +16,34 @@ export class UnifiedMusicImporter {
   private readonly _importers: MusicImporter[];
 
   public constructor(customImporters?: MusicImporter[]) {
-    this._importers = customImporters ?? [new MusicXmlImporter(), new ChordProImporter()];
+    this._importers =
+      customImporters ?? [
+        new MusicXmlImporter(),
+        new ChordProImporter(),
+        new AsciiTabImporter(),
+      ];
   }
 
   /**
    * Importa cualquier formato soportado detectándolo de forma automática.
    */
-  public import(source: string, filename?: string, options?: ImportOptions): IngestionResult {
-    const trimmed = source.trim();
-    if (!trimmed) {
+  public import(
+    source: string,
+    filenameOrOptions?: string | ImportOptions,
+    options?: ImportOptions
+  ): IngestionResult {
+    let filename: string | undefined;
+    let effectiveOptions: ImportOptions | undefined;
+
+    if (typeof filenameOrOptions === 'string') {
+      filename = filenameOrOptions;
+      effectiveOptions = options;
+    } else if (filenameOrOptions && typeof filenameOrOptions === 'object') {
+      effectiveOptions = filenameOrOptions;
+      filename = filenameOrOptions.sourceName;
+    }
+
+    if (!source || !source.trim()) {
       return new IngestionResult({
         status: 'FAILED',
         provenance: ProvenanceManager.create({
@@ -44,12 +64,12 @@ export class UnifiedMusicImporter {
 
     // Buscar importador compatible
     for (const importer of this._importers) {
-      if (importer.canHandle(trimmed, filename)) {
+      if (importer.canHandle(source, filename)) {
         const opts: ImportOptions = {
           sourceName: filename,
-          ...options,
+          ...effectiveOptions,
         };
-        return importer.import(trimmed, opts);
+        return importer.import(source, opts);
       }
     }
 

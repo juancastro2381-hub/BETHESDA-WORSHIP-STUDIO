@@ -14,7 +14,8 @@ export type IngestionSourceType =
   | 'PDF_SCORE'
   | 'IMAGE_SCORE'
   | 'AUDIO'
-  | 'VIDEO_URL';
+  | 'VIDEO_URL'
+  | 'TABLATURE';
 
 export type IngestionStatus =
   | 'IMPORTED'

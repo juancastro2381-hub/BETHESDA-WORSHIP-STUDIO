@@ -180,6 +180,8 @@ export class UniversalIngestionService {
         return 'AUDIO';
       case 'VIDEO_URL':
         return 'VIDEO_URL';
+      case 'TABLATURE':
+        return 'TABLATURE';
       default:
         return 'INTERNAL';
     }

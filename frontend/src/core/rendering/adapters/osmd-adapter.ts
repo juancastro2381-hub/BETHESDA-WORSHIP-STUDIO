@@ -170,8 +170,8 @@ export class OsmdAdapter extends BaseMusicRenderer<OsmdScoreData> {
 
           entries.push({
             type: 'NOTE',
-            startTick: note.startTick,
-            durationTicks: note.durationTicks,
+            startTick: note.startTick ?? 0,
+            durationTicks: note.durationTicks ?? 480,
             step: note.writtenPitch.noteName.letter,
             octave: note.writtenPitch.octave,
             alter: note.writtenPitch.noteName.accidental.semitoneOffset,

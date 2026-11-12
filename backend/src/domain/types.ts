@@ -15,7 +15,8 @@ export type SongSourceFormat =
   | 'IMAGE'
   | 'MIDI'
   | 'AUDIO'
-  | 'VIDEO_URL';
+  | 'VIDEO_URL'
+  | 'TABLATURE';
 
 export interface SongEntity {
   id: string;

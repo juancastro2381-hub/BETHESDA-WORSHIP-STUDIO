@@ -240,7 +240,9 @@ export class CanonicalToMusicXmlSerializer {
     }
     // Ordenar de forma determinista por startTick y luego por número de voz
     events.sort((a, b) => {
-      if (a.startTick !== b.startTick) return a.startTick - b.startTick;
+      const aTick = a.startTick ?? -1;
+      const bTick = b.startTick ?? -1;
+      if (aTick !== bTick) return aTick - bTick;
       return a.voice - b.voice;
     });
     return events;
@@ -252,7 +254,7 @@ export class CanonicalToMusicXmlSerializer {
     if (byId) return byId;
 
     // 2. Por coincidencia exacta de tickOffset si existe
-    if (measure.startTick !== null) {
+    if (measure.startTick !== null && note.startTick !== null) {
       const noteRelTick = note.startTick - measure.startTick;
       const byTick = measure.lyrics.find((l) => l.tickOffset === noteRelTick);
       if (byTick) return byTick;
@@ -279,10 +281,11 @@ export class CanonicalToMusicXmlSerializer {
     lines.push('        </pitch>');
 
     // Duración en ticks (divisions = 480)
-    lines.push(`        <duration>${note.durationTicks}</duration>`);
+    const effectiveDuration = note.durationTicks ?? 480;
+    lines.push(`        <duration>${effectiveDuration}</duration>`);
     lines.push(`        <voice>${note.voice}</voice>`);
 
-    const noteType = this.ticksToNoteType(note.durationTicks);
+    const noteType = this.ticksToNoteType(effectiveDuration);
     if (noteType) {
       lines.push(`        <type>${noteType}</type>`);
     }
@@ -327,9 +330,10 @@ export class CanonicalToMusicXmlSerializer {
     const lines: string[] = [];
     lines.push('      <note>');
     lines.push('        <rest/>');
-    lines.push(`        <duration>${rest.durationTicks}</duration>`);
+    const effectiveDuration = rest.durationTicks ?? 480;
+    lines.push(`        <duration>${effectiveDuration}</duration>`);
     lines.push(`        <voice>${rest.voice}</voice>`);
-    const noteType = this.ticksToNoteType(rest.durationTicks);
+    const noteType = this.ticksToNoteType(effectiveDuration);
     if (noteType) {
       lines.push(`        <type>${noteType}</type>`);
     }

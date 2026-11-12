@@ -45,9 +45,11 @@ describe('ConversionEngine Integration Tests', () => {
     assert.strictEqual(resPdf.success, false);
     assert.ok(resPdf.diagnostics.some((d) => d.code === 'ENGRAVED_PDF_DEFERRED_PHASE'));
 
+    // TABLATURE is now supported in Phase 2B.2
     const resTab = engine.convertPayload(payload, { targetFormat: 'TABLATURE' });
-    assert.strictEqual(resTab.success, false);
-    assert.ok(resTab.diagnostics.some((d) => d.code === 'TABLATURE_DEFERRED_PHASE'));
+    assert.strictEqual(resTab.success, true);
+    assert.ok(typeof resTab.content === 'string');
+    assert.ok(resTab.content.includes('TABLATURA CANÓNICA ASCII'));
   });
 
   it('should convert raw ChordPro string to MusicXML lead sheet and lyrics text', () => {

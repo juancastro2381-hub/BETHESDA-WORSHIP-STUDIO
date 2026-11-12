@@ -134,12 +134,16 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
       assert.strictEqual(cap.isAvailable, false);
     }
 
-    // 4. Tablature -> NOT_SUPPORTED
+    // 4. Tablature -> MIDI is NOT_SUPPORTED (Zero Fabrication), others SUPPORTED
     const tabCaps = FormatCapabilitiesEvaluator.getFormatCapabilities('TABLATURE_ASCII');
-    for (const cap of tabCaps.filter((c) => c.format !== 'ENGRAVED_PDF' && c.format !== 'TABLATURE')) {
-      assert.strictEqual(cap.capabilityState, 'NOT_SUPPORTED');
-      assert.strictEqual(cap.isAvailable, false);
-    }
+    const tabMidi = tabCaps.find((c) => c.format === 'MIDI');
+    assert.strictEqual(tabMidi?.capabilityState, 'NOT_SUPPORTED');
+    assert.strictEqual(tabMidi?.statusBadge, 'BLOCKED_ZERO_FABRICATION');
+    assert.strictEqual(tabMidi?.isAvailable, false);
+
+    const tabTab = tabCaps.find((c) => c.format === 'TABLATURE');
+    assert.strictEqual(tabTab?.capabilityState, 'SUPPORTED');
+    assert.strictEqual(tabTab?.isAvailable, true);
   });
 
   it('should produce accurate SourceCapabilitySummary for all source formats', () => {
@@ -182,10 +186,10 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
     assert.strictEqual(audioSum.canConvert, false);
     assert.ok(audioSum.advisoryNotice?.includes('Fase 2B'));
 
-    // Tablature
+    // Tablature (Phase 2B.2)
     const tabSum = FormatCapabilitiesEvaluator.getSourceCapabilitySummary('TABLATURE_ASCII');
-    assert.strictEqual(tabSum.state, 'NOT_SUPPORTED');
-    assert.strictEqual(tabSum.canConvert, false);
+    assert.strictEqual(tabSum.state, 'SUPPORTED');
+    assert.strictEqual(tabSum.canConvert, true);
   });
 
   it('should detect tablature and lyrics extensions properly', () => {

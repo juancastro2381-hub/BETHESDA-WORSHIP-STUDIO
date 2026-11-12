@@ -117,7 +117,7 @@ export class CanonicalModelValidator {
           }
 
           // Límite de compás (solo si timing de compás y evento está resuelto)
-          if (measure.startTick !== null && measure.endTick !== null) {
+          if (measure.startTick !== null && measure.endTick !== null && ev.startTick !== null) {
             if (ev.startTick < measure.startTick || ev.startTick >= measure.endTick) {
               errors.push({
                 code: 'EVENT_OUT_OF_MEASURE_BOUNDS',

@@ -29,7 +29,7 @@ export class TablatureCalculator {
     pitch: Pitch,
     tuning: TuningDefinition,
     capoFret = 0,
-    durationTicks = 480,
+    durationTicks: number | null = 480,
     voice = 1
   ): TabPosition | null {
     const candidates = TablatureCalculator.findCandidates(pitch, tuning, capoFret);

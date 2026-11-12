@@ -14,6 +14,7 @@
 import { type CanonicalMusicPayload } from '../../canonical-model/canonical-music-payload.ts';
 import { type Note } from '../../canonical-model/musical-event.ts';
 import { CANONICAL_TPQN } from '../../canonical-model/types.ts';
+import { MidiExportGatekeeper } from '../../canonical-model/midi-export-gatekeeper.ts';
 import {
   type ConversionDiagnostic,
   type ConversionExportResult,
@@ -46,8 +47,28 @@ export class CanonicalToMidiSerializer {
 
     const allNotes = payload.getAllNotes();
 
-    // Principio de Cero-Fabricación: Si no hay notas tonales, no inventamos notas
-    if (allNotes.length === 0) {
+    // Guardián Multi-Factor de Exportación MIDI (Fase 2B.2)
+    const gateResult = MidiExportGatekeeper.isEligible(payload);
+    if (!gateResult.eligible) {
+      const issues = gateResult.issues ?? [];
+      const errorDiagnostics: ConversionDiagnostic[] = issues.map((iss) => ({
+        code: iss.code,
+        severity: 'ERROR',
+        message: iss.message,
+        measureNumber: iss.measureNumber,
+      }));
+      if (errorDiagnostics.length === 0) {
+        errorDiagnostics.push({
+          code:
+            allNotes.length === 0
+              ? 'CANNOT_EXPORT_MIDI_WITHOUT_NOTES'
+              : gateResult.code || 'MIDI_EXPORT_INELIGIBLE',
+          severity: 'ERROR',
+          message:
+            gateResult.reason ||
+            'El documento canónico no es elegible para exportación MIDI (Fail-Closed Gatekeeper).',
+        });
+      }
       return {
         success: false,
         targetFormat: 'MIDI',
@@ -55,14 +76,7 @@ export class CanonicalToMidiSerializer {
         mimeType: 'audio/midi',
         content: new Uint8Array(0),
         canonicalPayload: payload,
-        diagnostics: [
-          {
-            code: 'CANNOT_EXPORT_MIDI_WITHOUT_NOTES',
-            severity: 'ERROR',
-            message:
-              'El documento canónico no contiene notas ni alturas melódicas (CERO invención de notas). No es posible generar un archivo MIDI sin eventos tonales. Para exportar esta obra estructurada en acordes, elija ChordPro o texto.',
-          },
-        ],
+        diagnostics: errorDiagnostics,
       };
     }
 
@@ -224,11 +238,21 @@ export class CanonicalToMidiSerializer {
           if (!event.isRest) {
             const note = event as Note;
             // Principio de Cero-Fabricación: Validar duración fidedigna sin inventar 1 tick con Math.max
-            if (!Number.isFinite(note.durationTicks) || note.durationTicks <= 0) {
+            if (note.durationTicks === null || !Number.isFinite(note.durationTicks) || note.durationTicks <= 0) {
               diagnostics.push({
                 code: 'MIDI_INVALID_NOTE_DURATION',
                 severity: 'ERROR',
                 message: `Duración de nota inválida (${note.durationTicks} ticks) en compás ${measure.number}. CERO fabricación: se prohíbe inventar duraciones arbitrarias.`,
+                measureNumber: measure.number,
+              });
+              continue;
+            }
+
+            if (note.startTick === null) {
+              diagnostics.push({
+                code: 'MIDI_INVALID_NOTE_TIMING',
+                severity: 'ERROR',
+                message: `Tick inicial de nota no asignado (null) en compás ${measure.number}. No es posible generar MIDI sin timing resuelto.`,
                 measureNumber: measure.number,
               });
               continue;
@@ -279,7 +303,9 @@ export class CanonicalToMidiSerializer {
         let maxEventEnd = 0;
         for (const voice of measure.voices) {
           for (const ev of voice.events) {
-            maxEventEnd = Math.max(maxEventEnd, ev.startTick + ev.durationTicks);
+            if (ev.startTick !== null && ev.durationTicks !== null) {
+              maxEventEnd = Math.max(maxEventEnd, ev.startTick + ev.durationTicks);
+            }
           }
         }
         currentMeasureTick = measureStart + Math.max(CANONICAL_TPQN, maxEventEnd);

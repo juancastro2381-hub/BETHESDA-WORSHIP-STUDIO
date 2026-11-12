@@ -75,6 +75,20 @@ export interface OrphanCollectionReport {
   orphanItems: OrphanItem[];
 }
 
+export type UnauditedReconciliationOutcome =
+  | 'NEW_AUDIT_CREATED'
+  | 'EXISTING_AUDIT_RECONCILED'
+  | 'SKIPPED';
+
+export interface UnauditedReconciliationReport {
+  scannedCount: number;
+  reconciledCount: number;
+  reconciledAuditCount: number;
+  skippedCount: number;
+  failedCount: number;
+  errors: Array<{ storageKey: string; error: string }>;
+}
+
 export interface CasLockOptions {
   lockTimeoutMs?: number;
 }
@@ -1206,15 +1220,8 @@ export class OutputRetentionService {
    */
   public async reconcileUnauditedDeletions(options?: {
     userId?: string;
-  }): Promise<{
-    scannedCount: number;
-    reconciledCount: number;
-    reconciledAuditCount: number;
-    skippedCount: number;
-    failedCount: number;
-    errors: Array<{ storageKey: string; error: string }>;
-  }> {
-    const report = {
+  }): Promise<UnauditedReconciliationReport> {
+    const report: UnauditedReconciliationReport = {
       scannedCount: 0,
       reconciledCount: 0,
       reconciledAuditCount: 0,
@@ -1237,7 +1244,7 @@ export class OutputRetentionService {
 
     for (const candidate of candidates) {
       try {
-        const wasReconciled = await this.db.transaction(async (tx) => {
+        const outcome = await this.db.transaction<UnauditedReconciliationOutcome>(async (tx) => {
           // Bloqueo exclusivo de fila para serializar workers concurrentes
           const [lockedIntent] = await tx
             .select()
@@ -1251,7 +1258,7 @@ export class OutputRetentionService {
             lockedIntent.audited ||
             !['DELETED', 'RETAINED'].includes(lockedIntent.state)
           ) {
-            return false;
+            return 'SKIPPED';
           }
 
           const eventType =
@@ -1277,7 +1284,7 @@ export class OutputRetentionService {
               .update(casDeletionIntents)
               .set({ audited: true, updatedAt: new Date() })
               .where(eq(casDeletionIntents.storageKey, lockedIntent.storageKey));
-            return false;
+            return 'EXISTING_AUDIT_RECONCILED';
           }
 
           // Inserción de exactamente UN evento de auditoría
@@ -1303,13 +1310,15 @@ export class OutputRetentionService {
             .set({ audited: true, updatedAt: new Date() })
             .where(eq(casDeletionIntents.storageKey, lockedIntent.storageKey));
 
-          return true;
+          return 'NEW_AUDIT_CREATED';
         });
 
-        if (wasReconciled) {
+        if (outcome === 'NEW_AUDIT_CREATED') {
           report.reconciledCount++;
           report.reconciledAuditCount++;
-        } else {
+        } else if (outcome === 'EXISTING_AUDIT_RECONCILED') {
+          report.reconciledCount++;
+        } else if (outcome === 'SKIPPED') {
           report.skippedCount++;
         }
       } catch (err: any) {

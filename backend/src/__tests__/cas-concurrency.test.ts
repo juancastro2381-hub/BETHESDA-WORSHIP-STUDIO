@@ -954,14 +954,21 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
       ]);
 
       // 4. Verificaciones de concurrencia y no falsedad en reportes
-      // Uno de los dos debe haber reconciliado exactamente 1; el otro debió omitir 1 (skippedCount = 1)
+      // Exactamente un worker debe haber reconciliado; nunca ambos ni ninguno
       const totalReconciled = res1.reconciledCount + res2.reconciledCount;
       const totalSkipped = res1.skippedCount + res2.skippedCount;
+      const totalScanned = res1.scannedCount + res2.scannedCount;
 
       assert.equal(totalReconciled, 1, 'Exactamente un worker debe reconciliar la intención');
-      assert.equal(totalSkipped, 1, 'El segundo worker debe omitir de forma segura');
       assert.equal(res1.failedCount, 0, 'Worker 1 no debe reportar fallos');
       assert.equal(res2.failedCount, 0, 'Worker 2 no debe reportar fallos');
+      // Si ambos escanearon antes del commit del primero, el segundo omite (totalSkipped = 1);
+      // si el segundo escaneó después del commit del primero, no ve candidatos (totalScanned = 1, totalSkipped = 0)
+      if (totalScanned === 2) {
+        assert.equal(totalSkipped, 1, 'El segundo worker debe omitir de forma segura bajo contención');
+      } else {
+        assert.equal(totalSkipped, 0, 'El segundo worker no encontró candidatos pendientes tras commit del primero');
+      }
 
       // 5. La intención en base de datos debe terminar en audited = true
       const [intent] = await db
@@ -1120,6 +1127,116 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
       );
     } finally {
       freshClient.release();
+    }
+  });
+
+  it('Escenario O — Existing audit event reconciliation without duplicate insertion', async () => {
+    const salt = crypto.randomUUID();
+    const hash = crypto.createHash('sha256').update('Scenario O ' + salt).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+    const intentId = crypto.randomUUID();
+
+    // 1. Create a valid terminal deletion intent with audited = false
+    await db.insert(casDeletionIntents).values({
+      id: intentId,
+      storageKey: key,
+      canonicalKey,
+      checksumSha256: hash,
+      state: 'DELETED',
+      primaryDeleted: true,
+      companionDeleted: true,
+      attempts: 0,
+      audited: false,
+    });
+
+    const auditLogId = crypto.randomUUID();
+
+    try {
+      // 2. Insert an existing audit event matching resource, event type, and intentId in metadata
+      await db.insert(auditLogs).values({
+        id: auditLogId,
+        eventType: 'CONVERSION_OUTPUT_DELETION_RECONCILED',
+        userId: testUserId,
+        resource: `storage/${key}`,
+        metadata: {
+          intentId,
+          storageKey: key,
+          canonicalKey,
+          checksumSha256: hash,
+          state: 'DELETED',
+          reconciledAt: new Date().toISOString(),
+          reason: 'Pre-existing audit record simulated for idempotency validation',
+        },
+      });
+
+      // 3. Execute reconcileUnauditedDeletions()
+      const report1 = await retentionService.reconcileUnauditedDeletions({ userId: testUserId });
+
+      // 4. Verify exact reporting and database state:
+      // - audited becomes true
+      // - state remains unchanged ('DELETED')
+      // - reconciledCount equals 1
+      // - reconciledAuditCount equals 0
+      // - skippedCount equals 0
+      // - failedCount equals 0
+      // - exactly one matching audit event exists
+      const [intentAfterFirst] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intentAfterFirst.audited, true, 'Intent audited flag must become true');
+      assert.equal(intentAfterFirst.state, 'DELETED', 'Physical state DELETED must remain unchanged');
+      assert.equal(report1.reconciledCount, 1, 'reconciledCount must equal 1 when existing audit is reconciled');
+      assert.equal(report1.reconciledAuditCount, 0, 'reconciledAuditCount must equal 0 because no new audit was inserted');
+      assert.equal(report1.skippedCount, 0, 'skippedCount must equal 0 (successfully reconciled)');
+      assert.equal(report1.failedCount, 0, 'failedCount must equal 0');
+
+      const auditEntries1 = await db
+        .select()
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.resource, `storage/${key}`),
+            eq(auditLogs.eventType, 'CONVERSION_OUTPUT_DELETION_RECONCILED')
+          )
+        );
+
+      assert.equal(auditEntries1.length, 1, 'Exactly one matching audit event must exist in audit_logs');
+      assert.equal(auditEntries1[0].id, auditLogId, 'The pre-existing audit log must be preserved');
+
+      // 5. Execute reconciliation again
+      const report2 = await retentionService.reconcileUnauditedDeletions({ userId: testUserId });
+
+      // 6. Verify no duplicate audit event is created and no false reconciliation is reported
+      assert.equal(report2.reconciledCount, 0, 'Second run must not report false reconciliation');
+      assert.equal(report2.reconciledAuditCount, 0, 'Second run must not insert new audits');
+      assert.equal(report2.failedCount, 0, 'Second run must have 0 failures');
+
+      const auditEntries2 = await db
+        .select()
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.resource, `storage/${key}`),
+            eq(auditLogs.eventType, 'CONVERSION_OUTPUT_DELETION_RECONCILED')
+          )
+        );
+
+      assert.equal(auditEntries2.length, 1, 'Still exactly one audit event must exist (no duplicates)');
+
+      const [intentAfterSecond] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intentAfterSecond.audited, true);
+      assert.equal(intentAfterSecond.state, 'DELETED');
+    } finally {
+      // 7. Clean up test records safely in a finally block
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+      await db.delete(auditLogs).where(eq(auditLogs.resource, `storage/${key}`));
     }
   });
 });

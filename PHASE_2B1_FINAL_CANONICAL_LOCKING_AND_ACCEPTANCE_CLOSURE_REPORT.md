@@ -327,8 +327,8 @@ The discrepancy arose because the assistant's scratch check script was tentative
 | **AC-02: Non-Silent Companion Deletion** | Zero `.catch(() => {})` in companion deletion paths; independent tracking | **PASS** | Schema columns `primary_deleted`, `companion_deleted`, `companion_error`; Test Scenario A |
 | **AC-03: Recovery State Semantics** | Cancelled deletions marked `RETAINED` (never `DELETED`); physical files preserved | **PASS** | `reconcilePendingDeletions()`, `cas_deletion_state.RETAINED`, Test Scenario D |
 | **AC-04: Selective Incomplete Retry** | Recovery retries only un-deleted artifacts; skips verified absent artifacts | **PASS** | Test Scenario E, H |
-| **AC-05: Real Concurrency Testing** | 9 failure-injection tests executed against local PostgreSQL with real connections | **PASS** | `cas-concurrency.test.ts` (11 tests, 0 failures) |
-| **AC-06: Full Test Integrity** | 60 storage tests and 719 repository tests passing without regressions | **PASS** | Full suite execution logs captured |
+| **AC-05: Real Concurrency & Recovery Testing** | 15 concurrency, failure-injection and idempotency tests executed against local PostgreSQL | **PASS** | `cas-concurrency.test.ts` (15 tests, 0 failures, Scenarios A–O) |
+| **AC-06: Full Test Integrity** | 63 storage tests and 719 repository tests passing without regressions | **PASS** | Full suite execution logs captured |
 | **AC-07: Phase 2B.2 Authorization Gate** | ASCII Tab (Phase 2B.2) held strictly unauthorized | **PASS** | Zero Phase 2B.2 code authored; gate intact |
 
 ---
@@ -467,42 +467,77 @@ To eliminate the hazard where concurrent reconciliation workers might process th
    - Clean execution restores default configuration via `RESET lock_timeout`.
    - Dirty execution (timeouts, statement errors) invokes `client.release(true)` to discard the physical connection and prevent session setting contamination.
 
-### 11.3 Empirical Execution Evidence (Post-Hardening)
+### 11.3 Audit Reconciliation Reporting Outcome Correction & Scenario O Verification
+
+#### The Reporting Defect Remediated
+During independent technical review of `reconcileUnauditedDeletions()`, a reporting semantics defect was confirmed: when an existing audit event matching an intent was detected in `audit_logs`, the method safely updated `cas_deletion_intents.audited = true` without inserting duplicate rows. However, the internal transaction returned `false`, causing the caller to increment `skippedCount` instead of `reconciledCount`. This misreported a successfully reconciled intent as skipped.
+
+#### Explicit Transaction Outcome Semantics
+The ambiguous boolean transaction result was replaced by an explicit, strongly typed outcome enum:
+```typescript
+export type UnauditedReconciliationOutcome =
+  | 'NEW_AUDIT_CREATED'
+  | 'EXISTING_AUDIT_RECONCILED'
+  | 'SKIPPED';
+```
+
+The reporting semantics enforce the exact mathematical matrix required:
+
+| Outcome | reconciledCount | reconciledAuditCount | skippedCount | failedCount | Invariants Preserved |
+|---|---:|---:|---:|---:|---|
+| **NEW_AUDIT_CREATED** | **+1** | **+1** | **0** | **0** | New audit persisted in `audit_logs`; intent transitioned `audited = true` |
+| **EXISTING_AUDIT_RECONCILED** | **+1** | **0** | **0** | **0** | Pre-existing audit reused; intent transitioned `audited = true`; 0 duplicate rows |
+| **SKIPPED** | **0** | **0** | **+1** | **0** | Intent missing, already audited, or state changed |
+| **Transaction Failure** | **0** | **0** | **0** | **+1** | Transaction rolled back; `audited = false` preserved; error recorded in `report.errors` |
+
+#### Scenario O — Empirical Regression Test
+A dedicated test was added to `backend/src/__tests__/cas-concurrency.test.ts`:
+- **Step 1:** Terminal intent created with `audited = false` and unique `intentId`.
+- **Step 2:** Pre-existing audit log inserted matching `resource`, `eventType`, and `metadata.intentId`.
+- **Step 3:** First execution of `reconcileUnauditedDeletions()` yields `reconciledCount = 1`, `reconciledAuditCount = 0`, `skippedCount = 0`, `failedCount = 0`.
+- **Step 4:** Verifies `audited = true`, `state = 'DELETED'` (physical state unchanged), and exactly 1 audit entry exists.
+- **Step 5:** Second execution yields `reconciledCount = 0`, `reconciledAuditCount = 0`, `skippedCount = 0`, `failedCount = 0`, with 0 duplicate audit rows created.
+- **Result:** **PASS (10.62ms)**.
+
+---
+
+### 11.4 Empirical Execution Evidence (Post-Hardening & Scenario O)
 
 #### Environment Identity
 - **PostgreSQL Version:** `PostgreSQL 18.1 on x86_64-windows, compiled by msvc-19.44.35221, 64-bit`
 - **Database Identity:** `bethesda_worship_test` (User: `postgres`, Port: `5432`)
 - **Node.js Runtime:** `v24.12.0` on Windows x64
 
-#### Test Suite 1: CAS Concurrency, Lifecycle & Hardening (14 Tests)
+#### Test Suite 1: CAS Concurrency, Lifecycle & Hardening (15 Tests)
 ```bash
 npx --prefix backend tsx --test backend/src/__tests__/cas-concurrency.test.ts
 ```
 ```text
 ▶ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite
-  ✔ Escenario A: Primary file deletion succeeds, companion deletion fails (126.4188ms)
-  ✔ Escenario B: Companion file is being accessed while retention attempts deletion (368.4216ms)
-  ✔ Escenario C: Two independent workers attempt to delete the same primary and companion pair (38.0282ms)
-  ✔ Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED (41.421ms)
-  ✔ Escenario E: Process crashes after primary deletion but before companion deletion (21.1134ms)
-  ✔ Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization (55.9504ms)
-  ✔ Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup (317.2661ms)
-  ✔ Escenario H: Reconciliation retries only the incomplete artifact (31.2991ms)
-  ✔ Escenario I: Audit failure preserves truthful final states (50.2661ms)
-  ✔ Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE (150.8733ms)
-  ✔ Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por cuarentena) (9.7232ms)
-  ✔ Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes) (14.2255ms)
-  ✔ Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false (10.8157ms)
-  ✔ Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno) (2.309ms)
-✔ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite (1357.7771ms)
-ℹ tests 14
+  ✔ Escenario A: Primary file deletion succeeds, companion deletion fails (244.8652ms)
+  ✔ Escenario B: Companion file is being accessed while retention attempts deletion (310.5029ms)
+  ✔ Escenario C: Two independent workers attempt to delete the same primary and companion pair (31.0506ms)
+  ✔ Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED (43.7374ms)
+  ✔ Escenario E: Process crashes after primary deletion but before companion deletion (19.5711ms)
+  ✔ Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization (67.2921ms)
+  ✔ Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup (319.7173ms)
+  ✔ Escenario H: Reconciliation retries only the incomplete artifact (32.3436ms)
+  ✔ Escenario I: Audit failure preserves truthful final states (58.7083ms)
+  ✔ Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE (224.1909ms)
+  ✔ Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por cuarentena) (11.8558ms)
+  ✔ Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes) (19.1405ms)
+  ✔ Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false (13.7683ms)
+  ✔ Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno) (3.4067ms)
+  ✔ Escenario O — Existing audit event reconciliation without duplicate insertion (10.623ms)
+✔ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite (1575.771ms)
+ℹ tests 15
 ℹ suites 1
-ℹ pass 14
+ℹ pass 15
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 2795.6989
+ℹ duration_ms 3547.367
 ```
 
 #### Test Suite 2: All 5 Phase 2B.1 Storage Files (63 Tests, 9 Suites)
@@ -542,10 +577,11 @@ npm --prefix backend test
 All independent review findings have been resolved with strict fidelity:
 1. Real production lock helper invoked and verified under bounded lock timeout.
 2. Interrupted deletion cycle in Scenario F proven via real service-level failure injection.
-3. Physical `DELETED` state vs. `audited` flag truthful semantics codified and backed by an idempotent audit reconciliation procedure (`SELECT ... FOR UPDATE`, Escenarios L & M).
-4. Lock timeout validation enforced with finite integer checks and safe bounds (Escenario N).
-5. Enum lifecycle in PostgreSQL documented with down migration safety guarantees.
-6. All test metrics empirically captured without fabrication.
+3. Physical `DELETED` state vs. `audited` flag truthful semantics codified and backed by an idempotent audit reconciliation procedure (`SELECT ... FOR UPDATE`, Escenarios L, M & O).
+4. Reporting counters for existing audit reconciliation corrected (`reconciledCount = 1, reconciledAuditCount = 0, skippedCount = 0`).
+5. Lock timeout validation enforced with finite integer checks and safe bounds (Escenario N).
+6. Enum lifecycle in PostgreSQL documented with down migration safety guarantees.
+7. All test metrics empirically captured without fabrication.
 
 **FINAL GATE DETERMINATION: PASS**  
 **Phase 2B.2 Authorization Gate: STRICTLY UNAUTHORIZED / AWAITING PROJECT OWNER ACCEPTANCE**

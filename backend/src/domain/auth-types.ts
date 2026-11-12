@@ -38,7 +38,12 @@ export type Permission =
   | 'setlists:update'
   | 'setlists:reorder'
   | 'setlists:activate'
-  | 'setlists:delete';
+  | 'setlists:delete'
+  | 'services:list'
+  | 'services:read'
+  | 'services:create'
+  | 'services:update'
+  | 'services:delete';
 
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   SUPER_ADMIN: [
@@ -60,6 +65,11 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'setlists:reorder',
     'setlists:activate',
     'setlists:delete',
+    'services:list',
+    'services:read',
+    'services:create',
+    'services:update',
+    'services:delete',
   ],
   ADMIN: [
     'songs:read',
@@ -79,6 +89,11 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'setlists:reorder',
     'setlists:activate',
     'setlists:delete',
+    'services:list',
+    'services:read',
+    'services:create',
+    'services:update',
+    'services:delete',
   ],
   WORSHIP_LEADER: [
     'songs:read',
@@ -91,17 +106,25 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'setlists:update',
     'setlists:reorder',
     'setlists:activate',
+    'services:list',
+    'services:read',
+    'services:create',
+    'services:update',
   ],
   MUSICIAN: [
     'songs:read',
     'songs:update_draft',
     'setlists:list',
     'setlists:read',
+    'services:list',
+    'services:read',
   ],
   VIEWER: [
     'songs:read',
     'setlists:list',
     'setlists:read',
+    'services:list',
+    'services:read',
   ],
 };
 
@@ -177,7 +200,10 @@ export type SecurityEventType =
   | 'UNAUTHORIZED_ACCESS_ATTEMPT'
   | 'SETLIST_CREATED'
   | 'SETLIST_ACTIVATED'
-  | 'SETLIST_DELETED';
+  | 'SETLIST_DELETED'
+  | 'SETLIST_DUPLICATED'
+  | 'WORSHIP_SERVICE_CREATED'
+  | 'WORSHIP_SERVICE_DELETED';
 
 export interface AuditLogEntity {
   id: string;

@@ -55,6 +55,14 @@ export const accountStatusEnum = pgEnum('account_status', [
 // ENUMS DE SETLISTS Y LITURGIA (FASE 2C)
 // ============================================================================
 
+export const worshipServiceStatusEnum = pgEnum('worship_service_status', [
+  'DRAFT',
+  'UPCOMING',
+  'ACTIVE',
+  'COMPLETED',
+  'ARCHIVED',
+]);
+
 export const setlistStatusEnum = pgEnum('setlist_status', [
   'PLANNING',
   'ACTIVE',
@@ -365,6 +373,38 @@ export const songMetadata = pgTable(
 );
 
 // ============================================================================
+// ENTIDADES DE SERVICIOS LITÚRGICOS Y CULTOS (FASE 2C)
+// ============================================================================
+
+/**
+ * Tabla: worship_services
+ * Cultos, reuniones, eventos y celebraciones litúrgicas de la congregación.
+ */
+export const worshipServices = pgTable(
+  'worship_services',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: varchar('name', { length: 255 }).notNull(),
+    description: text('description'),
+    serviceType: varchar('service_type', { length: 64 }).notNull().default('Culto General'),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true }).notNull(),
+    worshipLeaderId: uuid('worship_leader_id').references(() => users.id, { onDelete: 'set null' }),
+    notes: text('notes'),
+    status: worshipServiceStatusEnum('status').notNull().default('DRAFT'),
+    setlistId: uuid('setlist_id').references(() => setlists.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_worship_services_status').on(table.status),
+    index('idx_worship_services_scheduled').on(table.scheduledAt),
+    index('idx_worship_services_leader').on(table.worshipLeaderId),
+    index('idx_worship_services_setlist').on(table.setlistId),
+    index('idx_worship_services_type').on(table.serviceType),
+  ]
+);
+
+// ============================================================================
 // ENTIDADES DE SETLISTS Y LITURGIA (FASE 2C)
 // ============================================================================
 
@@ -381,6 +421,7 @@ export const setlists = pgTable(
     status: setlistStatusEnum('status').notNull().default('PLANNING'),
     directorUserId: uuid('director_user_id').references(() => users.id, { onDelete: 'set null' }),
     notes: text('notes'),
+    isTemplate: boolean('is_template').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -388,6 +429,7 @@ export const setlists = pgTable(
     index('idx_setlists_status').on(table.status),
     index('idx_setlists_scheduled').on(table.scheduledDateTime),
     index('idx_setlists_director').on(table.directorUserId),
+    index('idx_setlists_is_template').on(table.isTemplate),
     uniqueIndex('idx_setlists_single_active')
       .on(table.status)
       .where(sql`${table.status} = 'ACTIVE'`),
@@ -419,6 +461,10 @@ export const setlistItems = pgTable(
     musicalKey: varchar('musical_key', { length: 16 }),
     // Notas compartidas de dirección y dinámica
     notesForTeam: text('notes_for_team'),
+    // Configuración musical extendida por entrada (Fase 2C)
+    preferredInstrument: varchar('preferred_instrument', { length: 64 }),
+    preferredTuning: varchar('preferred_tuning', { length: 64 }),
+    preferredFormat: varchar('preferred_format', { length: 32 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -621,12 +667,24 @@ export const songMetadataRelations = relations(songMetadata, ({ one }) => ({
   }),
 }));
 
+export const worshipServicesRelations = relations(worshipServices, ({ one }) => ({
+  worshipLeader: one(users, {
+    fields: [worshipServices.worshipLeaderId],
+    references: [users.id],
+  }),
+  setlist: one(setlists, {
+    fields: [worshipServices.setlistId],
+    references: [setlists.id],
+  }),
+}));
+
 export const setlistsRelations = relations(setlists, ({ one, many }) => ({
   director: one(users, {
     fields: [setlists.directorUserId],
     references: [users.id],
   }),
   items: many(setlistItems),
+  worshipServices: many(worshipServices),
 }));
 
 export const setlistItemsRelations = relations(setlistItems, ({ one }) => ({
@@ -643,6 +701,10 @@ export const setlistItemsRelations = relations(setlistItems, ({ one }) => ({
 // ============================================================================
 // TIPOS INFERIDOS DRIZZLE ORM (FASE 2C)
 // ============================================================================
+
+export type WorshipService = typeof worshipServices.$inferSelect;
+export type NewWorshipService = typeof worshipServices.$inferInsert;
+export type WorshipServiceStatus = (typeof worshipServiceStatusEnum.enumValues)[number];
 
 export type Setlist = typeof setlists.$inferSelect;
 export type NewSetlist = typeof setlists.$inferInsert;

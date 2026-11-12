@@ -69,6 +69,7 @@ class ConcurrentMockSetlistRepository implements ISetlistRepository {
         scheduledDateTime: s.scheduledDateTime,
         status: s.status,
         directorUserId: s.directorUserId,
+        isTemplate: s.isTemplate,
         totalItems: 0,
         totalSongs: 0,
         createdAt: s.createdAt,
@@ -94,11 +95,19 @@ class ConcurrentMockSetlistRepository implements ISetlistRepository {
       status: dto.status ?? 'PLANNING',
       directorUserId: dto.directorUserId ?? null,
       notes: dto.notes ?? null,
+      isTemplate: dto.isTemplate ?? false,
       createdAt: now,
       updatedAt: now,
     };
     this.setlists.set(id, entity);
     return entity;
+  }
+
+  public async duplicate(id: string, newTitle: string): Promise<SetlistWithItemsEntity> {
+    const source = this.setlists.get(id);
+    if (!source) throw new Error(`Setlist ${id} not found`);
+    const created = await this.create({ title: newTitle, directorUserId: source.directorUserId, notes: source.notes });
+    return { ...created, items: [] };
   }
 
   public async update(id: string, dto: UpdateSetlistDTO): Promise<SetlistEntity | null> {

@@ -13,14 +13,20 @@ import { ApiError } from './api-error.ts';
 import type {
   CreateSetlistItemPayload,
   CreateSetlistPayload,
+  CreateWorshipServicePayload,
+  DuplicateSetlistPayload,
   FrontendListSetlistsResult,
+  FrontendListWorshipServicesResult,
   FrontendSetlistDetail,
   FrontendSetlistEntity,
   FrontendSetlistItem,
   FrontendSetlistStatus,
+  FrontendWorshipService,
   HttpListSetlistsResponse,
+  ListWorshipServicesParams,
   UpdateSetlistItemPayload,
   UpdateSetlistPayload,
+  UpdateWorshipServicePayload,
 } from './setlist-types.ts';
 import type {
   GetUserPreferencesResponse,
@@ -311,12 +317,14 @@ export class BethesdaApiClient {
   public async listSetlists(params?: {
     status?: FrontendSetlistStatus;
     upcoming?: boolean;
+    isTemplate?: boolean;
     limit?: number;
     offset?: number;
   }): Promise<FrontendListSetlistsResult> {
     const query = new URLSearchParams();
     if (params?.status) query.set('status', params.status);
     if (params?.upcoming !== undefined) query.set('upcoming', String(params.upcoming));
+    if (params?.isTemplate !== undefined) query.set('isTemplate', String(params.isTemplate));
     if (params?.limit !== undefined) query.set('limit', String(params.limit));
     if (params?.offset !== undefined) query.set('offset', String(params.offset));
 
@@ -497,6 +505,135 @@ export class BethesdaApiClient {
 
     const json = await res.json();
     return json.data;
+  }
+
+  /**
+   * Duplica un setlist existente o lo guarda como plantilla reutilizable.
+   * Endpoint: POST /api/v1/setlists/:id/duplicate
+   */
+  public async duplicateSetlist(
+    setlistId: string,
+    payload: DuplicateSetlistPayload
+  ): Promise<FrontendSetlistDetail> {
+    const res = await this.fetchWithAuth(`/setlists/${setlistId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  // ==========================================================================
+  // MÉTODOS DE CULTOS Y SERVICIOS LITÚRGICOS (FASE 2C)
+  // ==========================================================================
+
+  /**
+   * Consulta el listado paginado de cultos/servicios con filtros opcionales.
+   * Endpoint: GET /api/v1/worship-services
+   */
+  public async listWorshipServices(
+    params?: ListWorshipServicesParams
+  ): Promise<FrontendListWorshipServicesResult> {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.serviceType) query.set('serviceType', params.serviceType);
+    if (params?.timeframe) query.set('timeframe', params.timeframe);
+    if (params?.worshipLeaderId) query.set('worshipLeaderId', params.worshipLeaderId);
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    if (params?.offset !== undefined) query.set('offset', String(params.offset));
+
+    const path = `/worship-services${query.toString() ? `?${query.toString()}` : ''}`;
+    const res = await this.fetchWithAuth(path);
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return {
+      items: json.data,
+      total: json.pagination.total,
+      limit: json.pagination.limit,
+      offset: json.pagination.offset,
+    };
+  }
+
+  /**
+   * Obtiene el detalle de un culto/servicio litúrgico.
+   * Endpoint: GET /api/v1/worship-services/:id
+   */
+  public async getWorshipService(id: string): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`);
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Crea un nuevo culto/servicio litúrgico.
+   * Endpoint: POST /api/v1/worship-services
+   */
+  public async createWorshipService(
+    payload: CreateWorshipServicePayload
+  ): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth('/worship-services', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Modifica un culto/servicio litúrgico existente.
+   * Endpoint: PUT /api/v1/worship-services/:id
+   */
+  public async updateWorshipService(
+    id: string,
+    payload: UpdateWorshipServicePayload
+  ): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Elimina un culto/servicio litúrgico (ADMIN / SUPER_ADMIN).
+   * Endpoint: DELETE /api/v1/worship-services/:id
+   */
+  public async deleteWorshipService(id: string): Promise<{ success: boolean; message: string }> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`, {
+      method: 'DELETE',
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    return await res.json();
   }
 
   /**

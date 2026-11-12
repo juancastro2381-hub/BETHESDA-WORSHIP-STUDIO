@@ -118,6 +118,25 @@ export class SetlistService {
     }
   }
 
+  public async duplicateSetlist(
+    id: string,
+    dto: { newTitle: string; scheduledDateTime?: Date | string | null; isTemplate?: boolean }
+  ): Promise<SetlistWithItemsEntity> {
+    if (!dto.newTitle || dto.newTitle.trim().length === 0) {
+      throw new ValidationError('El título para el nuevo setlist es obligatorio.');
+    }
+
+    const existing = await this.setlistRepo.findById(id);
+    if (!existing) {
+      throw new NotFoundError('Setlist', id);
+    }
+
+    return await this.setlistRepo.duplicate(id, dto.newTitle.trim(), {
+      scheduledDateTime: dto.scheduledDateTime,
+      isTemplate: dto.isTemplate ?? false,
+    });
+  }
+
   // ==========================================================================
   // 2. MÁQUINA DE ESTADOS LITÚRGICOS (TRANSICIÓN DE ESTADO)
   // ==========================================================================
@@ -137,6 +156,7 @@ export class SetlistService {
         status: existing.status,
         directorUserId: existing.directorUserId,
         notes: existing.notes,
+        isTemplate: existing.isTemplate,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
       };

@@ -16,6 +16,7 @@ import { env } from '../../../config/env.ts';
 import {
   CreateSetlistBodySchema,
   CreateSetlistItemBodySchema,
+  DuplicateSetlistBodySchema,
   ListSetlistsQuerySchema,
   ReorderSetlistItemsBodySchema,
   SetlistIdParamSchema,
@@ -275,6 +276,43 @@ export const setlistRoutes: FastifyPluginAsync = async (fastify) => {
 
       return reply.status(200).send({
         data: reorderedItems,
+      });
+    }
+  );
+
+  // ==========================================================================
+  // 11. POST /api/v1/setlists/:id/duplicate - Duplicar setlist / guardar plantilla (Fase 2C)
+  // El duplicado nace siempre en PLANNING y copia ítems por referencia (songId),
+  // sin mutar la canción canónica ni el setlist origen.
+  // ==========================================================================
+  fastify.post(
+    '/:id/duplicate',
+    { preHandler: authGuard.requirePermission('setlists:create', true) },
+    async (request, reply) => {
+      const params = SetlistIdParamSchema.parse(request.params);
+      const body = DuplicateSetlistBodySchema.parse(request.body);
+      const context = getContext(request);
+      const operatorId = request.user!.sub;
+
+      const duplicated = await setlistService.duplicateSetlist(params.id, body);
+
+      await auditService.log({
+        eventType: 'SETLIST_DUPLICATED',
+        userId: operatorId,
+        resource: `setlist:${duplicated.id}`,
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        metadata: {
+          sourceSetlistId: params.id,
+          setlistId: duplicated.id,
+          title: duplicated.title,
+          isTemplate: duplicated.isTemplate,
+          itemCount: duplicated.items.length,
+        },
+      });
+
+      return reply.status(201).send({
+        data: duplicated,
       });
     }
   );

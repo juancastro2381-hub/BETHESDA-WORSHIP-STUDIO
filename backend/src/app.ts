@@ -17,6 +17,7 @@ import { songRoutes } from './interfaces/http/routes/song.routes.ts';
 import { authRoutes } from './interfaces/http/routes/auth.routes.ts';
 import { userRoutes } from './interfaces/http/routes/user.routes.ts';
 import { setlistRoutes } from './interfaces/http/routes/setlist.routes.ts';
+import { worshipServiceRoutes } from './interfaces/http/routes/worship-service.routes.ts';
 import { audioRoutes } from './interfaces/http/routes/audio.routes.ts';
 import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { multitrackRoutes } from './interfaces/http/routes/multitrack.routes.ts';
@@ -135,6 +136,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(userRoutes, { prefix: '/users' });
       await v1.register(songRoutes, { prefix: '/songs' });
       await v1.register(setlistRoutes, { prefix: '/setlists' });
+      await v1.register(worshipServiceRoutes, { prefix: '/worship-services' });
       await v1.register(audioRoutes);
       await v1.register(realtimeRoutes, { prefix: '/realtime' });
       await v1.register(multitrackRoutes, { prefix: '/multitrack' });

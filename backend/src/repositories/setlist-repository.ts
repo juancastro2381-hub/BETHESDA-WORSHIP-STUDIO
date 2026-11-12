@@ -29,6 +29,11 @@ export interface ISetlistRepository {
   update(id: string, dto: UpdateSetlistDTO): Promise<SetlistEntity | null>;
   updateStatus(id: string, status: SetlistStatus): Promise<SetlistEntity | null>;
   delete(id: string): Promise<boolean>;
+  duplicate(
+    id: string,
+    newTitle: string,
+    options?: { scheduledDateTime?: Date | string | null; isTemplate?: boolean }
+  ): Promise<SetlistWithItemsEntity>;
 
   // Setlist Items CRUD
   listItemsBySetlist(setlistId: string): Promise<SetlistItemWithSongEntity[]>;
@@ -59,6 +64,10 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
         conditions.push(eq(setlists.status, filter.status));
       }
 
+      if (filter?.isTemplate !== undefined) {
+        conditions.push(eq(setlists.isTemplate, filter.isTemplate));
+      }
+
       if (filter?.upcoming) {
         conditions.push(
           and(
@@ -84,6 +93,7 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
             directorUserId: setlists.directorUserId,
             directorFirstName: users.firstName,
             directorLastName: users.lastName,
+            isTemplate: setlists.isTemplate,
             totalItems: sql<number>`(SELECT count(*)::int FROM ${setlistItems} WHERE ${setlistItems.setlistId} = ${setlists.id})`,
             totalSongs: sql<number>`(SELECT count(*)::int FROM ${setlistItems} WHERE ${setlistItems.setlistId} = ${setlists.id} AND ${setlistItems.itemType} = 'SONG')`,
             createdAt: setlists.createdAt,
@@ -112,6 +122,7 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
           status: r.status,
           directorUserId: r.directorUserId,
           directorName: directorName || undefined,
+          isTemplate: r.isTemplate,
           totalItems: Number(r.totalItems),
           totalSongs: Number(r.totalSongs),
           createdAt: r.createdAt,
@@ -157,6 +168,7 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
         directorUserId: row.setlist.directorUserId,
         directorName,
         notes: row.setlist.notes,
+        isTemplate: row.setlist.isTemplate,
         createdAt: row.setlist.createdAt,
         updatedAt: row.setlist.updatedAt,
         items,
@@ -181,6 +193,7 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
           status: dto.status ?? 'PLANNING',
           directorUserId: dto.directorUserId ?? null,
           notes: dto.notes ?? null,
+          isTemplate: dto.isTemplate ?? false,
         })
         .returning();
 
@@ -202,6 +215,10 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
 
       if (dto.title !== undefined) {
         updateData.title = dto.title.trim();
+      }
+
+      if (dto.isTemplate !== undefined) {
+        updateData.isTemplate = dto.isTemplate;
       }
       if (dto.scheduledDateTime !== undefined) {
         updateData.scheduledDateTime = dto.scheduledDateTime
@@ -282,6 +299,107 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
     }
   }
 
+  public async duplicate(
+    id: string,
+    newTitle: string,
+    options?: { scheduledDateTime?: Date | string | null; isTemplate?: boolean }
+  ): Promise<SetlistWithItemsEntity> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        // 1. Consultar el setlist original
+        const [original] = await tx
+          .select()
+          .from(setlists)
+          .where(eq(setlists.id, id))
+          .limit(1);
+
+        if (!original) {
+          throw new NotFoundError('Setlist', id);
+        }
+
+        const scheduledDateTime = options?.scheduledDateTime
+          ? (options.scheduledDateTime instanceof Date ? options.scheduledDateTime : new Date(options.scheduledDateTime))
+          : null;
+
+        // 2. Insertar nuevo setlist en estado PLANNING
+        const [clonedSetlist] = await tx
+          .insert(setlists)
+          .values({
+            title: newTitle.trim(),
+            scheduledDateTime,
+            status: 'PLANNING',
+            directorUserId: original.directorUserId,
+            notes: original.notes,
+            isTemplate: options?.isTemplate ?? false,
+          })
+          .returning();
+
+        if (!clonedSetlist) {
+          throw new PersistenceError('No se pudo clonar el registro del setlist.');
+        }
+
+        // 3. Consultar los elementos originales ordenados
+        const originalItems = await tx
+          .select()
+          .from(setlistItems)
+          .where(eq(setlistItems.setlistId, id))
+          .orderBy(asc(setlistItems.sequenceOrder));
+
+        // 4. Clonar los elementos
+        for (const item of originalItems) {
+          await tx.insert(setlistItems).values({
+            setlistId: clonedSetlist.id,
+            sequenceOrder: item.sequenceOrder,
+            itemType: item.itemType,
+            songId: item.songId,
+            targetKey: item.targetKey,
+            targetBpm: item.targetBpm,
+            transitionType: item.transitionType,
+            momentTitle: item.momentTitle,
+            durationMinutes: item.durationMinutes,
+            musicalKey: item.musicalKey,
+            notesForTeam: item.notesForTeam,
+            preferredInstrument: item.preferredInstrument,
+            preferredTuning: item.preferredTuning,
+            preferredFormat: item.preferredFormat,
+          });
+        }
+
+        // 5. Devolver la entidad clonada completa
+        const items = await this.fetchItemsWithSong(tx, clonedSetlist.id);
+
+        let directorName: string | null = null;
+        if (clonedSetlist.directorUserId) {
+          const [director] = await tx
+            .select({ firstName: users.firstName, lastName: users.lastName })
+            .from(users)
+            .where(eq(users.id, clonedSetlist.directorUserId))
+            .limit(1);
+          if (director) {
+            directorName = `${director.firstName ?? ''} ${director.lastName ?? ''}`.trim() || null;
+          }
+        }
+
+        return {
+          id: clonedSetlist.id,
+          title: clonedSetlist.title,
+          scheduledDateTime: clonedSetlist.scheduledDateTime,
+          status: clonedSetlist.status,
+          directorUserId: clonedSetlist.directorUserId,
+          directorName,
+          notes: clonedSetlist.notes,
+          isTemplate: clonedSetlist.isTemplate,
+          createdAt: clonedSetlist.createdAt,
+          updatedAt: clonedSetlist.updatedAt,
+          items,
+        };
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new PersistenceError(`Error al duplicar setlist '${id}': ${error instanceof Error ? error.message : String(error)}`, error);
+    }
+  }
+
   // ==========================================================================
   // SETLIST ITEMS CRUD
   // ==========================================================================
@@ -329,6 +447,9 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
         durationMinutes: r.item.durationMinutes,
         musicalKey: r.item.musicalKey,
         notesForTeam: r.item.notesForTeam,
+        preferredInstrument: r.item.preferredInstrument,
+        preferredTuning: r.item.preferredTuning,
+        preferredFormat: r.item.preferredFormat,
         createdAt: r.item.createdAt,
         updatedAt: r.item.updatedAt,
         song: r.songId
@@ -422,6 +543,9 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
             durationMinutes: dto.itemType === 'SERVICE_MOMENT' ? dto.durationMinutes : null,
             musicalKey: dto.itemType === 'SERVICE_MOMENT' ? dto.musicalKey : null,
             notesForTeam: dto.notesForTeam ?? null,
+            preferredInstrument: dto.preferredInstrument ?? null,
+            preferredTuning: dto.preferredTuning ?? null,
+            preferredFormat: dto.preferredFormat ?? null,
           })
           .returning();
 
@@ -473,6 +597,9 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
         if (dto.durationMinutes !== undefined) updateData.durationMinutes = dto.durationMinutes;
         if (dto.musicalKey !== undefined) updateData.musicalKey = dto.musicalKey;
         if (dto.notesForTeam !== undefined) updateData.notesForTeam = dto.notesForTeam;
+        if (dto.preferredInstrument !== undefined) updateData.preferredInstrument = dto.preferredInstrument;
+        if (dto.preferredTuning !== undefined) updateData.preferredTuning = dto.preferredTuning;
+        if (dto.preferredFormat !== undefined) updateData.preferredFormat = dto.preferredFormat;
 
         await tx
           .update(setlistItems)
@@ -660,6 +787,9 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
       durationMinutes: r.item.durationMinutes,
       musicalKey: r.item.musicalKey,
       notesForTeam: r.item.notesForTeam,
+      preferredInstrument: r.item.preferredInstrument,
+      preferredTuning: r.item.preferredTuning,
+      preferredFormat: r.item.preferredFormat,
       createdAt: r.item.createdAt,
       updatedAt: r.item.updatedAt,
       song: r.songId
@@ -684,6 +814,7 @@ export class DrizzleSetlistRepository implements ISetlistRepository {
       status: row.status,
       directorUserId: row.directorUserId,
       notes: row.notes,
+      isTemplate: row.isTemplate,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };

@@ -59,6 +59,14 @@ export const ListSetlistsQuerySchema = z.object({
       return val;
     }, z.boolean())
     .optional(),
+  isTemplate: z
+    .preprocess((val) => {
+      if (typeof val === 'string') {
+        return val.toLowerCase() === 'true';
+      }
+      return val;
+    }, z.boolean())
+    .optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -87,6 +95,7 @@ export const CreateSetlistBodySchema = z.object({
     .max(2000, 'Las notas no pueden exceder 2000 caracteres.')
     .optional()
     .nullable(),
+  isTemplate: z.boolean().optional(),
 });
 
 export const UpdateSetlistBodySchema = z.object({
@@ -110,11 +119,47 @@ export const UpdateSetlistBodySchema = z.object({
     .max(2000, 'Las notas no pueden exceder 2000 caracteres.')
     .optional()
     .nullable(),
+  isTemplate: z.boolean().optional(),
 });
 
 export const SetlistStatusTransitionBodySchema = z.object({
   status: SetlistStatusSchema,
 });
+
+export const DuplicateSetlistBodySchema = z.object({
+  newTitle: z
+    .string()
+    .trim()
+    .min(1, 'El título del nuevo setlist es obligatorio.')
+    .max(255, 'El título no puede exceder 255 caracteres.'),
+  scheduledDateTime: z
+    .string()
+    .datetime({ message: 'La fecha programada debe tener un formato ISO 8601 válido.' })
+    .optional()
+    .nullable(),
+  isTemplate: z.boolean().optional(),
+});
+
+// ============================================================================
+// CONFIGURACIÓN MUSICAL EXTENDIDA POR ENTRADA (FASE 2C)
+// ============================================================================
+
+/**
+ * Formatos de lectura sugeridos por el director para una entrada.
+ * Son sugerencias: la preferencia individual del músico (user_view_preferences) prevalece en el atril.
+ */
+export const ReadingFormatEnum = ['SCORE', 'CHORD_SHEET', 'LYRICS', 'TAB'] as const;
+export const ReadingFormatSchema = z.enum(ReadingFormatEnum, {
+  errorMap: () => ({
+    message: "El formato de lectura debe ser 'SCORE', 'CHORD_SHEET', 'LYRICS' o 'TAB'",
+  }),
+});
+
+const ItemMusicalConfigShape = {
+  preferredInstrument: z.string().trim().min(1).max(64).optional().nullable(),
+  preferredTuning: z.string().trim().min(1).max(64).optional().nullable(),
+  preferredFormat: ReadingFormatSchema.optional().nullable(),
+};
 
 // ============================================================================
 // CREACIÓN POLIMÓRFICA DE ELEMENTOS (SETLIST ITEMS)
@@ -146,6 +191,7 @@ export const CreateSongItemPayloadSchema = z.object({
     .max(2000, 'Las notas para el equipo no pueden exceder 2000 caracteres.')
     .optional()
     .nullable(),
+  ...ItemMusicalConfigShape,
   sequenceOrder: z.number().int().min(1).optional(),
 });
 
@@ -206,6 +252,7 @@ export const UpdateSetlistItemBodySchema = z
     durationMinutes: z.number().int().min(1).max(180).optional().nullable(),
     musicalKey: z.string().min(1).max(16).optional().nullable(),
     notesForTeam: z.string().max(2000).optional().nullable(),
+    ...ItemMusicalConfigShape,
   })
   .refine(
     (data) => Object.keys(data).length > 0,
@@ -237,6 +284,7 @@ export type ListSetlistsQuery = z.infer<typeof ListSetlistsQuerySchema>;
 export type CreateSetlistBody = z.infer<typeof CreateSetlistBodySchema>;
 export type UpdateSetlistBody = z.infer<typeof UpdateSetlistBodySchema>;
 export type SetlistStatusTransitionBody = z.infer<typeof SetlistStatusTransitionBodySchema>;
+export type DuplicateSetlistBody = z.infer<typeof DuplicateSetlistBodySchema>;
 export type CreateSongItemPayload = z.infer<typeof CreateSongItemPayloadSchema>;
 export type CreateServiceMomentItemPayload = z.infer<typeof CreateServiceMomentItemPayloadSchema>;
 export type CreateSetlistItemBody = z.infer<typeof CreateSetlistItemBodySchema>;

@@ -36,8 +36,14 @@ describe('Phase 2B — RBAC System & Authoritative Real-Time Database Guards', (
       assert.ok(perms.length > 0, `El rol ${role} no puede tener permisos vacíos.`);
     }
 
-    // VIEWER solo debe tener permisos de lectura (canciones y setlists)
-    assert.deepStrictEqual(ROLE_PERMISSIONS.VIEWER, ['songs:read', 'setlists:list', 'setlists:read']);
+    // VIEWER solo debe tener permisos de lectura (canciones, setlists y servicios)
+    assert.deepStrictEqual(ROLE_PERMISSIONS.VIEWER, [
+      'songs:read',
+      'setlists:list',
+      'setlists:read',
+      'services:list',
+      'services:read',
+    ]);
 
     // MUSICIAN no debe tener permisos de administración ni aprobación de canciones
     assert.strictEqual(ROLE_PERMISSIONS.MUSICIAN.includes('users:invite'), false);

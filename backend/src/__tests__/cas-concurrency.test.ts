@@ -444,46 +444,176 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     }
   });
 
-  it('Escenario F: Process crashes after both physical deletions but before database finalization', async () => {
-    const salt = crypto.randomUUID();
-    const hash = crypto.createHash('sha256').update('Scenario F ' + salt).digest('hex');
-    const key = `outputs/${hash}.txt`;
-    const canonicalKey = `outputs/${hash}.canonical.json`;
+  it('Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization', async () => {
+    // =========================================================================
+    // PARTE 1: INYECCIÓN DE FALLO A NIVEL DE SERVICIO (E/S física completada, fallo antes de Tx 2)
+    // =========================================================================
+    const salt1 = crypto.randomUUID();
+    const content1 = Buffer.from('Scenario F Injected ' + salt1);
+    const hash1 = crypto.createHash('sha256').update(content1).digest('hex');
+    const key1 = `outputs/${hash1}.chordpro`;
+    const canonicalKey1 = `outputs/${hash1}.canonical.json`;
 
-    // Ninguno de los dos archivos existe en disco (ambos fueron desvinculados antes del crash)
-    assert.equal(await outputStorage.exists(key), false);
-    assert.equal(await outputStorage.exists(canonicalKey), false);
+    // 1. Crear los archivos reales en almacenamiento físico
+    await outputStorage.save(key1, content1);
+    await outputStorage.save(canonicalKey1, Buffer.from('{"title":"Scenario F Injected"}'));
+    assert.equal(await outputStorage.exists(key1), true);
+    assert.equal(await outputStorage.exists(canonicalKey1), true);
+
+    const jobId1 = crypto.randomUUID();
+    const expiredDate1 = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+    const originalTx = db.transaction.bind(db);
+    let phase3Interrupted = false;
+
+    try {
+      await db.insert(backgroundJobs).values({
+        id: jobId1,
+        jobType: 'CONVERSION',
+        status: 'COMPLETED',
+        userId: testUserId,
+        inputRef: 'scenario-f-injected.xml',
+        outputStorageKey: key1,
+        outputChecksumSha256: hash1,
+        outputByteLength: content1.length,
+        completedAt: expiredDate1,
+        progress: 100,
+        errorDetails: { canonicalStorageKey: canonicalKey1 },
+      });
+
+      // Interceptar db.transaction: dejar pasar Fase 1 (Tx 1), pero lanzar error en Fase 3 (Tx 2)
+      let txCount = 0;
+      (db as any).transaction = async (cb: any) => {
+        txCount++;
+        // txCount === 1 es Fase 1 (commit de DELETE_PENDING y pruned_at)
+        if (txCount === 2) {
+          phase3Interrupted = true;
+          throw new Error('Simulated process interruption/database network disconnect before Phase 3 DB finalization');
+        }
+        return originalTx(cb);
+      };
+
+      // Ejecutar podado con inyección de fallo en Fase 3
+      const pruneReport = await retentionService.pruneExpiredOutputs({
+        retentionDays: 30,
+        userId: testUserId,
+      });
+
+      assert.equal(phase3Interrupted, true, 'La Fase 3 debió ser interrumpida tras la desvinculación física');
+      assert(pruneReport.errors.some((e) => e.error.includes('Simulated process interruption')));
+
+      // Verificación de estado físico: AMBOS archivos fueron desvinculados físicamente por el servicio
+      assert.equal(await outputStorage.exists(key1), false, 'Archivo primario fue desvinculado físicamente');
+      assert.equal(await outputStorage.exists(canonicalKey1), false, 'Companion fue desvinculado físicamente');
+
+      // Verificación de estado en BD: La intención quedó en DELETE_PENDING debido a la interrupción antes de Tx 2
+      const [interruptedIntent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key1));
+
+      assert.equal(interruptedIntent.state, 'DELETE_PENDING', 'Intención debe permanecer DELETE_PENDING tras interrupción');
+
+      // 2. Ejecutar el worker de recuperación real (reconcilePendingDeletions)
+      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
+      assert(recReport.reconciledCount >= 1);
+      assert.equal(recReport.failedCount, 0);
+
+      // Verificación final tras recuperación: reconciliado a DELETED con veracidad
+      const [reconciledIntent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key1));
+
+      assert.equal(reconciledIntent.state, 'DELETED');
+      assert.equal(reconciledIntent.primaryDeleted, true);
+      assert.equal(reconciledIntent.companionDeleted, true);
+      assert.equal(reconciledIntent.audited, true);
+    } finally {
+      (db as any).transaction = originalTx;
+      await outputStorage.delete(key1).catch(() => {});
+      await outputStorage.delete(canonicalKey1).catch(() => {});
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key1));
+      await db.delete(backgroundJobs).where(eq(backgroundJobs.id, jobId1));
+    }
+
+    // =========================================================================
+    // PARTE 2: RECUPERACIÓN ANTE ESTADO POST-UNLINK SIMULADO PREVIO
+    // =========================================================================
+    // Verifica que si un intento DELETE_PENDING ya existía en la base de datos
+    // y los archivos ya no están presentes en disco, la recuperación no falla y finaliza limpiamente
+    const salt2 = crypto.randomUUID();
+    const hash2 = crypto.createHash('sha256').update('Scenario F Simulated ' + salt2).digest('hex');
+    const key2 = `outputs/${hash2}.txt`;
+    const canonicalKey2 = `outputs/${hash2}.canonical.json`;
+
+    assert.equal(await outputStorage.exists(key2), false);
+    assert.equal(await outputStorage.exists(canonicalKey2), false);
 
     try {
       await db.insert(casDeletionIntents).values({
-        storageKey: key,
-        canonicalKey,
-        checksumSha256: hash,
+        storageKey: key2,
+        canonicalKey: canonicalKey2,
+        checksumSha256: hash2,
         state: 'DELETE_PENDING',
         primaryDeleted: false,
         companionDeleted: false,
         attempts: 0,
       });
 
-      const recReport = await retentionService.reconcilePendingDeletions({ userId: testUserId });
-      assert(recReport.reconciledCount >= 1);
-      assert.equal(recReport.failedCount, 0);
+      const recReport2 = await retentionService.reconcilePendingDeletions({ userId: testUserId });
+      assert(recReport2.reconciledCount >= 1);
 
-      const [intent] = await db
+      const [intent2] = await db
         .select()
         .from(casDeletionIntents)
-        .where(eq(casDeletionIntents.storageKey, key));
+        .where(eq(casDeletionIntents.storageKey, key2));
 
-      assert.equal(intent.state, 'DELETED');
-      assert.equal(intent.primaryDeleted, true);
-      assert.equal(intent.companionDeleted, true);
-      assert.equal(intent.audited, true);
+      assert.equal(intent2.state, 'DELETED');
+      assert.equal(intent2.primaryDeleted, true);
+      assert.equal(intent2.companionDeleted, true);
+      assert.equal(intent2.audited, true);
     } finally {
-      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key2));
     }
   });
 
-  it('Escenario G: Lock acquisition fails after acquiring the first key but before acquiring the second', async () => {
+  it('Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup', async () => {
+    // 1. Probar adquisición normal y liberación en orden inverso invocando el helper de producción real
+    const orderLog: string[] = [];
+    const testKey1 = `outputs/test_normal_1_${crypto.randomUUID()}.txt`;
+    const testKey2 = `outputs/test_normal_2_${crypto.randomUUID()}.canonical.json`;
+
+    await retentionService.withCasAdvisoryLocks([testKey1, testKey2], async (client) => {
+      const lockCheck = await client.query(
+        "SELECT count(*) as count FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+      );
+      assert.equal(parseInt(lockCheck.rows[0].count, 10), 2, 'Debe retener exactamente 2 bloqueos consultivos en la sesión');
+      orderLog.push('operation_executed');
+    });
+
+    assert.equal(orderLog[0], 'operation_executed');
+
+    // Verificar que ambas claves fueron liberadas tras la ejecución normal
+    const verifierAfterNormal = await pool.connect();
+    try {
+      const lockCheck1 = await verifierAfterNormal.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) as acquired',
+        [testKey1]
+      );
+      const lockCheck2 = await verifierAfterNormal.query(
+        'SELECT pg_try_advisory_lock(hashtext($1)) as acquired',
+        [testKey2]
+      );
+      assert.equal(lockCheck1.rows[0].acquired, true, 'Clave 1 debe estar liberada');
+      assert.equal(lockCheck2.rows[0].acquired, true, 'Clave 2 debe estar liberada');
+      await verifierAfterNormal.query('SELECT pg_advisory_unlock(hashtext($1))', [testKey1]);
+      await verifierAfterNormal.query('SELECT pg_advisory_unlock(hashtext($1))', [testKey2]);
+    } finally {
+      verifierAfterNormal.release();
+    }
+
+    // 2. Probar adquisición parcial fallida con timeout PostgreSQL acotado
     const keyA = `outputs/test_lock_a_${crypto.randomUUID()}.txt`;
     const keyB = `outputs/test_lock_b_${crypto.randomUUID()}.canonical.json`;
     const sortedKeys = [keyA, keyB].sort();
@@ -494,31 +624,36 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     const verifierClient = await pool.connect();
 
     try {
-      // Bloquear secondKey en un cliente independiente
+      // Bloquear secondKey en una conexión independiente
       await blockerClient.query('SELECT pg_advisory_lock(hashtext($1))', [secondKey]);
 
-      // Intentar adquisición secuencial en un cliente con statement_timeout corto (100ms)
-      // para forzar fallo durante la adquisición de la segunda clave
-      let acquisitionFailed = false;
-      const client = await pool.connect();
+      let helperFailed = false;
+      let helperError: any = null;
+
       try {
-        await client.query('SET statement_timeout = 100');
-        await client.query('SELECT pg_advisory_lock(hashtext($1))', [firstKey]);
-        // Ahora intentar secondKey -> fallará por timeout al estar tomada por blockerClient
-        await client.query('SELECT pg_advisory_lock(hashtext($1))', [secondKey]);
-      } catch {
-        acquisitionFailed = true;
-        // Simular el bloque finally de withCasAdvisoryLocks:
-        // Debe liberar confiablemente la primera clave adquirida
-        await client.query('SET statement_timeout = 0').catch(() => {});
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [firstKey]).catch(() => {});
-      } finally {
-        client.release();
+        // Invocar directamente el método de producción real con timeout acotado (200ms)
+        await retentionService.withCasAdvisoryLocks(
+          [firstKey, secondKey],
+          async () => {
+            throw new Error('Inalcanzable: la operación no debe ejecutarse si falla la adquisición del bloqueo');
+          },
+          { lockTimeoutMs: 200 }
+        );
+      } catch (err: any) {
+        helperFailed = true;
+        helperError = err;
       }
 
-      assert.equal(acquisitionFailed, true, 'La adquisición de secondKey debió fallar por contención');
+      assert.equal(helperFailed, true, 'La adquisición debió fallar por contención en secondKey');
+      assert(
+        helperError?.code === '55P03' ||
+          helperError?.message?.includes('tiempo de espera') ||
+          helperError?.message?.includes('timeout') ||
+          helperError?.message?.includes('canceling statement'),
+        `Error debió ser lock_timeout (55P03): ${helperError?.message}`
+      );
 
-      // Verificación crítica: firstKey fue liberado y NO quedó bloqueado o filtrado
+      // Verificación crítica 1: firstKey fue liberado por withCasAdvisoryLocks en su bloque finally
       const testLock = await verifierClient.query(
         'SELECT pg_try_advisory_lock(hashtext($1)) as acquired',
         [firstKey]
@@ -526,10 +661,22 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
       assert.equal(
         testLock.rows[0].acquired,
         true,
-        'firstKey debe haber sido liberado en el bloque finally'
+        'firstKey DEBE haber sido liberado por el helper de producción en su bloque finally'
       );
-
       await verifierClient.query('SELECT pg_advisory_unlock(hashtext($1))', [firstKey]);
+
+      // Liberar secondKey del blocker
+      await blockerClient.query('SELECT pg_advisory_unlock(hashtext($1))', [secondKey]);
+
+      // Verificación crítica 2: Ningún bloqueo consultivo residual en el servidor PostgreSQL
+      const globalLockCheck = await pool.query(
+        "SELECT count(*) as count FROM pg_locks WHERE locktype = 'advisory'"
+      );
+      assert.equal(
+        parseInt(globalLockCheck.rows[0].count, 10),
+        0,
+        'No deben existir bloqueos consultivos residuales retenidos en el servidor PostgreSQL'
+      );
     } finally {
       await blockerClient.query('SELECT pg_advisory_unlock_all()').catch(() => {});
       blockerClient.release();
@@ -643,6 +790,19 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
 
       assert.equal(intent.state, 'DELETED', 'Físicamente fue eliminado');
       assert.equal(intent.audited, false, 'audited DEBE ser false con veracidad estricta');
+
+      // 4. Procedimiento de reconciliación de auditoría (reconcileUnauditedDeletions)
+      // Reconciliar con un userId válido para completar la auditoría pendiente
+      const auditRecReport = await retentionService.reconcileUnauditedDeletions({ userId: testUserId });
+      assert(auditRecReport.reconciledAuditCount >= 1, 'Debe reconciliar el registro no auditado');
+
+      const [reconciledIntent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(reconciledIntent.state, 'DELETED', 'Estado físico se preserva');
+      assert.equal(reconciledIntent.audited, true, 'audited transiciona a true tras la reconciliación');
     } finally {
       await outputStorage.delete(key).catch(() => {});
       await outputStorage.delete(canonicalKey).catch(() => {});

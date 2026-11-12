@@ -75,17 +75,24 @@ export interface OrphanCollectionReport {
   orphanItems: OrphanItem[];
 }
 
+export interface CasLockOptions {
+  lockTimeoutMs?: number;
+}
+
 export interface RetentionServiceOptions {
   defaultRetentionDays?: number;
   defaultQuarantineDays?: number;
+  defaultLockTimeoutMs?: number;
 }
 
 export class OutputRetentionService {
   public static readonly DEFAULT_RETENTION_DAYS = 30;
   public static readonly DEFAULT_QUARANTINE_DAYS = 7;
+  public static readonly DEFAULT_LOCK_TIMEOUT_MS = 10000;
 
   private readonly retentionDays: number;
   private readonly quarantineDays: number;
+  private readonly defaultLockTimeoutMs: number;
   private readonly pool: Pool;
 
   public constructor(
@@ -98,6 +105,7 @@ export class OutputRetentionService {
   ) {
     this.retentionDays = options?.defaultRetentionDays ?? OutputRetentionService.DEFAULT_RETENTION_DAYS;
     this.quarantineDays = options?.defaultQuarantineDays ?? OutputRetentionService.DEFAULT_QUARANTINE_DAYS;
+    this.defaultLockTimeoutMs = options?.defaultLockTimeoutMs ?? OutputRetentionService.DEFAULT_LOCK_TIMEOUT_MS;
     this.pool = customPool ?? defaultPool;
   }
 
@@ -125,34 +133,57 @@ export class OutputRetentionService {
    * Protocolo Determinista de Bloqueo Jerárquico:
    * 1. Ordenamiento lexicográfico estricto de todas las claves CAS (clave principal + claves canónicas/compañeras).
    *    Esto elimina matemáticamente cualquier posibilidad de interbloqueo (deadlock) entre workers concurrentes y procesos de retención.
-   * 2. Adquisición secuencial de cada clave bajo la misma conexión de cliente PostgreSQL (PoolClient).
-   * 3. Liberación confiable en bloque 'finally' en orden inverso, manejando fallos parciales de adquisición.
-   * 4. Persistencia del bloqueo a través de transacciones DB intermedias y operaciones de E/S física en disco.
+   * 2. Configuración acotada de lock_timeout para evitar bloqueos indefinidos ante particiones de red o contención persistente.
+   * 3. Adquisición secuencial de cada clave bajo la misma conexión de cliente PostgreSQL (PoolClient).
+   * 4. Liberación confiable en bloque 'finally' en orden inverso de adquisición, manejando fallos parciales de adquisición.
+   * 5. Si ocurre cualquier error o timeout, la conexión se descarta del pool (client.release(true)) para evitar fuga de estado de sesión.
    */
   public async withCasAdvisoryLocks<T>(
     keys: string | string[],
-    operation: (client: PoolClient) => Promise<T>
+    operation: (client: PoolClient) => Promise<T>,
+    options?: CasLockOptions
   ): Promise<T> {
     const keyArray = Array.isArray(keys) ? keys : [keys];
     const sortedKeys = Array.from(new Set(keyArray.filter(Boolean))).sort();
+    const timeoutMs = options?.lockTimeoutMs ?? this.defaultLockTimeoutMs;
     const client = await this.pool.connect();
     const acquiredKeys: string[] = [];
+    let isConnectionDirty = false;
 
     try {
+      if (timeoutMs > 0) {
+        await client.query(`SET lock_timeout = ${Math.floor(timeoutMs)}`);
+        isConnectionDirty = true;
+      }
+
       for (const key of sortedKeys) {
         await client.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
         acquiredKeys.push(key);
       }
+
+      if (isConnectionDirty) {
+        await client.query('RESET lock_timeout');
+        isConnectionDirty = false;
+      }
+
       return await operation(client);
+    } catch (error) {
+      isConnectionDirty = true;
+      throw error;
     } finally {
       for (const key of [...acquiredKeys].reverse()) {
         try {
           await client.query('SELECT pg_advisory_unlock(hashtext($1))', [key]);
         } catch {
-          // Supresión intencional de errores de desbloqueo en cleanup para garantizar liberación del cliente
+          isConnectionDirty = true;
         }
       }
-      client.release();
+
+      if (isConnectionDirty) {
+        client.release(true);
+      } else {
+        client.release();
+      }
     }
   }
 
@@ -161,9 +192,10 @@ export class OutputRetentionService {
    */
   public async withCasAdvisoryLock<T>(
     storageKey: string,
-    operation: (client: PoolClient) => Promise<T>
+    operation: (client: PoolClient) => Promise<T>,
+    options?: CasLockOptions
   ): Promise<T> {
-    return this.withCasAdvisoryLocks([storageKey], operation);
+    return this.withCasAdvisoryLocks([storageKey], operation, options);
   }
 
   /**
@@ -1101,6 +1133,88 @@ export class OutputRetentionService {
             report.reconciledCount++;
           }
         });
+      } catch (err: any) {
+        report.failedCount++;
+        report.errors.push({
+          storageKey: intent.storageKey,
+          error: err.message || String(err),
+        });
+      }
+    }
+
+    return report;
+  }
+
+  /**
+   * Reconcilia registros de intenciones completadas físicamente (DELETED o RETAINED)
+   * cuya persistencia de auditoría falló previamente en la subtransacción SAVEPOINT (audited = false).
+   * 
+   * Procedimiento de Reconciliación de Auditoría:
+   * 1. Consulta intenciones en estado terminal (DELETED, RETAINED) con audited = false.
+   * 2. Intenta registrar el evento de auditoría correspondiente de forma independiente en una transacción aislada.
+   * 3. Si la inserción en audit_logs tiene éxito, actualiza audited = true de forma atómica.
+   * 4. Si falla (p.ej. violación de restricción o BD en solo lectura), captura el error sin alterar
+   *    el estado físico ni falsear el campo audited.
+   */
+  public async reconcileUnauditedDeletions(options?: {
+    userId?: string;
+  }): Promise<{
+    scannedCount: number;
+    reconciledCount: number;
+    reconciledAuditCount: number;
+    failedCount: number;
+    errors: Array<{ storageKey: string; error: string }>;
+  }> {
+    const report = {
+      scannedCount: 0,
+      reconciledCount: 0,
+      reconciledAuditCount: 0,
+      failedCount: 0,
+      errors: [] as Array<{ storageKey: string; error: string }>,
+    };
+
+    const unauditedIntents = await this.db
+      .select()
+      .from(casDeletionIntents)
+      .where(
+        and(
+          eq(casDeletionIntents.audited, false),
+          inArray(casDeletionIntents.state, ['DELETED', 'RETAINED'])
+        )
+      );
+
+    report.scannedCount = unauditedIntents.length;
+
+    for (const intent of unauditedIntents) {
+      try {
+        await this.db.transaction(async (tx) => {
+          const eventType =
+            intent.state === 'RETAINED'
+              ? 'CAS_OBJECT_RETAINED'
+              : 'CONVERSION_OUTPUT_DELETION_RECONCILED';
+
+          await tx.insert(auditLogs).values({
+            eventType,
+            userId: options?.userId ?? null,
+            resource: `storage/${intent.storageKey}`,
+            metadata: {
+              storageKey: intent.storageKey,
+              canonicalKey: intent.canonicalKey,
+              checksumSha256: intent.checksumSha256,
+              state: intent.state,
+              reconciledAt: new Date().toISOString(),
+              reason: 'Audit reconciliation for previously unaudited physical lifecycle event',
+            },
+          });
+
+          await tx
+            .update(casDeletionIntents)
+            .set({ audited: true, updatedAt: new Date() })
+            .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+        });
+
+        report.reconciledCount++;
+        report.reconciledAuditCount++;
       } catch (err: any) {
         report.failedCount++;
         report.errors.push({

@@ -9,6 +9,7 @@ import type {
   RealtimeEvent,
   RealtimeSessionSnapshot,
 } from './realtime-types.ts';
+import { assertServerMutationAllowed } from '../offline/offline-session-identity.ts';
 
 export interface RealtimeClientCallbacks {
   onConnectionChange?: (state: RealtimeConnectionState) => void;
@@ -174,6 +175,7 @@ export class RealtimeClient {
     token: string,
     action: RealtimeAction
   ): Promise<{ success: boolean; sequence: number; state: RealtimeSessionSnapshot }> {
+    assertServerMutationAllowed('POST', `/realtime/sessions/${sessionId}/actions`);
     const res = await fetch(`${this.baseUrl}/api/v1/realtime/sessions/${sessionId}/actions`, {
       method: 'POST',
       headers: {
@@ -200,6 +202,7 @@ export class RealtimeClient {
     token: string,
     initialItemIndex = 0
   ): Promise<RealtimeSessionSnapshot> {
+    assertServerMutationAllowed('POST', '/realtime/sessions');
     const res = await fetch(`${this.baseUrl}/api/v1/realtime/sessions`, {
       method: 'POST',
       headers: {

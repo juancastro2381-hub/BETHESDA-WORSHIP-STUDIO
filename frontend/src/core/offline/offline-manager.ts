@@ -29,7 +29,12 @@ import {
 } from './types.ts';
 import { BethesdaOfflineStorage, offlineStorage } from './storage/indexeddb-storage.ts';
 import { tokenManager } from '../auth/token-manager.ts';
-import { clearOfflineSessionIdentity } from './offline-session-identity.ts';
+import {
+  clearOfflineSessionIdentity,
+  setOfflineReadOnlyMutationGuard,
+  isOfflineReadOnlyMutationGuardActive,
+  isClientCurrentlyOnline,
+} from './offline-session-identity.ts';
 
 /**
  * Calcula el hash SHA-256 de una cadena de texto de forma compatible con navegador y Node.js.
@@ -112,24 +117,23 @@ export class BethesdaOfflineManager {
    * Consulta si el cliente se encuentra conectado a internet/servidor.
    */
   public isOnline(): boolean {
-    if (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean') {
-      return navigator.onLine;
-    }
-    return true; // En entornos no-DOM asumir online
+    return isClientCurrentlyOnline();
   }
 
   /**
    * Establece o limpia el indicador de sesión offline en modo estricto de solo lectura (WS-2D-01 Salvaguarda B).
    */
   public setOfflineReadOnlySessionActive(active: boolean): void {
-    this.offlineReadOnlySessionActive = Boolean(active);
+    const normalized = Boolean(active);
+    this.offlineReadOnlySessionActive = normalized;
+    setOfflineReadOnlyMutationGuard(normalized);
   }
 
   /**
    * Indica si la sesión actual opera bajo identidad offline de solo lectura no revalidada aún con el servidor.
    */
   public isOfflineReadOnlySessionActive(): boolean {
-    return this.offlineReadOnlySessionActive;
+    return this.offlineReadOnlySessionActive || isOfflineReadOnlyMutationGuardActive();
   }
 
   /**
@@ -137,7 +141,7 @@ export class BethesdaOfflineManager {
    * Lanza un error si se intenta invocar una mutación en el servidor sin conexión o bajo identidad offline de solo lectura.
    */
   public assertCanMutateServer(): void {
-    if (!this.isOnline() || this.offlineReadOnlySessionActive) {
+    if (!this.isOnline() || this.isOfflineReadOnlySessionActive()) {
       throw new OfflineStorageError(
         'UNAUTHORIZED_SESSION',
         'Operación denegada: Bethesda Worship Studio se encuentra en Modo Sin Conexión (Solo Lectura). Las modificaciones canónicas requieren conexión con el servidor.'
@@ -1020,6 +1024,7 @@ export class BethesdaOfflineManager {
     // 2. Revocar object URLs activas en memoria y limpiar identidad de sesión offline (WS-2D-01 Salvaguarda E)
     this.revokeAudioObjectUrls();
     this.offlineReadOnlySessionActive = false;
+    setOfflineReadOnlyMutationGuard(false);
     clearOfflineSessionIdentity();
 
     if (!userId) {

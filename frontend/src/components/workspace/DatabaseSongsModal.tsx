@@ -135,26 +135,17 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
         : '4/4';
       const defaultBpm = activeSong.timeline.tempoMap.events[0]?.bpm ?? 120;
 
-      const res = await fetch('http://localhost:3001/api/v1/songs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: activeSong.title,
-          defaultKey,
-          defaultBpm,
-          timeSignature,
-          status: 'APPROVED',
-          sourceFormat:
-            (activeSong.metadata?.sourceFormat as any) ??
-            (activeSong.getAllNotes().length === 0 ? 'CHORD_PRO' : 'MUSIC_XML'),
-          canonicalPayload: activeSong.toJSON(),
-        }),
+      await client.createSong({
+        title: activeSong.title,
+        defaultKey,
+        defaultBpm,
+        timeSignature,
+        status: 'APPROVED',
+        sourceFormat:
+          (activeSong.metadata?.sourceFormat as any) ??
+          (activeSong.getAllNotes().length === 0 ? 'CHORD_PRO' : 'MUSIC_XML'),
+        canonicalPayload: activeSong.toJSON(),
       });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson?.error?.message ?? `HTTP ${res.status}`);
-      }
 
       setSuccessMsg(`¡Canción "${activeSong.title}" guardada exitosamente en PostgreSQL!`);
       await loadData();

@@ -7,11 +7,13 @@
  * - Los componentes de renderizado musical (AlphaTab, OSMD, LeadSheetDOM) NO deben importar este contexto.
  * - La seguridad permanece confinada a la capa de aplicación y entorno de usuario.
  *
- * SALVAGUARDAS WS-2D-01 (DEC-2D-04):
+ * SALVAGUARDAS WS-2D-01 (DEC-2D-04 + Remediación de Seguridad):
  * - Cero persistencia de tokens o secretos en almacenamiento local.
+ * - Transición atómica a modo sin conexión (Finding B): activa primero la compuerta de bloqueo de mutaciones,
+ *   incrementa `authEpochRef`, cancela el refresco silencioso y limpia el access token en memoria (`tokenManager.clearToken()`).
  * - Modo estricto de solo lectura cuando `isOfflineSession === true` (`canManageUsers = false`).
- * - Reconciliación obligatoria con el servidor al recuperar conectividad (`online`).
- * - Protección contra condiciones de carrera mediante contador monotónico `authEpochRef`.
+ * - Reconciliación obligatoria con el servidor al recuperar conectividad (`online`), manteniendo el modo de solo lectura
+ *   mientras la validación del servidor está pendiente.
  * - Aislamiento de usuario en dispositivos compartidos y soporte garantizado de `logout()` sin conexión.
  */
 
@@ -53,7 +55,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [isOfflineSession, setIsOfflineSession] = useState<boolean>(false);
   const [lastLogoutResult, setLastLogoutResult] = useState<LogoutExecutionResult | null>(null);
 
-  // Contador monotónico para prevenir condiciones de carrera entre initSession, refresh, reconexión y logout
+  // Contador monotónico para prevenir condiciones de carrera entre initSession, refresh, offline, reconexión y logout
   const authEpochRef = useRef<number>(0);
   const isMountedRef = useRef<boolean>(true);
 
@@ -61,7 +63,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   /**
    * Intenta restaurar el contexto de interfaz en modo estricto de solo lectura
-   * a partir de `OfflineSessionIdentity` (Salvaguardas A, B, D y G).
+   * a partir de `OfflineSessionIdentity` (Salvaguardas A, B, D, G y Finding B).
    * Jamás extiende `lastAuthenticatedAt` ni otorga permisos administrativos.
    */
   const tryRestoreOfflineIdentity = useCallback((expectedEpoch: number): AuthUser | null => {
@@ -69,11 +71,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       return null;
     }
 
+    // Activar compuerta de bloqueo de mutaciones y limpiar cualquier token en memoria
+    offlineManager.setOfflineReadOnlySessionActive(true);
+    tokenManager.cancelSilentRefresh();
     tokenManager.clearToken();
+
     const validIdentity = loadValidOfflineSessionIdentity();
 
     if (!validIdentity) {
-      offlineManager.setOfflineReadOnlySessionActive(false);
+      offlineManager.setOfflineReadOnlySessionActive(!offlineManager.isOnline());
       setIsOfflineSession(false);
       setUser(null);
       setAuthStatus('UNAUTHENTICATED');
@@ -81,7 +87,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
 
     const restoredUser = toReadOnlyAuthUser(validIdentity);
-    offlineManager.setOfflineReadOnlySessionActive(true);
     setIsOfflineSession(true);
     setUser(restoredUser);
     setAuthStatus('AUTHENTICATED');
@@ -101,7 +106,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     try {
       const response = await apiClient.refreshSession();
-      if (!isMountedRef.current || myEpoch !== authEpochRef.current) {
+      if (!isMountedRef.current || myEpoch !== authEpochRef.current || !offlineManager.isOnline()) {
+        tokenManager.clearToken();
         return null;
       }
 
@@ -109,7 +115,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const previousStoredUserId = peekStoredOfflineIdentityUserId();
       if (previousStoredUserId && previousStoredUserId !== response.user?.id) {
         await offlineManager.purgeSessionData(previousStoredUserId).catch(() => {});
-        if (!isMountedRef.current || myEpoch !== authEpochRef.current) {
+        if (!isMountedRef.current || myEpoch !== authEpochRef.current || !offlineManager.isOnline()) {
+          tokenManager.clearToken();
           return null;
         }
       }
@@ -190,19 +197,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
   }, [performSilentRefresh]);
 
-  // 2. Salvaguarda C: Reconciliar con el servidor al recuperar conectividad (`online`) y degradar a solo lectura al perderla (`offline`)
+  // 2. Salvaguarda C & Finding B: Transición atómica a modo offline y reconciliación al reconectar (`online`)
   useEffect(() => {
     const handleOnline = () => {
-      // Nunca promover silenciosamente una identidad offline sin validar contra el servidor
+      // Mantener la compuerta de solo lectura activa y sin token hasta que el servidor confirme la sesión
+      offlineManager.setOfflineReadOnlySessionActive(true);
+      tokenManager.clearToken();
       performSilentRefresh().catch(() => {});
     };
 
     const handleOffline = () => {
+      // Transición atómica y fail-closed a modo sin conexión (Finding B):
+      // 1. Activar inmediatamente la compuerta de mutación al servidor
+      offlineManager.setOfflineReadOnlySessionActive(true);
+      // 2. Incrementar epoch para invalidar cualquier refresco asíncrono en vuelo
+      const offlineEpoch = ++authEpochRef.current;
+      // 3. Cancelar refresco silencioso y limpiar el access token en memoria
       tokenManager.cancelSilentRefresh();
-      if (user !== null) {
-        offlineManager.setOfflineReadOnlySessionActive(true);
-        setIsOfflineSession(true);
-      }
+      tokenManager.clearToken();
+      // 4. Preservar únicamente la identidad local previamente validada dentro de los 7 días de gracia
+      tryRestoreOfflineIdentity(offlineEpoch);
     };
 
     if (typeof window !== 'undefined') {
@@ -216,13 +230,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         window.removeEventListener('offline', handleOffline);
       }
     };
-  }, [performSilentRefresh, user]);
+  }, [performSilentRefresh, tryRestoreOfflineIdentity]);
 
   /**
    * Iniciar sesión con correo y contraseña.
    */
   const login = useCallback(
     async (email: string, password: string): Promise<AuthUser> => {
+      offlineManager.assertCanMutateServer();
       const loginEpoch = ++authEpochRef.current;
       const response = await apiClient.login(email, password);
 
@@ -232,7 +247,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         await offlineManager.purgeSessionData(previousUserId).catch(() => {});
       }
 
-      if (!isMountedRef.current || loginEpoch !== authEpochRef.current) {
+      if (!isMountedRef.current || loginEpoch !== authEpochRef.current || !offlineManager.isOnline()) {
+        tokenManager.clearToken();
         return response.user;
       }
 

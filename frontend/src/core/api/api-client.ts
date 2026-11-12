@@ -9,6 +9,12 @@
 import { CanonicalMusicPayload, type CanonicalMusicPayloadJSON } from '../canonical-model/index.ts';
 import { tokenManager } from '../auth/token-manager.ts';
 import type { AuthResponseData, UserRole, AccountStatus } from '../auth/types.ts';
+import {
+  assertServerMutationAllowed,
+  isMutatingHttpMethod,
+  isClientCurrentlyOnline,
+  isOfflineReadOnlyMutationGuardActive,
+} from '../offline/offline-session-identity.ts';
 import { ApiError } from './api-error.ts';
 import type {
   CreateSetlistItemPayload,
@@ -94,9 +100,15 @@ export class BethesdaApiClient {
   }
 
   /**
-   * Petición HTTP con inyección automática de Bearer token y soporte de renovación silenciosa ante 401.
+   * Petición HTTP con inyección automática de Bearer token, compuerta centralizada fail-closed
+   * contra mutaciones en modo offline (Finding C) y soporte de renovación silenciosa ante 401.
    */
   public async fetchWithAuth(input: string, init?: RequestInit): Promise<Response> {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (isMutatingHttpMethod(method)) {
+      assertServerMutationAllowed(method, input);
+    }
+
     const url = input.startsWith('http') ? input : `${this.baseUrl}${input.startsWith('/') ? '' : '/'}${input}`;
     const headers = new Headers(init?.headers);
 
@@ -113,10 +125,19 @@ export class BethesdaApiClient {
 
     let response = await fetch(url, requestInit);
 
-    // Si el servidor responde 401 y no es ya una petición de auth, intentar refrescar una vez
-    if (response.status === 401 && !input.includes('/auth/')) {
+    // Si el servidor responde 401 y no es ya una petición de auth, intentar refrescar una vez (solo si sigue en línea y fuera de guardia offline)
+    if (
+      response.status === 401 &&
+      !input.includes('/auth/') &&
+      isClientCurrentlyOnline() &&
+      !isOfflineReadOnlyMutationGuardActive()
+    ) {
       try {
         const refreshData = await this.refreshSession();
+        if (!isClientCurrentlyOnline() || isOfflineReadOnlyMutationGuardActive()) {
+          tokenManager.clearToken();
+          return response;
+        }
         tokenManager.setToken(refreshData.accessToken, refreshData.expiresIn);
 
         // Reintentar la solicitud original con el nuevo token
@@ -250,6 +271,33 @@ export class BethesdaApiClient {
     if (!res.ok) {
       throw new Error(`Error al obtener canción '${songId}': HTTP ${res.status}`);
     }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Crea y persiste una canción canónica en el catálogo del servidor (Finding C: ruta centralizada vía fetchWithAuth).
+   */
+  public async createSong(payload: {
+    title: string;
+    defaultKey: string;
+    defaultBpm: number;
+    timeSignature: string;
+    status?: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+    sourceFormat: 'MUSIC_XML' | 'CHORD_PRO' | 'INTERNAL' | 'PDF' | 'IMAGE';
+    canonicalPayload: CanonicalMusicPayloadJSON;
+  }): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth('/songs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson?.error?.message ?? `HTTP ${res.status}`);
+    }
+
     const json = await res.json();
     return json.data;
   }

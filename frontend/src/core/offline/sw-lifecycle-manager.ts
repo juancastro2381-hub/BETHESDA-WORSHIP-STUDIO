@@ -1,18 +1,23 @@
 /**
  * @file sw-lifecycle-manager.ts
  * @description Coordinador determinista del ciclo de vida del Service Worker v2,
- * protocolo de precalentamiento de recursos (PRECACHE_ASSETS) y protección de escenario
- * en vivo frente a actualizaciones disruptivas (Fase 2D — WS-2D-01).
+ * protocolo de precalentamiento de recursos (PRECACHE_ASSETS), aislamiento de propiedad
+ * de caché (`bethesda-worship-studio-shell-*`) y protección de escenario en vivo frente a
+ * actualizaciones disruptivas (Fase 2D — WS-2D-01).
  *
  * REGLAS DE ARQUITECTURA Y SEGURIDAD (WS-2D-01):
- * 1. Caché versionado `bethesda-worship-studio-shell-v2` con purga determinista de versiones previas (`v1`).
+ * 1. Caché versionado `bethesda-worship-studio-shell-v2` con purga estrictamente acotada al prefijo
+ *    propio `bethesda-worship-studio-shell-` (Finding A: preserva cachés de otras aplicaciones o módulos en el mismo origen).
  * 2. Protocolo `PRECACHE_ASSETS` filtrado estrictamente mediante `isCacheEligibleRequestResponse` y `resolveEligiblePrecacheAssetUrl`.
- * 3. Jamás almacenar respuestas de `/api/` ni recursos con esquemas no HTTP(S) o tokens en parámetros.
+ * 3. Validación de parámetros de consulta endurecida con `URLSearchParams` y decodificación porcentual iterativa
+ *    para rechazar parámetros sensibles (`token`, `access_token`, `refresh_token`, `password`, `secret`, `authorization`,
+ *    `credential`, `api_key`, `apikey`, `jwt`, `bearer`, `session`).
  * 4. Handshake controlado `SKIP_WAITING`: diferir obligatoriamente cualquier activación de SW mientras
  *    `loadedSetlist?.status === 'ACTIVE'` o `isMusicStandMode === true`.
  * 5. Limpieza determinista de listeners y suscripciones para evitar fugas de memoria o prompts competitivos.
  */
 
+export const BETHESDA_SW_CACHE_PREFIX = 'bethesda-worship-studio-shell-';
 export const SW_SHELL_CACHE_NAME_V1 = 'bethesda-worship-studio-shell-v1';
 export const SW_SHELL_CACHE_NAME_V2 = 'bethesda-worship-studio-shell-v2';
 
@@ -29,6 +34,23 @@ export const ALLOWED_EXTERNAL_FONT_ORIGINS: readonly string[] = [
   'https://fonts.gstatic.com',
 ] as const;
 
+export const FORBIDDEN_SENSITIVE_QUERY_PARAM_NAMES: readonly string[] = [
+  'token',
+  'access_token',
+  'accesstoken',
+  'refresh_token',
+  'refreshtoken',
+  'password',
+  'secret',
+  'authorization',
+  'credential',
+  'api_key',
+  'apikey',
+  'jwt',
+  'bearer',
+  'session',
+] as const;
+
 export const MAX_PRECACHE_ASSET_URLS = 64;
 
 export interface CacheEligibleRequestLike {
@@ -38,7 +60,7 @@ export interface CacheEligibleRequestLike {
 
 export interface CacheEligibleResponseLike {
   readonly status: number;
-  readonly type: 'basic' | 'cors' | 'opaque' | 'error' | ' opaqueredirect' | string;
+  readonly type: 'basic' | 'cors' | 'opaque' | 'error' | 'opaqueredirect' | string;
 }
 
 export interface PostMessageWorkerLike {
@@ -79,6 +101,116 @@ export interface PrecacheProtocolExecutionResult {
   readonly rejected: string[];
 }
 
+export interface CacheCleanupExecutionResult {
+  readonly deletedCaches: string[];
+  readonly retainedCaches: string[];
+  readonly failedDeletes: string[];
+  readonly retainedCache: string;
+}
+
+/**
+ * Decodifica iterativamente una cadena codificada con porcentaje (hasta 3 pasadas)
+ * y la normaliza a minúsculas para impedir evasiones mediante `%XX` o mayúsculas/minúsculas mixtas.
+ * Retorna `null` si la codificación porcentual es inválida (Fail-Closed).
+ */
+export function decodeAndNormalizeQueryParamComponent(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
+  let current = raw.replace(/\+/g, ' ');
+  for (let i = 0; i < 3; i++) {
+    try {
+      const decoded = decodeURIComponent(current);
+      if (decoded === current) break;
+      current = decoded;
+    } catch {
+      return null;
+    }
+  }
+  return current.trim().toLowerCase();
+}
+
+/**
+ * Evalúa si un nombre de parámetro normalizado coincide o contiene alguno de los
+ * nombres de credenciales/sesión prohibidos (`token`, `access_token`, `refresh_token`,
+ * `password`, `secret`, `authorization`, `credential`, `api_key`, `apikey`, `jwt`, `bearer`, `session`).
+ */
+export function isForbiddenSensitiveQueryParamName(normalizedKey: string | null): boolean {
+  if (!normalizedKey) return true;
+  const canonicalSnake = normalizedKey.replace(/[-\s.]+/g, '_');
+  const canonicalCompact = canonicalSnake.replace(/_/g, '');
+
+  for (const forbidden of FORBIDDEN_SENSITIVE_QUERY_PARAM_NAMES) {
+    const forbiddenCompact = forbidden.replace(/_/g, '');
+    if (
+      canonicalSnake === forbidden ||
+      canonicalCompact === forbiddenCompact ||
+      canonicalSnake.includes(forbidden) ||
+      canonicalCompact.includes(forbiddenCompact)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Inspecciona de forma robusta los parámetros de consulta de una URL utilizando tanto
+ * el análisis de segmentos crudos (para detectar doble codificación o `%` malformado)
+ * como `URLSearchParams`. Nunca registra ni expone valores sensibles.
+ */
+export function hasForbiddenSensitiveQueryParams(parsedUrl: URL | null | undefined): boolean {
+  if (!parsedUrl || !parsedUrl.search || parsedUrl.search.length <= 1) {
+    return false;
+  }
+
+  // 1. Inspeccionar pares crudos antes de URLSearchParams
+  const rawSearch = parsedUrl.search.startsWith('?') ? parsedUrl.search.slice(1) : parsedUrl.search;
+  const rawSegments = rawSearch.split('&');
+  for (const segment of rawSegments) {
+    if (!segment) continue;
+    const eqIndex = segment.indexOf('=');
+    const rawKey = eqIndex >= 0 ? segment.slice(0, eqIndex) : segment;
+    const rawVal = eqIndex >= 0 ? segment.slice(eqIndex + 1) : '';
+
+    const normalizedKey = decodeAndNormalizeQueryParamComponent(rawKey);
+    if (normalizedKey === null || isForbiddenSensitiveQueryParamName(normalizedKey)) {
+      return true;
+    }
+
+    const normalizedVal = decodeAndNormalizeQueryParamComponent(rawVal);
+    if (normalizedVal === null) {
+      return true;
+    }
+    if (
+      normalizedVal.startsWith('bearer ') ||
+      /^eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$/i.test(normalizedVal)
+    ) {
+      return true;
+    }
+  }
+
+  // 2. Inspeccionar mediante URLSearchParams estándar
+  const searchParams = new URLSearchParams(parsedUrl.search);
+  for (const [paramKey, paramValue] of searchParams.entries()) {
+    const normalizedKey = decodeAndNormalizeQueryParamComponent(paramKey);
+    if (normalizedKey === null || isForbiddenSensitiveQueryParamName(normalizedKey)) {
+      return true;
+    }
+
+    const normalizedVal = decodeAndNormalizeQueryParamComponent(paramValue);
+    if (normalizedVal === null) {
+      return true;
+    }
+    if (
+      normalizedVal.startsWith('bearer ') ||
+      /^eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$/i.test(normalizedVal)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * Valida si un par Request/Response cumple las reglas de seguridad de `isCacheEligible`
  * para el caché del App Shell (`bethesda-worship-studio-shell-v2`).
@@ -94,13 +226,15 @@ export function isCacheEligibleRequestResponse(
   if (response.status !== 200) return false;
   if (response.type !== 'basic' && response.type !== 'cors') return false;
   if (url.pathname.startsWith('/api/')) return false;
+  if (hasForbiddenSensitiveQueryParams(url)) return false;
   return true;
 }
 
 /**
  * Resuelve y filtra preventivamente una URL candidata para `PRECACHE_ASSETS`.
  * Rechaza esquemas no soportados (`chrome-extension:`, `blob:`, `data:`, `file:`, `about:`),
- * endpoints `/api/`, orígenes externos no autorizados y parámetros con credenciales/tokens.
+ * endpoints `/api/`, orígenes externos no autorizados y parámetros con credenciales/tokens
+ * (incluyendo nombres codificados en porcentaje o con capitalización mixta).
  */
 export function resolveEligiblePrecacheAssetUrl(
   rawUrl: unknown,
@@ -150,15 +284,8 @@ export function resolveEligiblePrecacheAssetUrl(
     return null;
   }
 
-  // Prohibir parámetros de consulta sensibles
-  const lowerSearch = parsedUrl.search.toLowerCase();
-  if (
-    lowerSearch.includes('token=') ||
-    lowerSearch.includes('password=') ||
-    lowerSearch.includes('secret=') ||
-    lowerSearch.includes('authorization=') ||
-    lowerSearch.includes('credential=')
-  ) {
+  // Prohibir parámetros de consulta sensibles usando URLSearchParams + decodificación porcentual
+  if (hasForbiddenSensitiveQueryParams(parsedUrl)) {
     return null;
   }
 
@@ -224,7 +351,28 @@ export async function executePrecacheAssetsProtocol(
 }
 
 /**
- * Purga cachés obsoletos (como `bethesda-worship-studio-shell-v1`) durante la activación de `v2`.
+ * Determina si una clave de la Cache API pertenece demostrablemente a una versión obsoleta
+ * del App Shell de Bethesda Worship Studio (`bethesda-worship-studio-shell-*`).
+ *
+ * REGLA DE PROPIEDAD (Finding A):
+ * - Debe ser una cadena que comience con `BETHESDA_SW_CACHE_PREFIX` (`'bethesda-worship-studio-shell-'`).
+ * - Debe ser distinta de `activeCacheName` (`'bethesda-worship-studio-shell-v2'`).
+ * - Cualquier caché de otra aplicación o módulo en el mismo origen que no comience con dicho prefijo
+ *   retorna `false` y jamás es eliminado por el Service Worker.
+ */
+export function isOwnedObsoleteShellCache(
+  cacheKey: unknown,
+  activeCacheName: string = SW_SHELL_CACHE_NAME_V2
+): boolean {
+  if (typeof cacheKey !== 'string') return false;
+  if (!cacheKey.startsWith(BETHESDA_SW_CACHE_PREFIX)) return false;
+  return cacheKey !== activeCacheName;
+}
+
+/**
+ * Purga únicamente los cachés obsoletos pertenecientes al App Shell de Bethesda Worship Studio
+ * (como `bethesda-worship-studio-shell-v1`) durante la activación de `v2`, preservando
+ * cualquier caché ajeno o de otros módulos alojados en el mismo origen (Finding A).
  */
 export async function cleanupLegacyServiceWorkerCaches(
   cacheStorage: {
@@ -232,21 +380,44 @@ export async function cleanupLegacyServiceWorkerCaches(
     delete: (cacheName: string) => Promise<boolean>;
   },
   activeCacheName: string = SW_SHELL_CACHE_NAME_V2
-): Promise<{ deletedCaches: string[]; retainedCache: string }> {
-  const allKeys = await cacheStorage.keys();
+): Promise<CacheCleanupExecutionResult> {
   const deletedCaches: string[] = [];
+  const retainedCaches: string[] = [];
+  const failedDeletes: string[] = [];
+
+  let allKeys: string[] = [];
+  try {
+    allKeys = await cacheStorage.keys();
+  } catch {
+    return {
+      deletedCaches,
+      retainedCaches,
+      failedDeletes,
+      retainedCache: activeCacheName,
+    };
+  }
 
   for (const key of allKeys) {
-    if (key !== activeCacheName) {
-      const removed = await cacheStorage.delete(key);
-      if (removed) {
-        deletedCaches.push(key);
+    if (isOwnedObsoleteShellCache(key, activeCacheName)) {
+      try {
+        const removed = await cacheStorage.delete(key);
+        if (removed) {
+          deletedCaches.push(key);
+        } else {
+          failedDeletes.push(key);
+        }
+      } catch {
+        failedDeletes.push(key);
       }
+    } else {
+      retainedCaches.push(key);
     }
   }
 
   return {
     deletedCaches,
+    retainedCaches,
+    failedDeletes,
     retainedCache: activeCacheName,
   };
 }

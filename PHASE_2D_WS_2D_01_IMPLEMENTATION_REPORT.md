@@ -1,13 +1,14 @@
 # BETHESDA WORSHIP STUDIO — PHASE 2D — WS-2D-01
 # PWA HARDENING, OFFLINE COLD-BOOT & SECURE SESSION CONTINUITY
-## IMPLEMENTATION & SECURITY AUDIT REPORT
+## IMPLEMENTATION, SECURITY REMEDIATION & AUDIT REPORT
 
 **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`  
 **Branch:** `feature/phase-1a-core-foundation`  
 **Accepted Phase 2C Baseline:** `570902fa346e0b2d6a681d55e5348b8681a41b29`  
 **Approved Phase 2D Preflight Commit:** `1d78ffcbaaba0b76d0c4c37dca4d12978b363d35`  
+**Initial WS-2D-01 Implementation Commit:** `6a46fa93d91ed5d98801950da5d12e8572e270af`  
 **Workstream Scope:** `WS-2D-01` Exclusively (`WS-2D-02`, `WS-2D-03`, and `WS-2D-04` strictly excluded)  
-**Exit Gate Determination:** **CONDITIONAL PASS — MANUAL VALIDATION REQUIRED**
+**Exit Gate Determination:** **CONDITIONAL PASS — MANUAL PHYSICAL DEVICE VALIDATION REQUIRED**
 
 ---
 
@@ -20,7 +21,7 @@ All four formal Project Owner decisions are recorded below with strict workstrea
 | **`DEC-2D-01`** | **Option A** | **Smart Stage Paging:** Next/Previous actions advance by one viewport (`85%` of container height) until the bottom of the current song is reached; only when already at the bottom does `NEXT` advance to item `N+1` in the setlist. | Assigned to **`WS-2D-04`**. Recorded only; **not implemented in `WS-2D-01`**. |
 | **`DEC-2D-02`** | **Option A** | **Spacebar Stage Ergonomics:** `Space` controls Autoscroll Play/Pause while viewing a song; `ArrowRight` / `PageDown` and `ArrowLeft` / `PageUp` control forward/backward navigation. | Assigned to **`WS-2D-03` / `WS-2D-04`**. Recorded only; **not implemented in `WS-2D-01`**. |
 | **`DEC-2D-03`** | **Option A** | **Automatic Active Setlist Caching:** Automatically cache the active/loaded setlist and its associated canonical songs (`includeSongs: true`, `includeAudio: false`). | Assigned to **`WS-2D-02`**. Recorded only; **not implemented in `WS-2D-01`**. |
-| **`DEC-2D-04`** | **Option A** | **Secure Offline Session Identity (`OfflineSessionIdentity`):** Persist a non-sensitive offline session identity (`userId`, `email`, `fullName`, `role`, `lastAuthenticatedAt`) subject to all mandatory security safeguards (Sections 3.3 & 3.4). | Assigned to **`WS-2D-01`**. **Implemented and verified in this execution.** |
+| **`DEC-2D-04`** | **Option A** | **Secure Offline Session Identity (`OfflineSessionIdentity`):** Persist a non-sensitive offline session identity (`userId`, `email`, `fullName`, `role`, `lastAuthenticatedAt`) subject to all mandatory security safeguards (Sections 3.3 & 3.4). | Assigned to **`WS-2D-01`**. **Implemented, hardened, and verified in this execution.** |
 
 ---
 
@@ -28,51 +29,67 @@ All four formal Project Owner decisions are recorded below with strict workstrea
 
 ### Created Files
 1. `frontend/public/fonts/Bravura.woff2` (`313,348` bytes) — Same-origin SMuFL musical notation font asset bundled into the static App Shell for deterministic offline score rendering.
-2. `frontend/src/core/offline/sw-lifecycle-manager.ts` — Deterministic Service Worker v2 lifecycle coordinator, `PRECACHE_ASSETS` protocol validator/executor, legacy cache cleanup helper, DOM shell asset discovery, and live stage protection state machine (`isSetlistActive || isMusicStandMode`).
-3. `frontend/src/core/offline/offline-session-identity.ts` — Strict schema validator, storage persistence, 7-day grace period + clock-skew evaluator, and `OfflineAuthLifecycleController` state machine with monotonic `epoch` race-condition protection.
-4. `frontend/src/core/offline/__tests__/pwa-lifecycle-and-offline-boot.test.ts` — 15-test automated unit suite covering all required `WS-2D-01` Service Worker v2, `PRECACHE_ASSETS`, stage deferral, `OfflineSessionIdentity`, shared-device isolation, offline logout, and server reconnection scenarios.
+2. `frontend/src/core/offline/sw-lifecycle-manager.ts` — Deterministic Service Worker v2 lifecycle coordinator, `PRECACHE_ASSETS` protocol validator/executor with URLSearchParams + percent-decoding inspection, owned-namespace legacy cache cleanup helper (`BETHESDA_SW_CACHE_PREFIX = 'bethesda-worship-studio-shell-'`), DOM shell asset discovery, and live stage protection state machine (`isSetlistActive || isMusicStandMode`).
+3. `frontend/src/core/offline/offline-session-identity.ts` — Strict schema validator, storage persistence, 7-day grace period + clock-skew evaluator, centralized fail-closed server mutation gate (`assertServerMutationAllowed`), and `OfflineAuthLifecycleController` state machine with atomic `transitionToOfflineMode()` and monotonic `epoch` race-condition protection.
+4. `frontend/src/core/offline/__tests__/pwa-lifecycle-and-offline-boot.test.ts` — 18-test automated unit suite covering all required `WS-2D-01` Service Worker v2, cache ownership isolation, `PRECACHE_ASSETS` encoded parameter hardening, stage deferral, `OfflineSessionIdentity`, atomic offline token invalidation, centralized server mutation gating across all API and realtime write operations, shared-device isolation, offline logout, and server reconnection scenarios.
 5. `PHASE_2D_WS_2D_01_IMPLEMENTATION_REPORT.md` & `docs/PHASE_2D_WS_2D_01_IMPLEMENTATION_REPORT.md` (byte-identical).
 6. `PHASE_2D_WS_2D_01_ACCEPTANCE_MATRIX.md` & `docs/PHASE_2D_WS_2D_01_ACCEPTANCE_MATRIX.md` (byte-identical).
 
 ### Modified Files
-1. `frontend/public/sw.js` — Upgraded `CACHE_NAME` to `bethesda-worship-studio-shell-v2`, added `/fonts/Bravura.woff2` to `STATIC_SHELL_ASSETS`, implemented controlled `install` (`skipWaiting` only when no active controller exists) and validated `message` handlers (`SKIP_WAITING` and `PRECACHE_ASSETS`), while preserving `isCacheEligible`, `safelyPutInCache`, URL sanitization, and `/api/v1/` 503 offline handling.
-2. `frontend/src/core/offline/offline-manager.ts` — Integrated `offlineReadOnlySessionActive` guard into `assertCanMutateServer()` and automatic `clearOfflineSessionIdentity()` cleanup inside `purgeSessionData()`.
-3. `frontend/src/core/auth/auth-context.tsx` — Integrated `OfflineSessionIdentity` persistence and restoration across login, silent refresh, offline cold boot, offline F5 reload, online reconnection, and offline/online logout with monotonic `authEpochRef` race-condition protection. Exposed `isOfflineSession`, `isReadOnlyOffline`, and `lastLogoutResult`. Enforced `canManageUsers = false` whenever in an offline read-only session.
-4. `frontend/src/components/auth/UserProfileBadge.tsx` — Added visible `"Modo Offline (Solo Lectura)"` badge when `isOfflineSession` or `isReadOnlyOffline` is active.
-5. `frontend/src/components/offline/OfflineStatusBar.tsx` — Subscribed to `swLifecycleManager` (with unmount cleanup) to expose a single non-competing `"Actualizar App Shell"` action only when `isUpdateReadyToApply === true` (never during an `ACTIVE` setlist or `isMusicStandMode`).
-6. `frontend/src/components/workspace/MusicalWorkspace.tsx` — Synchronized `swLifecycleManager.setStageProtectionState({ isSetlistActive: setlistExecution.loadedSetlist?.status === 'ACTIVE', isMusicStandMode })` and guarded server preference requests/mutations when `isReadOnlyOffline` is active.
-7. `frontend/src/main.tsx` — Connected `/sw.js` registration and `controllerchange` events to `swLifecycleManager`.
+1. `frontend/public/sw.js` — Upgraded `CACHE_NAME` to `bethesda-worship-studio-shell-v2` under `BETHESDA_CACHE_PREFIX = 'bethesda-worship-studio-shell-'`, restricted `activate` cache deletion strictly to owned obsolete shell caches (`isOwnedObsoleteShellCache`) with per-entry `try / catch` resilience, added `/fonts/Bravura.woff2` to `STATIC_SHELL_ASSETS`, implemented controlled `install` and validated `message` handlers (`SKIP_WAITING` and `PRECACHE_ASSETS`), and hardened `hasForbiddenSensitiveQueryParams` using `URLSearchParams` + iterative percent-decoding.
+2. `frontend/src/core/offline/offline-manager.ts` — Synchronized `setOfflineReadOnlySessionActive()`, `isOfflineReadOnlySessionActive()`, `isOnline`, and `assertCanMutateServer()` with the centralized fail-closed mutation gate in `offline-session-identity.ts`, and preserved automatic `clearOfflineSessionIdentity()` cleanup inside `purgeSessionData()`.
+3. `frontend/src/core/auth/auth-context.tsx` — Integrated `OfflineSessionIdentity` persistence and restoration across login, silent refresh, offline cold boot, offline F5 reload, atomic live offline transition (`handleOffline`), online reconnection (`handleOnline` keeping read-only mode while server validation is pending), and offline/online logout with monotonic `authEpochRef` race-condition protection. Exposed `isOfflineSession`, `isReadOnlyOffline`, and `lastLogoutResult`. Enforced `canManageUsers = false` whenever in an offline read-only session.
+4. `frontend/src/core/api/api-client.ts` — Enforced centralized fail-closed server mutation gate (`if (isMutatingHttpMethod(method)) { assertServerMutationAllowed(method, input); }`) at the entry point of `fetchWithAuth()` for all `POST`, `PUT`, `PATCH`, and `DELETE` requests, guarded 401 silent refresh retries against offline transitions, and added `createSong()` so all song persistence routes through `fetchWithAuth()`.
+5. `frontend/src/components/workspace/DatabaseSongsModal.tsx` — Eliminated direct `fetch('http://localhost:3001/api/v1/songs', { method: 'POST', ... })` bypass in `handlePersistCurrent` by routing song creation through `client.createSong(...)` -> `fetchWithAuth()`.
+6. `frontend/src/core/realtime/realtime-client.ts` — Enforced `assertServerMutationAllowed('POST', ...)` on `createOrGetSession()` and `dispatchAction()` so realtime session mutations are blocked fail-closed when offline or in an offline read-only session.
+7. `frontend/src/components/auth/UserProfileBadge.tsx` — Added visible `"Modo Offline (Solo Lectura)"` badge when `isOfflineSession` or `isReadOnlyOffline` is active.
+8. `frontend/src/components/offline/OfflineStatusBar.tsx` — Subscribed to `swLifecycleManager` (with unmount cleanup) to expose a single non-competing `"Actualizar App Shell"` action only when `isUpdateReadyToApply === true` (never during an `ACTIVE` setlist or `isMusicStandMode`).
+9. `frontend/src/components/workspace/MusicalWorkspace.tsx` — Synchronized `swLifecycleManager.setStageProtectionState({ isSetlistActive: setlistExecution.loadedSetlist?.status === 'ACTIVE', isMusicStandMode })` and guarded server preference requests/mutations when `isReadOnlyOffline` is active.
+10. `frontend/src/main.tsx` — Connected `/sw.js` registration and `controllerchange` events to `swLifecycleManager`.
 
 ---
 
-## 3. ARCHITECTURE & LIFECYCLE BEHAVIOR IMPLEMENTED
+## 3. CRITICAL SECURITY REMEDIATION SUMMARY
 
-### 3.1 Service Worker v2 (`frontend/public/sw.js`) & `PRECACHE_ASSETS` Protocol
-- **Cache Version Upgrade:** `CACHE_NAME` is upgraded from `bethesda-worship-studio-shell-v1` to `bethesda-worship-studio-shell-v2`. During the `activate` lifecycle event, all cache keys not matching `bethesda-worship-studio-shell-v2` (including `v1`) are deterministically deleted.
-- **Static Shell & Notation Fonts:** `STATIC_SHELL_ASSETS` includes `'/'`, `'/index.html'`, `'/manifest.json'`, `'/worship_studio_saxophone_emblem.png'`, and `'/fonts/Bravura.woff2'`.
-- **Validated `PRECACHE_ASSETS` Protocol:**
-  - Accepts `{ type: 'PRECACHE_ASSETS', urls: string[] }` via `postMessage`.
-  - Pre-validates every candidate URL through `resolveEligiblePrecacheUrl` / `resolveEligiblePrecacheAssetUrl`:
-    - Must be `http:` or `https:`.
-    - Must never target `/api/` or `/api/v1/*`.
-    - Must never contain sensitive query parameters (`token=`, `password=`, `secret=`, `authorization=`, `credential=`).
-    - Must belong to the application origin or authorized static font origins (`https://fonts.googleapis.com`, `https://fonts.gstatic.com`).
-  - Fetches each asset with `GET` and verifies the response with `isCacheEligible(request, response, resolvedUrl)` (`status === 200`, `type === 'basic' || type === 'cors'`) before writing via `safelyPutInCache`.
+### 3.1 Critical Finding A — Service Worker Cache Ownership Isolation
+- **Root Cause:** In the initial `WS-2D-01` implementation, `sw.js` (`activate` listener) and `cleanupLegacyServiceWorkerCaches()` deleted every Cache API entry whose key did not equal `bethesda-worship-studio-shell-v2` (`key !== CACHE_NAME`), which could delete unrelated application or module caches hosted on the same origin.
+- **Exact Correction:**
+  - Defined explicit Bethesda App Shell cache prefix constants: `BETHESDA_CACHE_PREFIX = 'bethesda-worship-studio-shell-'` in `frontend/public/sw.js` and `BETHESDA_SW_CACHE_PREFIX = 'bethesda-worship-studio-shell-'` in `frontend/src/core/offline/sw-lifecycle-manager.ts`.
+  - Implemented `isOwnedObsoleteShellCache(key, activeCacheName)` which returns `true` **only** when `key.startsWith('bethesda-worship-studio-shell-') && key !== activeCacheName`.
+  - Wrapped each `caches.delete(key)` call inside an individual `try / catch` block so a partial deletion error on one obsolete cache never aborts cleanup of remaining obsolete caches or breaks Service Worker activation.
+  - Preserved all unrelated foreign caches (e.g., `other-app-cache-v1`), other module caches (e.g., `bethesda-worship-studio-audio-v1`), the active `bethesda-worship-studio-shell-v2` cache, and all IndexedDB stores (`songs_offline`, `setlists_offline`, `audio_blobs_offline`, `sync_metadata`).
+- **Regression Test Reference:** `pwa-lifecycle-and-offline-boot.test.ts` — **Test 1** (`should upgrade cache name to v2, purge only owned v1 shell caches, and preserve foreign caches`) and **Test 16** (`should isolate cache cleanup to Bethesda shell prefix, remain idempotent, and tolerate partial deletion errors`).
 
-### 3.2 Controlled Service Worker Update Lifecycle & Stage Protection
-- **First Install vs. Update:** In `sw.js`, `self.skipWaiting()` is invoked during `install` **only** when `!self.registration || !self.registration.active` (first installation). When updating an already-controlled client, the new worker remains in `waiting` until it receives `{ type: 'SKIP_WAITING' }`.
-- **Live Stage Protection (`ServiceWorkerLifecycleManager`):**
-  - `MusicalWorkspace` reports `isSetlistActive = (setlistExecution.loadedSetlist?.status === 'ACTIVE')` and `isMusicStandMode` to `swLifecycleManager`.
-  - While `isStageProtected()` (`isSetlistActive || isMusicStandMode`) is `true`:
-    - Any waiting worker is marked `isUpdateDeferred: true` and `isUpdateReadyToApply: false`.
-    - `requestSafeUpdateActivation()` returns `false` and never sends `SKIP_WAITING`.
-    - Displayed song, reading position, and Autoscroll are never interrupted.
-  - When neither condition applies (`isSetlistActive === false && isMusicStandMode === false`), `isUpdateReadyToApply` transitions to `true` and a single non-competing button (`#btn-apply-sw-update`) in `OfflineStatusBar` allows safe activation.
+### 3.2 Critical Finding B — Atomic Offline Transition & Token Invalidation
+- **Root Cause:** When transitioning from an authenticated online session to offline mode via the browser `offline` event (`handleOffline`), the previous implementation set `isOfflineSession = true` and `isReadOnlyOffline = true` when a local `OfflineSessionIdentity` existed, but did not atomically clear the in-memory access token (`tokenManager.clearToken()`), cancel scheduled silent refresh timers, or increment the monotonic auth epoch before activating the offline read-only state. Additionally, during `handleOnline`, `isOfflineSession` had to remain strictly read-only while server revalidation (`refreshSession`) was still pending.
+- **Exact Correction:**
+  - Implemented `transitionToOfflineMode()` in `OfflineAuthLifecycleController` (`frontend/src/core/offline/offline-session-identity.ts`) and hardened `handleOffline` in `AuthProvider` (`frontend/src/core/auth/auth-context.tsx`) to execute in strict fail-closed order:
+    1. Activate the centralized server-mutation guard (`setOfflineReadOnlyMutationGuard(true)` / `offlineManager.setOfflineReadOnlySessionActive(true)`).
+    2. Increment the monotonic epoch counter (`++this.currentEpoch` / `++authEpochRef.current`) so any in-flight refresh promise is discarded.
+    3. Cancel scheduled silent refresh (`tokenManager.cancelSilentRefresh()`) and immediately purge the in-memory access token (`tokenManager.clearToken()`).
+    4. Restore only the previously validated local `OfflineSessionIdentity` (within the 7-day grace window, without extending `lastAuthenticatedAt`), or fail closed to `UNAUTHENTICATED` (`user: null`) if none is valid.
+  - Hardened `reconcileOnReconnect()` and `handleOnline` so that while `refreshSession()` is in flight, `isOfflineSession: true`, `isReadOnlyOffline: true`, `tokenManager.getToken() === null`, and the mutation guard remain active until the server confirms an `ACTIVE` account without `mustChangePassword`.
+- **Regression Test Reference:** `pwa-lifecycle-and-offline-boot.test.ts` — **Test 17** (`should atomically clear in-memory access token on offline transition and keep read-only state while reconnect validation is pending`).
 
-### 3.3 `OfflineSessionIdentity` & Authentication Lifecycle Coordination
-- **Schema (`bethesda_offline_session_identity_v1`):**
-  - Contains **exclusively** 5 non-sensitive keys: `userId`, `email`, `fullName`, `role`, `lastAuthenticatedAt`.
-  - Any unexpected key, credential key pattern (`token`, `access`, `refresh`, `password`, `secret`, `cookie`, `credential`, `authorization`, `bearer`, `jwt`), or JWT-formatted value is immediately rejected and purged from storage.
+### 3.3 Critical Finding C — Complete Server Mutation Gate Audit
+- **Root Cause:** Although `offlineManager.assertCanMutateServer()` existed, `BethesdaApiClient.fetchWithAuth()` did not invoke a centralized mutation gate before sending `POST`, `PUT`, `PATCH`, or `DELETE` requests, `DatabaseSongsModal.tsx` contained a raw `fetch('http://localhost:3001/api/v1/songs', { method: 'POST', ... })` call bypassing `BethesdaApiClient`, and `RealtimeClient` executed `POST` requests directly via `fetch()`.
+- **Exact Correction:**
+  - Audited every `fetch(` invocation across `frontend/src/`.
+  - Implemented a centralized, fail-closed server mutation gate (`assertServerMutationAllowed(method, endpoint)`) in `frontend/src/core/offline/offline-session-identity.ts` and synchronized it with `BethesdaOfflineManager`.
+  - Enforced `if (isMutatingHttpMethod(method)) { assertServerMutationAllowed(method, input); }` at the top of `BethesdaApiClient.fetchWithAuth()` (`frontend/src/core/api/api-client.ts`), automatically gating all API write operations across songs (`createSong`, `importAndPersist`), setlists (`createSetlist`, `updateSetlist`, `deleteSetlist`, `updateSetlistStatus`, `addSetlistItem`, `updateSetlistItem`, `deleteSetlistItem`, `reorderSetlist`, `duplicateSetlist`), worship services (`createWorshipService`, `updateWorshipService`, `deleteWorshipService`), user preferences (`updateUserPreferences`), and administration (`inviteUser`, `resendInvitation`, `changeUserRole`, `disableUser`, `enableUser`, `changeInitialPassword`).
+  - Replaced the raw `fetch('http://localhost:3001/api/v1/songs', { method: 'POST', ... })` in `DatabaseSongsModal.tsx` with `await client.createSong(...)`.
+  - Added `assertServerMutationAllowed('POST', ...)` to `RealtimeClient.createOrGetSession()` and `RealtimeClient.dispatchAction()` (`frontend/src/core/realtime/realtime-client.ts`).
+  - Confirmed zero offline mutation queues exist; rejected writes fail immediately and deterministically with `OfflineStorageError('UNAUTHORIZED_SESSION')`.
+- **Regression Test Reference:** `pwa-lifecycle-and-offline-boot.test.ts` — **Test 18** (`should enforce centralized fail-closed server mutation gate across all mutating API and realtime operations while allowing read-only GETs`).
+
+### 3.4 Additional Hardening — Precache URL Parameter Validation (Section 5)
+- **Root Cause:** Simple substring checks on raw query strings could be bypassed by URL-encoded characters (e.g., `%74oken`, `access%5Ftoken`) or additional credential parameter names (`api_key`, `apikey`, `jwt`, `bearer`, `session`).
+- **Exact Correction:**
+  - Implemented `decodeAndNormalizeQueryParamComponent`, `isForbiddenSensitiveQueryParamName`, and `hasForbiddenSensitiveQueryParams` in both `frontend/public/sw.js` and `frontend/src/core/offline/sw-lifecycle-manager.ts`.
+  - Uses `URLSearchParams` plus raw query-segment splitting and up to 3 passes of `decodeURIComponent` (failing closed immediately if malformed `%` encoding throws `URIError`).
+  - Normalizes case and separators to reject at minimum: `token`, `access_token`, `refresh_token`, `password`, `secret`, `authorization`, `credential`, `api_key`, `apikey`, `jwt`, `bearer`, and `session` (including any parameter name containing those tokens or value containing a JWT/Bearer credential), without logging sensitive values.
+  - Preserves safe non-sensitive query parameters such as `?v=2.0.1` and Google Fonts `?family=Inter:wght@400;600&display=swap`.
+- **Regression Test Reference:** `pwa-lifecycle-and-offline-boot.test.ts` — **Test 3** (`should strictly reject /api/ endpoints, sensitive query params, encoded/mixed-case params, and malformed URLs in PRECACHE_ASSETS`).
 
 ---
 
@@ -80,9 +97,9 @@ All four formal Project Owner decisions are recorded below with strict workstrea
 
 | Safeguard | Requirement | Implementation Mechanism |
 | :--- | :--- | :--- |
-| **Safeguard A** | Offline identity is UI continuity only, not server authentication | `tokenManager.getToken()` remains `null` during offline sessions. `OfflineSessionIdentity` never authorizes API writes, role changes, or administrative operations. |
-| **Safeguard B** | Strict read-only mode when offline identity is active | `isOfflineSession = true`, `isReadOnlyOffline = true`, and `canManageUsers = false` (even for `SUPER_ADMIN` / `ADMIN`). `offlineManager.assertCanMutateServer()` and `controller.assertOnlineServerMutationAllowed()` throw `OfflineStorageError('UNAUTHORIZED_SESSION')`. Zero mutation queues exist. |
-| **Safeguard C** | Server remains source of truth on reconnection | On `window` `online` event, `AuthProvider` invokes `performSilentRefresh()` (and `OfflineAuthLifecycleController` invokes `reconcileOnReconnect()`). If the network fails transiently, the session remains strictly in offline read-only mode and is **never** silently promoted. If the server returns `401`/`403` or non-`ACTIVE` status, `OfflineSessionIdentity` and private IndexedDB data (`purgeSessionData`) are invalidated immediately. |
+| **Safeguard A** | Offline identity is UI continuity only, not server authentication | `tokenManager.getToken()` is immediately cleared (`null`) on offline cold boot, offline reload, and live offline transition. `OfflineSessionIdentity` never authorizes API writes, role changes, or administrative operations. |
+| **Safeguard B** | Strict read-only mode when offline identity is active | `isOfflineSession = true`, `isReadOnlyOffline = true`, and `canManageUsers = false` (even for `SUPER_ADMIN` / `ADMIN`). Centralized `assertServerMutationAllowed()`, `offlineManager.assertCanMutateServer()`, and `controller.assertOnlineServerMutationAllowed()` throw `OfflineStorageError('UNAUTHORIZED_SESSION')` on any `POST`, `PUT`, `PATCH`, or `DELETE`. Zero mutation queues exist. |
+| **Safeguard C** | Server remains source of truth on reconnection | On `window` `online` event, `AuthProvider` and `OfflineAuthLifecycleController` keep the session strictly read-only while `refreshSession()` is pending, and promote to authenticated online mode **only** after the server confirms `ACTIVE` status and `!mustChangePassword`. On `401`/`403` or non-`ACTIVE` status, `OfflineSessionIdentity` and private IndexedDB data (`purgeSessionData`) are invalidated immediately. |
 | **Safeguard D** | 7-day offline grace period & clock-skew protection | `OFFLINE_IDENTITY_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000` (7 days) and `OFFLINE_CLOCK_SKEW_TOLERANCE_MS = 300,000` (5 minutes). `loadValidOfflineSessionIdentity()` never mutates or extends `lastAuthenticatedAt`; only a server-confirmed login or silent refresh updates `lastAuthenticatedAt`. |
 | **Safeguard E** | Shared-device & user isolation | If User B logs in or refreshes on a device where User A's `OfflineSessionIdentity` exists, `offlineManager.purgeSessionData(previousUserId)` is executed before User B's session is activated. Explicit `logout()` increments the monotonic epoch counter, clears `OfflineSessionIdentity`, aborts active downloads, and purges IndexedDB records using the `bethesda_offline_purge_pending` tombstone. |
 | **Safeguard F** | Offline logout must always work | `logout()` clears local identity, tokens, and IndexedDB private data before attempting `/auth/logout`, returning `LogoutExecutionResult { localCleared: true, serverRevoked: false }` when offline so local logout is never conflated with server revocation. |
@@ -99,8 +116,7 @@ node --test --experimental-strip-types "src/core/offline/__tests__/pwa-lifecycle
 ```
 Result:
 - **Suites:** `1` passed (`1` total)
-- **Tests:** `15` passed, `0` failed (`15` total)
-- **Duration:** `278.09ms`
+- **Tests:** `18` passed, `0` failed (`18` total)
 
 ### 5.2 Offline, Service Worker & Authentication Suites
 Command executed from `frontend/`:
@@ -109,7 +125,7 @@ node --test --experimental-strip-types "src/core/offline/__tests__/*.test.ts" "s
 ```
 Result:
 - **Suites:** `9` passed (`9` total)
-- **Tests:** `86` passed, `0` failed (`86` total)
+- **Tests:** `89` passed, `0` failed (`89` total)
 
 ### 5.3 Full Frontend Regression Suite
 Command executed from `frontend/`:
@@ -118,8 +134,8 @@ npm test
 ```
 Result:
 - **Suites:** `86` passed (`86` total)
-- **Tests:** `607` passed, `0` failed (`607` total)
-- **Duration:** `4363.67ms`
+- **Tests:** `610` passed, `0` failed (`610` total)
+- **Duration:** `5015.12ms`
 
 ### 5.4 Strict TypeScript & Production Build Checks
 Commands executed from `frontend/`:
@@ -136,7 +152,7 @@ Result:
 ## 6. SEPARATION OF AUTOMATED VERIFICATION VS. MANUAL PHYSICAL VALIDATION
 
 - **Automated Verification (`PASS`):**
-  - All 15 unit tests in `pwa-lifecycle-and-offline-boot.test.ts`, all 86 offline/auth/SW tests, all 607 frontend regression tests, `tsc --noEmit`, and `vite build` were executed and passed in the Node.js CLI environment.
+  - All 18 unit tests in `pwa-lifecycle-and-offline-boot.test.ts`, all 89 offline/auth/SW tests, all 610 frontend regression tests, `tsc --noEmit`, and `vite build` were executed and passed in the Node.js CLI environment.
 - **Manual / Physical Device Validation (`PENDING MANUAL VALIDATION`):**
   - Physical tablet/mobile browser validation (iPadOS Safari/PWA and Android Chrome/PWA) for live Service Worker installation, airplane-mode cold boot (`F5`), and UI visual inspection requires a physical device / manual browser session and has not been fabricated as an automated pass.
 
@@ -149,7 +165,6 @@ Result:
 
 ## 7. EXIT GATE STATUS FOR `WS-2D-01`
 
-**Exit Gate Status:** **`CONDITIONAL PASS — MANUAL VALIDATION REQUIRED`**
+**Exit Gate Status:** **`CONDITIONAL PASS — MANUAL PHYSICAL DEVICE VALIDATION REQUIRED`**
 
-All code, security invariants (`Safeguards A–G`), unit tests (`15/15`), regression tests (`607/607`), and strict TypeScript checks (`0` errors) for `WS-2D-01` are complete and verified. Manual physical-device cold-boot verification remains explicitly marked as `PENDING MANUAL VALIDATION`.
-
+All code, critical security remediations (Findings A, B, C, and Section 5 URL parameter hardening), security invariants (`Safeguards A–G`), unit tests (`18/18`), offline/auth suites (`89/89`), full frontend regression suites (`610/610`), and strict TypeScript/production build checks (`0` errors) for `WS-2D-01` are complete and verified. Manual physical-device cold-boot verification remains explicitly marked as `PENDING MANUAL VALIDATION`.

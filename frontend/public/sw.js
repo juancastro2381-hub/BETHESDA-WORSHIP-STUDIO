@@ -2,16 +2,22 @@
  * @file sw.js
  * @description Service Worker de Bethesda Worship Studio (Fase 2B — WP-04 / Fase 2D — WS-2D-01 Hardening v2).
  *
- * RESPONSABILIDADES:
+ * RESPONSABILIDADES Y REGLAS DE SEGURIDAD:
  * 1. Almacenar en caché los recursos estáticos esenciales del App Shell (HTML, CSS, JS, íconos, fuentes musicales Bravura).
  * 2. Permitir que la aplicación cargue en frío (Cold Boot) cuando el músico no tiene conexión a internet.
  * 3. Protocolo determinista PRECACHE_ASSETS para precalentar bundles compilados, hojas de estilo y fuentes de notación.
  * 4. Ciclo de vida controlado con handshake SKIP_WAITING que respeta el estado de ejecución en vivo (Atril / Setlist ACTIVO).
- * 5. NUNCA almacenar en la Cache API respuestas autenticadas de `/api/v1/*` ni tokens de acceso (Regla de Seguridad 4.6).
- * 6. Los datos musicales privados (canciones, setlists, audios) son gestionados exclusivamente en IndexedDB por BethesdaOfflineManager con validación SHA-256 y aislamiento de usuario.
+ * 5. REGLA DE PROPIEDAD DE CACHÉ (Finding A):
+ *    - Namespace exclusivo de Bethesda App Shell: prefijo `bethesda-worship-studio-shell-`.
+ *    - Durante `activate`, solo se eliminan cachés obsoletos cuyo nombre comience exactamente con `bethesda-worship-studio-shell-`
+ *      y sea distinto de `bethesda-worship-studio-shell-v2`.
+ *    - Cualquier caché de otra aplicación o módulo alojado en el mismo origen que no tenga dicho prefijo se preserva intacto.
+ *    - IndexedDB y otros almacenamientos fuera de Cache API jamás son tocados por el Service Worker.
+ * 6. NUNCA almacenar en la Cache API respuestas autenticadas de `/api/v1/*` ni URLs con parámetros sensibles codificados o en texto plano.
  * 7. Filtrar estrictamente esquemas no soportados (`chrome-extension:`, `file:`, `data:`, `blob:`, `about:`) antes de invocar `cache.put()`.
  */
 
+const BETHESDA_CACHE_PREFIX = 'bethesda-worship-studio-shell-';
 const CACHE_NAME = 'bethesda-worship-studio-shell-v2';
 
 const STATIC_SHELL_ASSETS = [
@@ -27,7 +33,191 @@ const ALLOWED_EXTERNAL_FONT_ORIGINS = [
   'https://fonts.gstatic.com',
 ];
 
+const FORBIDDEN_SENSITIVE_PARAM_NAMES = [
+  'token',
+  'access_token',
+  'accesstoken',
+  'refresh_token',
+  'refreshtoken',
+  'password',
+  'secret',
+  'authorization',
+  'credential',
+  'api_key',
+  'apikey',
+  'jwt',
+  'bearer',
+  'session',
+];
+
 const MAX_PRECACHE_URLS = 64;
+
+/**
+ * Determina si un nombre de caché pertenece demostrablemente a una versión obsoleta
+ * del App Shell de Bethesda Worship Studio.
+ *
+ * Regla de propiedad (Finding A):
+ * - Debe comenzar con `bethesda-worship-studio-shell-`.
+ * - No debe ser el caché activo `bethesda-worship-studio-shell-v2`.
+ * - Cachés de otras aplicaciones o módulos en el mismo origen retornan `false` y se preservan.
+ *
+ * @param {unknown} cacheKey
+ * @param {string} activeCacheName
+ * @returns {boolean}
+ */
+function isOwnedObsoleteShellCache(cacheKey, activeCacheName = CACHE_NAME) {
+  if (typeof cacheKey !== 'string') return false;
+  if (!cacheKey.startsWith(BETHESDA_CACHE_PREFIX)) return false;
+  return cacheKey !== activeCacheName;
+}
+
+/**
+ * Limpia de forma determinista y aislada únicamente los cachés obsoletos pertenecientes
+ * al App Shell de Bethesda Worship Studio, preservando el caché v2 actual y cualquier
+ * caché de terceros u otros módulos en el mismo origen.
+ *
+ * @returns {Promise<{ deletedCaches: string[]; retainedCaches: string[]; failedDeletes: string[] }>}
+ */
+async function cleanupOwnedLegacyShellCaches() {
+  const deletedCaches = [];
+  const retainedCaches = [];
+  const failedDeletes = [];
+
+  try {
+    const cacheNames = await caches.keys();
+    for (const key of cacheNames) {
+      if (isOwnedObsoleteShellCache(key, CACHE_NAME)) {
+        try {
+          const deleted = await caches.delete(key);
+          if (deleted) {
+            deletedCaches.push(key);
+          } else {
+            failedDeletes.push(key);
+          }
+        } catch {
+          failedDeletes.push(key);
+        }
+      } else {
+        retainedCaches.push(key);
+      }
+    }
+  } catch {
+    // Fallo seguro si caches.keys() no está disponible
+  }
+
+  return { deletedCaches, retainedCaches, failedDeletes };
+}
+
+/**
+ * Decodifica iterativamente componentes codificados con porcentaje (hasta 3 pasadas)
+ * para detectar nombres de parámetros sensibles ocultos tras `%XX`.
+ * Retorna `null` si la codificación está malformada (Fail-Closed).
+ *
+ * @param {string} raw
+ * @returns {string | null}
+ */
+function decodeAndNormalizeParamComponent(raw) {
+  if (typeof raw !== 'string') return null;
+  let current = raw.replace(/\+/g, ' ');
+  for (let i = 0; i < 3; i++) {
+    try {
+      const decoded = decodeURIComponent(current);
+      if (decoded === current) break;
+      current = decoded;
+    } catch {
+      return null;
+    }
+  }
+  return current.trim().toLowerCase();
+}
+
+/**
+ * Verifica si un nombre de parámetro normalizado coincide o contiene alguno de los
+ * identificadores de credenciales/sesión prohibidos.
+ *
+ * @param {string} normalizedKey
+ * @returns {boolean}
+ */
+function isForbiddenSensitiveParamName(normalizedKey) {
+  if (!normalizedKey) return true;
+  const canonicalSnake = normalizedKey.replace(/[-\s.]+/g, '_');
+  const canonicalCompact = canonicalSnake.replace(/_/g, '');
+
+  for (const forbidden of FORBIDDEN_SENSITIVE_PARAM_NAMES) {
+    const forbiddenCompact = forbidden.replace(/_/g, '');
+    if (
+      canonicalSnake === forbidden ||
+      canonicalCompact === forbiddenCompact ||
+      canonicalSnake.includes(forbidden) ||
+      canonicalCompact.includes(forbiddenCompact)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Inspecciona los parámetros de consulta de una URL usando tanto los tokens crudos
+ * como `URLSearchParams` para rechazar cualquier parámetro sensible codificado o en texto plano.
+ * Nunca registra ni expone los valores de la consulta.
+ *
+ * @param {URL} parsedUrl
+ * @returns {boolean}
+ */
+function hasForbiddenSensitiveQueryParams(parsedUrl) {
+  if (!parsedUrl || !parsedUrl.search || parsedUrl.search.length <= 1) {
+    return false;
+  }
+
+  // 1. Inspeccionar pares crudos antes de que URLSearchParams los procese (captura doble codificación o % inválido)
+  const rawSearch = parsedUrl.search.startsWith('?') ? parsedUrl.search.slice(1) : parsedUrl.search;
+  const rawSegments = rawSearch.split('&');
+  for (const segment of rawSegments) {
+    if (!segment) continue;
+    const eqIndex = segment.indexOf('=');
+    const rawKey = eqIndex >= 0 ? segment.slice(0, eqIndex) : segment;
+    const rawVal = eqIndex >= 0 ? segment.slice(eqIndex + 1) : '';
+
+    const normalizedKey = decodeAndNormalizeParamComponent(rawKey);
+    if (normalizedKey === null || isForbiddenSensitiveParamName(normalizedKey)) {
+      return true;
+    }
+
+    const normalizedVal = decodeAndNormalizeParamComponent(rawVal);
+    if (normalizedVal === null) {
+      return true;
+    }
+    if (
+      normalizedVal.startsWith('bearer ') ||
+      /^eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$/i.test(normalizedVal)
+    ) {
+      return true;
+    }
+  }
+
+  // 2. Inspeccionar mediante URLSearchParams estándar
+  const searchParams = new URLSearchParams(parsedUrl.search);
+  for (const [paramKey, paramValue] of searchParams.entries()) {
+    const normalizedKey = decodeAndNormalizeParamComponent(paramKey);
+    if (normalizedKey === null || isForbiddenSensitiveParamName(normalizedKey)) {
+      return true;
+    }
+
+    const normalizedVal = decodeAndNormalizeParamComponent(paramValue);
+    if (normalizedVal === null) {
+      return true;
+    }
+    if (
+      normalizedVal.startsWith('bearer ') ||
+      /^eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$/i.test(normalizedVal)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 /**
  * Valida de forma determinista si un par Request/Response es elegible para ser almacenado
@@ -38,7 +228,7 @@ const MAX_PRECACHE_URLS = 64;
  * 2. Método HTTP estrictamente `GET`.
  * 3. Código de estado HTTP exactamente `200`.
  * 4. Tipo de respuesta `basic` (mismo origen) o `cors` válido (ej. Google Fonts).
- * 5. Nunca almacenar rutas de API (`/api/`).
+ * 5. Nunca almacenar rutas de API (`/api/`) ni URLs con parámetros sensibles.
  *
  * @param {Request} request
  * @param {Response} response
@@ -52,6 +242,7 @@ function isCacheEligible(request, response, url) {
   if (response.status !== 200) return false;
   if (response.type !== 'basic' && response.type !== 'cors') return false;
   if (url.pathname.startsWith('/api/')) return false;
+  if (hasForbiddenSensitiveQueryParams(url)) return false;
   return true;
 }
 
@@ -92,15 +283,8 @@ function resolveEligiblePrecacheUrl(rawUrl, baseOrigin) {
     return null;
   }
 
-  // Prohibir parámetros de consulta sensibles (tokens, credenciales, códigos)
-  const lowerSearch = parsedUrl.search.toLowerCase();
-  if (
-    lowerSearch.includes('token=') ||
-    lowerSearch.includes('password=') ||
-    lowerSearch.includes('secret=') ||
-    lowerSearch.includes('authorization=') ||
-    lowerSearch.includes('credential=')
-  ) {
+  // Prohibir parámetros de consulta sensibles (incluso codificados en porcentaje o con mayúsculas/minúsculas mixtas)
+  if (hasForbiddenSensitiveQueryParams(parsedUrl)) {
     return null;
   }
 
@@ -224,22 +408,10 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// 2. Activación: Limpiar cachés antiguos (incluyendo v1) y reclamar clientes
+// 2. Activación: Purgar únicamente cachés obsoletos propiedad de Bethesda App Shell (Finding A) y reclamar clientes
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((cacheNames) => {
-        return Promise.all(
-          cacheNames.map((key) => {
-            if (key !== CACHE_NAME) {
-              return caches.delete(key);
-            }
-            return Promise.resolve();
-          })
-        );
-      })
-      .then(() => self.clients.claim())
+    cleanupOwnedLegacyShellCaches().then(() => self.clients.claim())
   );
 });
 

@@ -1,17 +1,21 @@
 /**
  * @file offline-session-identity.ts
  * @description Persistencia segura de identidad offline no sensible (`OfflineSessionIdentity`),
- * arranque en frío sin conexión (Offline Cold Boot), modo estricto de solo lectura y
- * reconciliación con el servidor al reconectar (Fase 2D — WS-2D-01, Decisión DEC-2D-04).
+ * compuerta centralizada de bloqueo de mutaciones al servidor (`assertServerMutationAllowed`),
+ * transición atómica a modo sin conexión con invalidación inmediata de token en memoria (Finding B),
+ * arranque en frío sin conexión (Offline Cold Boot) y reconciliación con el servidor al reconectar
+ * (Fase 2D — WS-2D-01, Decisión DEC-2D-04).
  *
- * SALVAGUARDAS DE SEGURIDAD OBLIGATORIAS (Secciones 3.3 y 3.4):
+ * SALVAGUARDAS DE SEGURIDAD OBLIGATORIAS (Secciones 3.3 y 3.4 + Remediación WS-2D-01):
  * - Salvaguarda A: `OfflineSessionIdentity` es exclusivamente para continuidad de UI de solo lectura, NUNCA autenticación ante el servidor.
  * - Salvaguarda B: Modo estricto de solo lectura cuando la identidad offline está activa (`isOfflineSession: true`, `isReadOnlyOffline: true`, `canManageUsers: false`).
- * - Salvaguarda C: El servidor sigue siendo la única fuente de la verdad al reconectar; si responde 401/403 o estado inactivo, purga inmediata.
- * - Salvaguarda D: Expiración estricta a los 7 días (`MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`) y tolerancia de reloj de 5 minutos (`300_000 ms`). Jamás extiende `lastAuthenticatedAt` al abrir sin conexión.
+ *   Compuerta centralizada fail-closed que bloquea POST, PUT, PATCH y DELETE en el cliente API antes de invocar la red (Finding C).
+ * - Salvaguarda C: El servidor sigue siendo la única fuente de la verdad al reconectar; mientras la validación del servidor está pendiente se mantiene el modo de solo lectura; si responde 401/403 o estado inactivo, purga inmediata.
+ * - Salvaguarda D: Expiración estricta a los 7 días (`MAX_OFFLINE_DAYS_GRACE_PERIOD = 7`) y tolerancia de reloj de 5 minutos (`300_000 ms`). Jamás extiende `lastAuthenticatedAt` al abrir o transicionar sin conexión.
  * - Salvaguarda E: Aislamiento estricto por usuario en dispositivos compartidos y purga con tombstone en `logout()`.
  * - Salvaguarda F: `logout()` funciona siempre sin conexión, limpiando identidad y datos locales y distinguiendo `localCleared` de `serverRevoked`.
  * - Salvaguarda G: Fail-closed ante cualquier corrupción, clave prohibida, discrepancia de propietario o expiración.
+ * - Finding B: La transición `offline` activa primero la compuerta de solo lectura, incrementa `epoch`, cancela el refresco silencioso y limpia el access token en memoria (`tokenManager.clearToken()`).
  */
 
 import type { AuthLifecycleStatus, AuthUser, UserRole } from '../auth/types.ts';
@@ -55,6 +59,75 @@ const VALID_USER_ROLES: readonly UserRole[] = [
   'MUSICIAN',
   'VIEWER',
 ] as const;
+
+// ============================================================================
+// COMPUERTA CENTRALIZADA DE MUTACIONES AL SERVIDOR (CRITICAL FINDING B & C)
+// ============================================================================
+
+let globalOfflineReadOnlyMutationGuard = false;
+let simulatedOnlineStateOverride: boolean | null = null;
+
+/**
+ * Activa o desactiva la compuerta global de bloqueo de mutaciones por sesión offline de solo lectura.
+ */
+export function setOfflineReadOnlyMutationGuard(active: boolean): void {
+  globalOfflineReadOnlyMutationGuard = Boolean(active);
+}
+
+/**
+ * Consulta si la compuerta global de sesión offline de solo lectura se encuentra activa.
+ */
+export function isOfflineReadOnlyMutationGuardActive(): boolean {
+  return globalOfflineReadOnlyMutationGuard;
+}
+
+/**
+ * Permite sobrescribir de forma determinista el estado de conectividad en suites de prueba Node.js.
+ * Pasar `null` restaura la lectura estándar de `navigator.onLine`.
+ */
+export function setSimulatedOnlineStateForTests(isOnline: boolean | null): void {
+  simulatedOnlineStateOverride = isOnline;
+}
+
+/**
+ * Consulta si el cliente se encuentra actualmente en línea.
+ */
+export function isClientCurrentlyOnline(): boolean {
+  if (simulatedOnlineStateOverride !== null) {
+    return simulatedOnlineStateOverride;
+  }
+  if (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean') {
+    return navigator.onLine;
+  }
+  return true;
+}
+
+/**
+ * Determina si un método HTTP corresponde a una operación de escritura/mutación en el servidor.
+ * Solo `GET` y `HEAD` se consideran operaciones de lectura.
+ */
+export function isMutatingHttpMethod(method?: string | null): boolean {
+  const normalized = (method ?? 'GET').trim().toUpperCase();
+  return normalized !== 'GET' && normalized !== 'HEAD';
+}
+
+/**
+ * Compuerta centralizada fail-closed que protege todas las escrituras autenticadas hacia el servidor
+ * (`POST`, `PUT`, `PATCH`, `DELETE`).
+ * Lanza `OfflineStorageError('UNAUTHORIZED_SESSION')` si el cliente está desconectado o si la sesión
+ * se encuentra en modo offline de solo lectura (pendiente de revalidación con el servidor).
+ * Jamás encola mutaciones para ejecución diferida.
+ */
+export function assertServerMutationAllowed(method?: string, endpoint?: string): void {
+  if (!isClientCurrentlyOnline() || globalOfflineReadOnlyMutationGuard) {
+    const methodLabel = (method ?? 'WRITE').toUpperCase();
+    const endpointLabel = endpoint ? ` (${endpoint.split('?')[0]})` : '';
+    throw new OfflineStorageError(
+      'UNAUTHORIZED_SESSION',
+      `Operación denegada [${methodLabel}${endpointLabel}]: Bethesda Worship Studio se encuentra en Modo Sin Conexión (Solo Lectura). Las modificaciones canónicas y administrativas requieren una sesión validada en línea con el servidor.`
+    );
+  }
+}
 
 /**
  * Esquema estricto y exclusivo para la identidad de continuidad offline (Sección 3.3).
@@ -408,12 +481,16 @@ export interface OfflineAuthLifecycleDependencies {
 }
 
 /**
- * Coordinador determinista del ciclo de vida de autenticación online/offline (WS-2D-01 Sección 3.5).
+ * Coordinador determinista del ciclo de vida de autenticación online/offline (WS-2D-01 Sección 3.5 + Finding B).
  * Garantiza:
  * - Protección contra condiciones de carrera mediante contador monotónico `epoch`.
+ * - Transición atómica a modo sin conexión (`transitionToOfflineMode`): activa primero el guard de mutación,
+ *   cancela refrescos programados, limpia el access token en memoria (`tokenManager.clearToken()`) e invalida
+ *   operaciones en vuelo.
  * - Aislamiento en dispositivos compartidos (purga del usuario anterior si otro usuario inicia sesión).
  * - Restauración en frío sin conexión (Offline Cold Boot / F5) en modo estricto de solo lectura.
- * - Reconciliación obligatoria con el servidor al recuperar conectividad (`reconcileOnReconnect`).
+ * - Reconciliación obligatoria con el servidor al recuperar conectividad (`reconcileOnReconnect`) manteniendo
+ *   el estado de solo lectura mientras la validación del servidor está pendiente.
  * - Cierre de sesión offline garantizado (`LogoutExecutionResult`).
  */
 export class OfflineAuthLifecycleController {
@@ -451,12 +528,17 @@ export class OfflineAuthLifecycleController {
     return this.deps.nowFn ? this.deps.nowFn() : Date.now();
   }
 
+  private setReadOnlyGuard(active: boolean): void {
+    setOfflineReadOnlyMutationGuard(active);
+    this.deps.setOfflineReadOnlyGuardFn?.(active);
+  }
+
   private updateState(partial: Partial<OfflineAuthLifecycleState>): OfflineAuthLifecycleState {
     this.state = {
       ...this.state,
       ...partial,
     };
-    this.deps.setOfflineReadOnlyGuardFn?.(this.state.isReadOnlyOffline);
+    this.setReadOnlyGuard(this.state.isReadOnlyOffline);
     const snapshot = this.getState();
     for (const listener of this.listeners) {
       try {
@@ -466,6 +548,30 @@ export class OfflineAuthLifecycleController {
       }
     }
     return snapshot;
+  }
+
+  /**
+   * Transición atómica y fail-closed a modo sin conexión (Critical Finding B):
+   * 1. Activa inmediatamente la compuerta de bloqueo de mutaciones al servidor.
+   * 2. Incrementa `epoch` para invalidar cualquier operación de refresco asíncrono en vuelo.
+   * 3. Cancela temporizadores de refresco silencioso y limpia el access token en memoria (`tokenManager.clearToken()`).
+   * 4. Preserva únicamente la identidad local previamente validada dentro del período de gracia de 7 días (sin extender `lastAuthenticatedAt`).
+   * 5. Nunca afirma que ocurrió un logout o revocación en el servidor por el simple hecho de perder red.
+   */
+  public transitionToOfflineMode(options?: { readonly nowMs?: number | undefined }): OfflineAuthLifecycleState {
+    // 1. Activar compuerta de mutación al servidor ANTES de cualquier otra acción
+    this.setReadOnlyGuard(true);
+
+    // 2. Incrementar epoch para bloquear cualquier promesa en vuelo
+    const offlineEpoch = ++this.currentEpoch;
+    const nowMs = this.getNowMs(options?.nowMs);
+
+    // 3. Cancelar refresco silencioso programado y limpiar access token en memoria
+    tokenManager.cancelSilentRefresh();
+    tokenManager.clearToken();
+
+    // 4. Evaluar identidad local sin extender el período de gracia de 7 días
+    return this.restoreOfflineReadOnlyContext(offlineEpoch, nowMs);
   }
 
   /**
@@ -486,6 +592,12 @@ export class OfflineAuthLifecycleController {
     const nowMs = this.getNowMs(options?.nowMs);
     const nowIso = new Date(nowMs).toISOString();
 
+    // Si mientras tanto el cliente pasó a offline o avanzó el epoch, abortar y mantener limpio el token
+    if (targetEpoch !== this.currentEpoch || !this.deps.isOnlineFn()) {
+      tokenManager.clearToken();
+      return this.getState();
+    }
+
     // Verificar si existía un usuario distinto previamente almacenado en el dispositivo
     const previousStoredUserId =
       this.state.user?.id ??
@@ -494,7 +606,8 @@ export class OfflineAuthLifecycleController {
 
     if (previousStoredUserId && previousStoredUserId !== user.id) {
       await this.deps.purgeUserSessionDataFn(previousStoredUserId);
-      if (targetEpoch !== this.currentEpoch) {
+      if (targetEpoch !== this.currentEpoch || !this.deps.isOnlineFn()) {
+        tokenManager.clearToken();
         return this.getState();
       }
     }
@@ -549,12 +662,15 @@ export class OfflineAuthLifecycleController {
 
     // Si estamos desconectados en el arranque en frío (Cold Boot / Offline F5)
     if (!this.deps.isOnlineFn()) {
+      this.setReadOnlyGuard(true);
+      tokenManager.clearToken();
       return this.restoreOfflineReadOnlyContext(myEpoch, nowMs);
     }
 
     try {
       const response = await this.deps.refreshSessionFn();
-      if (myEpoch !== this.currentEpoch) {
+      if (myEpoch !== this.currentEpoch || !this.deps.isOnlineFn()) {
+        tokenManager.clearToken();
         return this.getState();
       }
       return await this.activateServerAuthenticatedSession(response.user, response.accessToken, {
@@ -593,12 +709,6 @@ export class OfflineAuthLifecycleController {
       }
 
       // Si el fallo fue por pérdida de red / servidor inalcanzable, intentar continuidad offline de solo lectura
-      if (!this.deps.isOnlineFn()) {
-        return this.restoreOfflineReadOnlyContext(myEpoch, nowMs);
-      }
-
-      // Si el navegador reporta online pero el servidor no pudo autenticar por fallo de red sin sesión válida,
-      // verificar si hay identidad offline válida pero mantenerla estrictamente como sesión offline de solo lectura
       return this.restoreOfflineReadOnlyContext(myEpoch, nowMs);
     }
   }
@@ -613,7 +723,10 @@ export class OfflineAuthLifecycleController {
       return this.getState();
     }
 
+    this.setReadOnlyGuard(true);
+    tokenManager.cancelSilentRefresh();
     tokenManager.clearToken();
+
     const validIdentity = loadValidOfflineSessionIdentity({
       nowMs,
       storage: this.deps.storage,
@@ -624,7 +737,7 @@ export class OfflineAuthLifecycleController {
         user: null,
         authStatus: 'UNAUTHENTICATED',
         isOfflineSession: false,
-        isReadOnlyOffline: false,
+        isReadOnlyOffline: !this.deps.isOnlineFn(),
         canManageUsers: false,
         offlineIdentity: null,
         epoch: targetEpoch,
@@ -647,13 +760,19 @@ export class OfflineAuthLifecycleController {
 
   /**
    * Reconcilia la identidad local con el servidor cuando retorna la conectividad (`online`).
-   * Salvaguarda C:
-   * - La identidad offline jamás se convierte silenciosamente en una sesión online autenticada sin validación del servidor.
-   * - Si el servidor responde 401/403 o cuenta inactiva, invalida inmediatamente la identidad offline y purga los datos privados.
+   * Salvaguarda C + Critical Finding B:
+   * 1. Mantiene explícitamente la sesión en modo de solo lectura mientras la validación del servidor está pendiente.
+   * 2. La identidad offline jamás se convierte silenciosamente en una sesión online autenticada sin validación del servidor.
+   * 3. Si el servidor responde 401/403 o cuenta inactiva, invalida inmediatamente la identidad offline y purga los datos privados.
+   * 4. Si ocurre un fallo de red o una transición `offline` concurrente, retiene el modo de solo lectura sin restaurar tokens.
    */
   public async reconcileOnReconnect(options?: { readonly nowMs?: number | undefined }): Promise<OfflineAuthLifecycleState> {
     const myEpoch = ++this.currentEpoch;
     const nowMs = this.getNowMs(options?.nowMs);
+
+    // 1. Mantener estrictamente la compuerta de solo lectura activa mientras se valida con el servidor
+    this.setReadOnlyGuard(true);
+    tokenManager.clearToken();
 
     if (!this.deps.isOnlineFn()) {
       return this.restoreOfflineReadOnlyContext(myEpoch, nowMs);
@@ -661,7 +780,8 @@ export class OfflineAuthLifecycleController {
 
     try {
       const response = await this.deps.refreshSessionFn();
-      if (myEpoch !== this.currentEpoch) {
+      if (myEpoch !== this.currentEpoch || !this.deps.isOnlineFn()) {
+        tokenManager.clearToken();
         return this.getState();
       }
       return await this.activateServerAuthenticatedSession(response.user, response.accessToken, {
@@ -720,6 +840,7 @@ export class OfflineAuthLifecycleController {
       peekStoredOfflineIdentityUserId(this.deps.storage);
 
     // 1. Limpieza local inmediata de credenciales e identidad offline
+    tokenManager.cancelSilentRefresh();
     tokenManager.clearToken();
     clearOfflineSessionIdentity(this.deps.storage);
 
@@ -727,7 +848,7 @@ export class OfflineAuthLifecycleController {
       user: null,
       authStatus: 'UNAUTHENTICATED',
       isOfflineSession: false,
-      isReadOnlyOffline: false,
+      isReadOnlyOffline: !this.deps.isOnlineFn(),
       canManageUsers: false,
       offlineIdentity: null,
       epoch: logoutEpoch,
@@ -773,6 +894,7 @@ export class OfflineAuthLifecycleController {
    * Bloquea cualquier mutación o acción administrativa si `isOfflineSession` o `isReadOnlyOffline` está activo.
    */
   public assertOnlineServerMutationAllowed(): void {
+    assertServerMutationAllowed();
     if (
       this.state.isOfflineSession ||
       this.state.isReadOnlyOffline ||

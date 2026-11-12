@@ -425,4 +425,195 @@ describe('Phase 2B.2 — TemporalValidator & MidiExportGatekeeper Suite', () => 
     assert.equal(gate.eligible, false, 'Score no medido no es elegible para MIDI');
     assert.match(gate.reason || '', /unmeasured|rhythmicProvenance NONE/i);
   });
+
+  // --------------------------------------------------------------------------
+  // 12. DEFECTO D: CLASIFICACIÓN EN 5 DIMENSIONES INDEPENDIENTES (SCORE MEDIDO VÁLIDO)
+  // --------------------------------------------------------------------------
+  it('12. should separate 5 validation dimensions for a fully measured valid score', () => {
+    const note1 = new Note({
+      id: 'n1',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: 0,
+      durationTicks: 960,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 2, fret: 1 } },
+    });
+    const note2 = new Note({
+      id: 'n2',
+      pitch: new Pitch(NoteName.D, 4),
+      startTick: 960,
+      durationTicks: 960,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 3, fret: 7 } },
+    });
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: time44,
+      startTick: 0,
+      durationTicks: 1920,
+      voices: [new Voice(1, [note1, note2])],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'EXPLICIT_HEADER' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true, '1. Structural validity debe ser true');
+    assert.strictEqual(res.isInstrumentValid, true, '2. Instrument validity debe ser true');
+    assert.strictEqual(res.isTemporallyComplete, true, '3. Temporal completeness debe ser true');
+    assert.strictEqual(res.isTemporallyValid, true, '4. Temporal validity debe ser true');
+    assert.strictEqual(res.isMidiEligible, true, '5. MIDI export eligibility debe ser true');
+    assert.strictEqual(res.isValid, true);
+    assert.strictEqual(res.isUnmeasured, false);
+    assert.strictEqual(res.isPartiallyMeasured, false);
+
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, true);
+  });
+
+  // --------------------------------------------------------------------------
+  // 13. DEFECTO D: 5 DIMENSIONES EN SCORE NO MEDIDO (VÁLIDO PERO TEMPORALMENTE INCOMPLETO)
+  // --------------------------------------------------------------------------
+  it('13. should demonstrate structural validity without temporal completeness on unmeasured score', () => {
+    const n1 = new Note({
+      id: 'un_1',
+      pitch: new Pitch(NoteName.E, 2),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 6, fret: 0 } },
+    });
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [n1])],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true, '1. Estructuralmente válido');
+    assert.strictEqual(res.isInstrumentValid, true, '2. Afinación válida');
+    assert.strictEqual(res.isTemporallyComplete, false, '3. No es temporalmente completo');
+    assert.strictEqual(res.isTemporallyValid, true, '4. Temporalmente válido (sin colisiones ni desórdenes)');
+    assert.strictEqual(res.isMidiEligible, false, '5. MIDI strictly ineligible');
+    assert.strictEqual(res.isValid, true, 'Documento es válido en el modelo');
+    assert.strictEqual(res.isUnmeasured, true);
+    assert.strictEqual(res.isPartiallyMeasured, false);
+
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+    assert.strictEqual(gate.code, 'BLOCKED_ZERO_FABRICATION');
+  });
+
+  // --------------------------------------------------------------------------
+  // 14. DEFECTO D & A: TABLATURA PARCIALMENTE MEDIDA SIN COLISIONES
+  // --------------------------------------------------------------------------
+  it('14. should validate known timing in partially measured score without false gaps and block MIDI', () => {
+    // Compás 1: con timing explícito
+    const timedNote = new Note({
+      id: 'timed_1',
+      pitch: new Pitch(NoteName.G, 3),
+      startTick: 0,
+      durationTicks: 480,
+      voice: 1,
+    });
+    const m1 = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: 0,
+      durationTicks: 480,
+      voices: [new Voice(1, [timedNote])],
+    });
+
+    // Compás 2: sin timing explícito (null)
+    const untimedNote = new Note({
+      id: 'untimed_1',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const m2 = new Measure({
+      number: 2,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [untimedNote])],
+    });
+
+    const payload = createBasePayload([m1, m2], { rhythmicProvenance: 'PARTIALLY_MEASURED' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true);
+    assert.strictEqual(res.isInstrumentValid, true);
+    assert.strictEqual(res.isTemporallyComplete, false, 'Completitud temporal debe ser false al tener notas nulas');
+    assert.strictEqual(res.isTemporallyValid, true, 'Timing conocido no tiene colisiones');
+    assert.strictEqual(res.isMidiEligible, false, 'MIDI bloqueado por Cero Fabricación');
+    assert.strictEqual(res.isPartiallyMeasured, true);
+    assert.strictEqual(res.isValid, true);
+
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+    assert.strictEqual(gate.code, 'BLOCKED_ZERO_FABRICATION');
+  });
+
+  // --------------------------------------------------------------------------
+  // 15. DEFECTO D & A: TABLATURA PARCIALMENTE MEDIDA CON COLISIÓN EN NOTAS MEDIDAS
+  // --------------------------------------------------------------------------
+  it('15. should NOT bypass validation of known timing in partially measured score when collisions exist', () => {
+    // Compás 1: notas medidas con colisión en la misma voz
+    const n1 = new Note({
+      id: 'coll_1',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: 0,
+      durationTicks: 480, // termina en 480
+      voice: 1,
+    });
+    const n2 = new Note({
+      id: 'coll_2',
+      pitch: new Pitch(NoteName.E, 4),
+      startTick: 240, // inicia en 240 (superposición sin chordId)
+      durationTicks: 480,
+      voice: 1,
+    });
+    const m1 = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: 0,
+      durationTicks: 720,
+      voices: [new Voice(1, [n1, n2])],
+    });
+
+    // Compás 2: nota no medida
+    const nUntimed = new Note({
+      id: 'un_2',
+      pitch: new Pitch(NoteName.G, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const m2 = new Measure({
+      number: 2,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [nUntimed])],
+    });
+
+    const payload = createBasePayload([m1, m2], { rhythmicProvenance: 'PARTIALLY_MEASURED' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true);
+    assert.strictEqual(res.isTemporallyComplete, false);
+    // Debe detectar la colisión de timing conocido
+    assert.strictEqual(res.isTemporallyValid, false, 'Debe fallar isTemporallyValid por colisión de notas');
+    assert.strictEqual(res.isValid, false);
+    assert.ok(res.issues.some((i) => i.code === 'SAME_VOICE_NOTE_COLLISION'));
+
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+  });
 });

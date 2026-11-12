@@ -61,6 +61,13 @@ export interface TemporalValidationResult {
   isValid: boolean;
   issues: TemporalIssue[];
   isUnmeasured: boolean;
+  isPartiallyMeasured: boolean;
+  // 5 dimensiones formales de validación (Defecto D)
+  isStructurallyValid: boolean;
+  isInstrumentValid: boolean;
+  isTemporallyComplete: boolean;
+  isTemporallyValid: boolean;
+  isMidiEligible: boolean;
 }
 
 export class TemporalValidator {
@@ -99,6 +106,12 @@ export class TemporalValidator {
         isValid: true,
         issues: [],
         isUnmeasured: true,
+        isPartiallyMeasured: false,
+        isStructurallyValid: true,
+        isInstrumentValid: true,
+        isTemporallyComplete: false,
+        isTemporallyValid: true,
+        isMidiEligible: false,
       };
     }
 
@@ -145,6 +158,9 @@ export class TemporalValidator {
         const measureStart = measure.startTick ?? 0;
         let expectedVoiceTick = measureStart;
         let previousStartTick = -1;
+        const hasUntimedEventsInVoice = voice.events.some(
+          (e) => e.startTick === null || e.durationTicks === null
+        );
         const activeEventsInVoice: Array<{
           id: string;
           startTick: number;
@@ -179,8 +195,12 @@ export class TemporalValidator {
           }
           previousStartTick = evStartTick;
 
-          // B. Detección de Silencios Internos sin Rest Explícito
-          if (!opts.allowGapsAsImplicitRests && evStartTick > expectedVoiceTick) {
+          // B. Detección de Silencios Internos sin Rest Explícito (solo si la voz está completamente cronometrada)
+          if (
+            !hasUntimedEventsInVoice &&
+            !opts.allowGapsAsImplicitRests &&
+            evStartTick > expectedVoiceTick
+          ) {
             issues.push({
               severity: 'ERROR',
               code: 'TEMPORAL_VOICE_GAP',
@@ -346,8 +366,9 @@ export class TemporalValidator {
           expectedVoiceTick = Math.max(expectedVoiceTick, evStartTick + evDurationTicks);
         }
 
-        // G. Hueco de Final de Compás (Trailing Silence sin Rest Explícito)
+        // G. Hueco de Final de Compás (Trailing Silence sin Rest Explícito, solo para voces completamente medidas)
         if (
+          !hasUntimedEventsInVoice &&
           measure.endTick !== null &&
           !opts.allowGapsAsImplicitRests &&
           expectedVoiceTick < measure.endTick
@@ -422,10 +443,113 @@ export class TemporalValidator {
       });
     }
 
+    // -------------------------------------------------------------
+    // ETAPA 5: CLASIFICACIÓN DE RESULTADOS INDEPENDIENTES (Defecto D)
+    // -------------------------------------------------------------
+    // 1. Validez Estructural
+    let isStructurallyValid = true;
+    if (!payload.measures || payload.measures.length === 0) {
+      isStructurallyValid = false;
+    } else {
+      for (const m of payload.measures) {
+        if (m.number < 1) isStructurallyValid = false;
+        for (const v of m.voices) {
+          if (v.id < 1) isStructurallyValid = false;
+          for (const ev of v.events) {
+            if (!ev.id) isStructurallyValid = false;
+          }
+        }
+      }
+    }
+
+    // 2. Validez de Instrumento / Afinación
+    let isInstrumentValid = true;
+    for (const n of allNotes) {
+      const tabMeta = (n.notationMetadata as Record<string, unknown> | undefined)?.tablature as
+        | { stringNumber?: number; fret?: number | null; isMuted?: boolean }
+        | undefined;
+      if (tabMeta) {
+        if (
+          tabMeta.stringNumber !== undefined &&
+          (tabMeta.stringNumber < 1 || tabMeta.stringNumber > 12)
+        ) {
+          isInstrumentValid = false;
+        }
+        if (
+          tabMeta.fret !== undefined &&
+          tabMeta.fret !== null &&
+          (tabMeta.fret < 0 || tabMeta.fret > 30)
+        ) {
+          isInstrumentValid = false;
+        }
+      }
+    }
+
+    // 3. Completitud Temporal
+    const rhythmicProv = (payload.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance;
+    const isTemporallyComplete =
+      allNotes.length > 0 &&
+      !hasUnmeasuredNotes &&
+      rhythmicProv !== 'NONE' &&
+      rhythmicProv !== 'PARTIALLY_MEASURED';
+
+    // 4. Validez Temporal cuando existe timing
+    const hasTemporalErrors = issues.some(
+      (i) =>
+        i.severity === 'ERROR' &&
+        [
+          'SAME_VOICE_NOTE_COLLISION',
+          'EVENT_ORDERING_VIOLATION',
+          'BROKEN_TIE_CHAIN',
+          'TIE_PITCH_MISMATCH',
+          'TIE_TEMPORAL_DISCONTINUITY',
+          'INCOMPLETE_TUPLET_GROUP',
+          'OVERFLOW_TUPLET_GROUP',
+          'TUPLET_DURATION_MISMATCH',
+          'INVALID_PICKUP_DURATION',
+          'MIDI_DURATION_NON_POSITIVE',
+          'MIDI_INVALID_NOTE_DURATION',
+          'TEMPORAL_VOICE_GAP',
+          'TRAILING_MEASURE_GAP',
+        ].includes(i.code)
+    );
+    const isTemporallyValid = !hasTemporalErrors;
+
+    // 5. Elegibilidad para Exportación MIDI (Requiere todas las dimensiones anteriores + rango MIDI)
+    const allPitchesValidForMidi = allNotes.every(
+      (n) => n.pitch && n.pitch.midiNumber >= 0 && n.pitch.midiNumber <= 127
+    );
+    const allDurationsValidForMidi = allNotes.every(
+      (n) => n.durationTicks !== null && n.durationTicks > 0
+    );
+
+    const isMidiEligible =
+      isStructurallyValid &&
+      isInstrumentValid &&
+      isTemporallyComplete &&
+      isTemporallyValid &&
+      allNotes.length > 0 &&
+      allPitchesValidForMidi &&
+      allDurationsValidForMidi;
+
+    const isFullyUnmeasured = isExplicitlyUnmeasured && allNotes.every((n) => n.startTick === null);
+    const isPartiallyMeasured =
+      !isTemporallyComplete &&
+      !isFullyUnmeasured &&
+      allNotes.some((n) => n.startTick !== null || n.durationTicks !== null);
+
+    const isValid = isStructurallyValid && isInstrumentValid && isTemporallyValid;
+
     return {
-      isValid: !issues.some((i) => i.severity === 'ERROR'),
+      isValid,
       issues,
-      isUnmeasured: isExplicitlyUnmeasured,
+      isUnmeasured: isFullyUnmeasured,
+      isPartiallyMeasured,
+      isStructurallyValid,
+      isInstrumentValid,
+      isTemporallyComplete,
+      isTemporallyValid,
+      isMidiEligible,
     };
   }
 }

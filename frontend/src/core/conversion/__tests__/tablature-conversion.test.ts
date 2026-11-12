@@ -32,7 +32,7 @@ E|-----------------------|
 `;
 
   const measuredTabSource = `
-   q   q   h
+     q   q   h
 e|---0---2---3---|
 B|---1---3---0---|
 G|---0---2---0---|
@@ -170,5 +170,71 @@ E|-----------3---|
     assert.ok(res.payload);
     assert.strictEqual(res.payload.measures.length, 1);
     assert.strictEqual(res.payload.getAllNotes().length, 15);
+  });
+
+  // --------------------------------------------------------------------------
+  // 8. DEFECTO A & D: RECHAZO FAIL-CLOSED DE EXPORTACIÓN MIDI PARA TABLATURA PARCIALMENTE MEDIDA
+  // --------------------------------------------------------------------------
+  it('8. should STRICTLY BLOCK MIDI export from partially measured tab (Fail-Closed)', () => {
+    const partiallyMeasuredTab = `
+     q   q
+e|---0---1---|---3-------|
+B|---1---3---|---0-------|
+G|---0---2---|---0-------|
+D|-----------|-----------|
+A|-----------|-----------|
+E|-----------|-----------|
+`;
+    const tabImporter = new AsciiTabImporter();
+    const impRes = tabImporter.import(partiallyMeasuredTab);
+    assert.ok(impRes.payload);
+    assert.strictEqual((impRes.payload.metadata as any)?.rhythmicProvenance, 'PARTIALLY_MEASURED');
+
+    // Gatekeeper must reject MIDI export fail-closed
+    const gateCheck = MidiExportGatekeeper.isEligible(impRes.payload);
+    assert.strictEqual(gateCheck.eligible, false);
+    assert.strictEqual(gateCheck.code, 'BLOCKED_ZERO_FABRICATION');
+
+    // Attempting conversion must fail
+    const res = engine.convertSource(partiallyMeasuredTab, 'partial.tab', {
+      targetFormat: 'MIDI',
+    });
+    assert.strictEqual(res.success, false);
+    assert.ok(res.diagnostics.some((d) => d.code === 'BLOCKED_ZERO_FABRICATION'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 9. DEFECTO A & D: TABLATURA PARCIALMENTE MEDIDA ES CONVERTIBLE A CHORDPRO, MUSICXML Y TAB
+  // --------------------------------------------------------------------------
+  it('9. should allow non-MIDI conversions for partially measured tab without timing fabrication', () => {
+    const partiallyMeasuredTab = `
+     q   q
+e|---0---1---|---3-------|
+B|---1---3---|---0-------|
+G|---0---2---|---0-------|
+D|-----------|-----------|
+A|-----------|-----------|
+E|-----------|-----------|
+`;
+    // MusicXML conversion
+    const resXml = engine.convertSource(partiallyMeasuredTab, 'partial.tab', {
+      targetFormat: 'MUSIC_XML',
+    });
+    assert.strictEqual(resXml.success, true);
+    assert.ok(typeof resXml.content === 'string' && resXml.content.includes('<score-partwise'));
+
+    // ChordPro conversion
+    const resCho = engine.convertSource(partiallyMeasuredTab, 'partial.tab', {
+      targetFormat: 'CHORD_PRO',
+    });
+    assert.strictEqual(resCho.success, true);
+    assert.ok(typeof resCho.content === 'string');
+
+    // Tablature serialization
+    const resTab = engine.convertSource(partiallyMeasuredTab, 'partial.tab', {
+      targetFormat: 'TABLATURE',
+    });
+    assert.strictEqual(resTab.success, true);
+    assert.ok(typeof resTab.content === 'string' && resTab.content.includes('|'));
   });
 });

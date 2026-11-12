@@ -42,7 +42,11 @@ export type TabArticulation =
   | 'PALM_MUTE'
   | 'NONE';
 
-export type RhythmicProvenance = 'EXPLICIT_HEADER' | 'INFERRED_SPACING' | 'NONE';
+export type RhythmicProvenance =
+  | 'EXPLICIT_HEADER'
+  | 'PARTIALLY_MEASURED'
+  | 'INFERRED_SPACING'
+  | 'NONE';
 
 export interface ParsedTabNote {
   stringNumber: number; // 1 (más aguda) a N (más grave)
@@ -108,7 +112,7 @@ interface RawStaffLine {
 interface RawStaffSystem {
   lines: RawStaffLine[];
   sectionName?: string | undefined;
-  rhythmLine?: { content: string; prefixLength: number } | undefined;
+  rhythmLine?: { content: string; prefixLength: number; lineNumber: number } | undefined;
 }
 
 export class AsciiTabParser {
@@ -156,7 +160,9 @@ export class AsciiTabParser {
     const systems: RawStaffSystem[] = [];
     let currentSystemLines: RawStaffLine[] = [];
     let currentSectionName: string | undefined;
-    let pendingRhythmLine: { content: string; prefixLength: number } | undefined;
+    let pendingRhythmLine:
+      | { content: string; prefixLength: number; lineNumber: number }
+      | undefined;
     let title = options.title || '';
 
     // 2. Extracción de metadatos de cabecera y partición de sistemas de tablatura
@@ -194,13 +200,14 @@ export class AsciiTabParser {
         pendingRhythmLine = {
           content: rawLine,
           prefixLength: rawLine.search(/\S/),
+          lineNumber: lineNum,
         };
         continue;
       }
 
       // Detección de línea de tablatura (contiene barras y guiones característicos, ej. e|---2---3---|)
-      const tabLineMatch = rawLine.match(/^(\s*)([A-Ga-g][b#]?\d?)?(\s*\|[-0-9pxbshrv\/\*<>\s~|]+)$/);
-      const isPlainTabLine = rawLine.includes('|') && /[-0-9pxbshrv\/\*<>\s~]{4,}/.test(rawLine);
+      const tabLineMatch = rawLine.match(/^(\s*)([A-Ga-g][b#]?\d?)?(\s*\|[-0-9pxbshrv\/\*<>\s~|]+)$/i);
+      const isPlainTabLine = rawLine.includes('|') && /[-0-9pxbshrv\/\*<>\s~]{4,}/i.test(rawLine);
 
       if (tabLineMatch || isPlainTabLine) {
         // Extraer etiqueta de afinación si existe (ej. "e|", "B|", "G|", "D|", "A|", "E|", o "Q|")
@@ -436,13 +443,21 @@ export class AsciiTabParser {
             // 5.2 Nota muteada ('x' o 'X')
             else if (char === 'x' || char === 'X') {
               consumedUntil[strIdx] = col + 1;
+              diagnostics.push({
+                code: 'UNPITCHED_MUTED_NOTE',
+                severity: 'INFO',
+                message: `Nota percusiva/muteada (${char}) en cuerda ${stringNumber} registrada sin asignación de tono musical arbitrario.`,
+                lineNumber: strLine.lineNumber,
+                columnNumber: col + 1,
+              });
+
               colNotesAtThisPoint.push({
                 stringNumber,
                 fret: null,
                 isMuted: true,
                 isHarmonic: false,
                 articulation: 'NONE',
-                resolvedPitch: openPitch ?? null,
+                resolvedPitch: null, // CERO FABRICACIÓN: Un dead note no posee altura tonal melódica
                 visualColumnIndex: col,
                 lineNumber: strLine.lineNumber,
                 sourceFragment: char,
@@ -462,11 +477,19 @@ export class AsciiTabParser {
                 if (!isNaN(fret)) {
                   let pitch: Pitch | null = null;
                   if (openPitch) {
-                    try {
-                      // Armónico en traste 12 es 1 octava arriba (+12 semitonos)
-                      const semitones = fret === 12 ? 12 : fret === 7 || fret === 19 ? 19 : 24;
-                      pitch = TabInstrumentConfig.calculateFretPitch(openPitch, semitones);
-                    } catch {
+                    const harmonicRes = TabInstrumentConfig.calculateHarmonicPitch(openPitch, fret);
+                    if (harmonicRes.isSupported) {
+                      pitch = harmonicRes.pitch;
+                    } else {
+                      diagnostics.push({
+                        code: 'UNSUPPORTED_HARMONIC_FRET',
+                        severity: 'WARNING',
+                        message:
+                          harmonicRes.reason ||
+                          `Armónico en traste ${fret} no soportado (nodos naturales soportados: 4, 5, 7, 9, 12, 16, 19, 24). Se preserva la fuente sin inventar altura.`,
+                        lineNumber: strLine.lineNumber,
+                        columnNumber: col + 1,
+                      });
                       pitch = null;
                     }
                   }
@@ -502,10 +525,15 @@ export class AsciiTabParser {
           col++;
         }
 
-        // 6. Procesar anotaciones de ritmo si existen para este sistema
+        // 6. Procesar anotaciones de ritmo si existen para este sistema (Contrato de Asociación Unívoco - Defecto B)
         if (system.rhythmLine && measureNotes.length > 0) {
           const rLine = system.rhythmLine.content;
-          const rTokens: Array<{ col: number; token: string; durationTicks: number }> = [];
+          const rTokens: Array<{
+            col: number;
+            token: string;
+            durationTicks: number;
+            lineNumber: number;
+          }> = [];
 
           // Escanear la línea de ritmo en el rango de columnas de este segmento
           for (let rc = seg.startCol; rc < seg.endCol && rc < rLine.length; rc++) {
@@ -519,47 +547,145 @@ export class AsciiTabParser {
               else if (ch === 's') ticks = 120;
               else if (ch === 't') ticks = 60;
 
-              // Comprobar si tiene puntillo inmediatamente después
+              let tokenStr = ch;
               if (rc + 1 < rLine.length && rLine[rc + 1] === '.') {
                 ticks += ticks / 2;
+                tokenStr += '.';
               }
 
-              rTokens.push({ col: rc, token: ch, durationTicks: ticks });
+              rTokens.push({
+                col: rc,
+                token: tokenStr,
+                durationTicks: ticks,
+                lineNumber: system.rhythmLine.lineNumber,
+              });
+
+              if (tokenStr.endsWith('.')) {
+                rc++;
+              }
             }
           }
 
           if (rTokens.length > 0) {
             hasExplicitRhythmAnywhere = true;
-            const uniqueCols = Array.from(new Set(measureNotes.map((n) => n.visualColumnIndex))).sort(
-              (a, b) => a - b
-            );
+            const uniqueCols = Array.from(
+              new Set(measureNotes.map((n) => n.visualColumnIndex))
+            ).sort((a, b) => a - b);
 
-            let currentTick = 0;
+            // Construir mapa de cobertura/ancho de cada columna de notas
+            const colWidthMap = new Map<number, number>();
+            for (const uCol of uniqueCols) {
+              const notesInCol = measureNotes.filter((n) => n.visualColumnIndex === uCol);
+              const maxW = Math.max(...notesInCol.map((n) => n.sourceFragment.length), 1);
+              colWidthMap.set(uCol, maxW);
+            }
+
+            // Ventana visual directa sobre la nota o columna inmediatamente contigua:
+            // Un token at 'rc' matches column 'uCol' si rc >= uCol - 1 y rc <= uCol + width
+            const tokenToCandidateCols = new Map<number, number[]>();
+            const colToCandidateTokens = new Map<number, typeof rTokens>();
+
+            for (const uCol of uniqueCols) {
+              colToCandidateTokens.set(uCol, []);
+            }
+
             for (let tIdx = 0; tIdx < rTokens.length; tIdx++) {
               const rToken = rTokens[tIdx]!;
-              let targetCol: number;
+              const matchingCols: number[] = [];
 
-              if (rTokens.length === uniqueCols.length) {
-                targetCol = uniqueCols[tIdx]!;
-              } else {
-                let minDiff = Infinity;
-                targetCol = uniqueCols[0] ?? rToken.col;
-                for (const uCol of uniqueCols) {
-                  const diff = Math.abs(uCol - rToken.col);
-                  if (diff < minDiff) {
-                    minDiff = diff;
-                    targetCol = uCol;
-                  }
+              for (const uCol of uniqueCols) {
+                const width = colWidthMap.get(uCol) ?? 1;
+                if (rToken.col >= uCol - 1 && rToken.col <= uCol + width) {
+                  matchingCols.push(uCol);
                 }
               }
 
-              const matchingNotes = measureNotes.filter((n) => n.visualColumnIndex === targetCol);
-              for (const n of matchingNotes) {
-                n.startTick = currentTick;
-                n.durationTicks = rToken.durationTicks;
-                n.rhythmToken = rToken.token;
+              tokenToCandidateCols.set(tIdx, matchingCols);
+              for (const mCol of matchingCols) {
+                colToCandidateTokens.get(mCol)!.push(rToken);
               }
-              currentTick += rToken.durationTicks;
+            }
+
+            // Detección de casos del contrato de asociación:
+            // 1. Tokens en exceso / huérfanos
+            for (let tIdx = 0; tIdx < rTokens.length; tIdx++) {
+              const rToken = rTokens[tIdx]!;
+              const candidateCols = tokenToCandidateCols.get(tIdx)!;
+              if (candidateCols.length === 0) {
+                diagnostics.push({
+                  code: 'EXCESS_RHYTHM_TOKEN',
+                  severity: 'WARNING',
+                  message: `Token de ritmo "${rToken.token}" en línea ${rToken.lineNumber}, columna ${rToken.col + 1} no corresponde a ninguna nota visual en compás ${measureNum}.`,
+                  lineNumber: rToken.lineNumber,
+                  columnNumber: rToken.col + 1,
+                });
+              } else if (candidateCols.length > 1) {
+                // Token ambiguo entre columnas
+                diagnostics.push({
+                  code: 'AMBIGUOUS_RHYTHM_TOKEN',
+                  severity: 'WARNING',
+                  message: `Token de ritmo "${rToken.token}" en columna ${rToken.col + 1} es ambiguo entre columnas [${candidateCols.map((c) => c + 1).join(', ')}].`,
+                  lineNumber: rToken.lineNumber,
+                  columnNumber: rToken.col + 1,
+                });
+              }
+            }
+
+            // 2. Columnas con tokens duplicados o faltantes
+            const unambiguousColToken = new Map<number, (typeof rTokens)[0]>();
+
+            for (const uCol of uniqueCols) {
+              const candidateTokens = colToCandidateTokens.get(uCol)!;
+              if (candidateTokens.length === 0) {
+                diagnostics.push({
+                  code: 'MISSING_RHYTHM_TOKEN',
+                  severity: 'INFO',
+                  message: `Columna de nota en posición ${uCol + 1} (compás ${measureNum}) carece de token de ritmo asociado.`,
+                  lineNumber: system.rhythmLine.lineNumber,
+                  columnNumber: uCol + 1,
+                });
+              } else if (candidateTokens.length > 1) {
+                diagnostics.push({
+                  code: 'DUPLICATE_RHYTHM_TOKENS_FOR_COLUMN',
+                  severity: 'WARNING',
+                  message: `Se encontraron múltiples tokens de ritmo (${candidateTokens.map((t) => t.token).join(', ')}) para la columna ${uCol + 1} en compás ${measureNum}. Se rechaza asociación ambigua.`,
+                  lineNumber: system.rhythmLine.lineNumber,
+                  columnNumber: uCol + 1,
+                });
+              } else {
+                const token = candidateTokens[0]!;
+                const tIdx = rTokens.indexOf(token);
+                const tokenCandidates = tokenToCandidateCols.get(tIdx)!;
+                if (tokenCandidates.length === 1) {
+                  unambiguousColToken.set(uCol, token);
+                }
+              }
+            }
+
+            // Asignación estricta de timing sin invención:
+            let currentTickInMeasure: number | null = 0;
+
+            for (const uCol of uniqueCols) {
+              const matchedToken = unambiguousColToken.get(uCol);
+              const matchingNotes = measureNotes.filter((n) => n.visualColumnIndex === uCol);
+
+              if (matchedToken) {
+                for (const n of matchingNotes) {
+                  n.durationTicks = matchedToken.durationTicks;
+                  n.rhythmToken = matchedToken.token;
+                  n.startTick = currentTickInMeasure;
+                }
+                if (currentTickInMeasure !== null) {
+                  currentTickInMeasure += matchedToken.durationTicks;
+                }
+              } else {
+                for (const n of matchingNotes) {
+                  n.durationTicks = null;
+                  n.rhythmToken = undefined;
+                  n.startTick = null;
+                }
+                currentTickInMeasure = null; // Se interrumpe la certeza de inicio cronológico para notas subsiguientes
+              }
             }
           }
         }
@@ -592,6 +718,20 @@ export class AsciiTabParser {
     }
 
     const totalNotes = measures.reduce((acc, m) => acc + m.notes.length, 0);
+    const allNotesList = measures.flatMap((m) => m.notes);
+    const hasAnyTiming = allNotesList.some((n) => n.durationTicks !== null);
+    const allNotesHaveTiming =
+      totalNotes > 0 &&
+      allNotesList.every((n) => n.durationTicks !== null && n.startTick !== null);
+
+    let rhythmicProvenance: RhythmicProvenance = 'NONE';
+    if (allNotesHaveTiming) {
+      rhythmicProvenance = 'EXPLICIT_HEADER';
+    } else if (hasAnyTiming || hasExplicitRhythmAnywhere) {
+      rhythmicProvenance = 'PARTIALLY_MEASURED';
+    } else {
+      rhythmicProvenance = 'NONE';
+    }
 
     return {
       title: title || 'Tablatura',
@@ -601,7 +741,7 @@ export class AsciiTabParser {
       stringLabels: resolvedTuning.labels,
       stringCount: resolvedTuning.tuning.length,
       measures,
-      rhythmicProvenance: hasExplicitRhythmAnywhere ? 'EXPLICIT_HEADER' : 'NONE',
+      rhythmicProvenance,
       diagnostics,
       totalNotes,
       sourceLinesCount: lines.length,

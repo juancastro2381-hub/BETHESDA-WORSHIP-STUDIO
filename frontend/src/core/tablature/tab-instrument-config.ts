@@ -183,6 +183,69 @@ export class TabInstrumentConfig {
   }
 
   /**
+   * Resuelve la altura acústica exacta de un armónico natural según el nodo físico del traste.
+   * Modelado acústico riguroso (Fase 2B.2 - Defecto C):
+   * - Traste 12: 2.° armónico (+12 semitonos / 1 octava arriba)
+   * - Trastes 7 y 19: 3.er armónico (+19 semitonos / octava + quinta justa)
+   * - Trastes 5 y 24: 4.° armónico (+24 semitonos / 2 octavas arriba)
+   * - Trastes 4, 9 y 16: 5.° armónico (+28 semitonos / 2 octavas + tercera mayor)
+   * Trastes no nodales o no admitidos retornan isSupported = false y pitch = null (CERO invención).
+   */
+  public static calculateHarmonicPitch(
+    openStringPitch: Pitch,
+    fret: number
+  ): {
+    pitch: Pitch | null;
+    semitoneOffset: number | null;
+    harmonicOrder: number | null;
+    isSupported: boolean;
+    reason?: string;
+  } {
+    if (!Number.isInteger(fret) || fret < 0 || fret > 30) {
+      return {
+        pitch: null,
+        semitoneOffset: null,
+        harmonicOrder: null,
+        isSupported: false,
+        reason: `Traste armónico ${fret} fuera de rango admisible (0..30).`,
+      };
+    }
+
+    let semitoneOffset: number;
+    let harmonicOrder: number;
+
+    if (fret === 12) {
+      semitoneOffset = 12;
+      harmonicOrder = 2;
+    } else if (fret === 7 || fret === 19) {
+      semitoneOffset = 19;
+      harmonicOrder = 3;
+    } else if (fret === 5 || fret === 24) {
+      semitoneOffset = 24;
+      harmonicOrder = 4;
+    } else if (fret === 4 || fret === 9 || fret === 16) {
+      semitoneOffset = 28;
+      harmonicOrder = 5;
+    } else {
+      return {
+        pitch: null,
+        semitoneOffset: null,
+        harmonicOrder: null,
+        isSupported: false,
+        reason: `Traste armónico ${fret} no corresponde a un nodo armónico natural estándar (soportados: 4, 5, 7, 9, 12, 16, 19, 24). CERO fabricación: se prohíbe inventar altura.`,
+      };
+    }
+
+    const pitch = this.calculateFretPitch(openStringPitch, semitoneOffset);
+    return {
+      pitch,
+      semitoneOffset,
+      harmonicOrder,
+      isSupported: true,
+    };
+  }
+
+  /**
    * Valida si una coordenada de cuerda y traste es admisible en el instrumento.
    */
   public static validateFretAndString(

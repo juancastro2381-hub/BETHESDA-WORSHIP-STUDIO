@@ -323,7 +323,7 @@ E|-----------------------------------------------------------|
   });
 
   // --------------------------------------------------------------------------
-  // 12. CUERDAS MUTEADAS / GHOST NOTES (x, X)
+  // 12. CUERDAS MUTEADAS / GHOST NOTES (x, X) - CERO FABRICACIÓN DE TONO
   // --------------------------------------------------------------------------
   it('12. should identify muted strings (x, X) as percussive dead notes without pitch error', () => {
     const tab = `
@@ -336,12 +336,18 @@ E|---x---|
 `;
     const parsed = AsciiTabParser.parse(tab);
     const col = parsed.measures[0]!.columns[0]!;
+    assert.strictEqual(col.entries.length, 6);
     assert.strictEqual(col.entries.every((e) => e.isMuted), true);
+    assert.strictEqual(col.entries.every((e) => e.resolvedPitch === null), true, 'Dead notes no deben tener tono musical al aire inventado');
 
     const res = importer.import(tab);
     assert.strictEqual(res.status, 'SUCCESS');
-    const notes = res.payload!.getAllNotes();
-    assert.strictEqual(notes.every((n) => (n.notationMetadata as any)?.tablature?.isMuted), true);
+    assert.ok(res.payload);
+    // Unpitched events son preservados en metadatos de procedencia sin inventar notas audibles
+    const unpitchedMeta = (res.payload.metadata as any)?.unpitchedTabEvents;
+    assert.ok(Array.isArray(unpitchedMeta));
+    assert.strictEqual(unpitchedMeta.length, 6);
+    assert.strictEqual(unpitchedMeta.every((u: any) => u.isMuted), true);
   });
 
   // --------------------------------------------------------------------------
@@ -441,7 +447,7 @@ E|-------|
   // --------------------------------------------------------------------------
   it('17. should assign explicit durations and startTicks when rhythm track is provided', () => {
     const tab = `
-   q   q   h
+     q   q   h
 e|---0---1---3---|
 B|---1---3---0---|
 G|---0---2---0---|
@@ -481,5 +487,303 @@ E|---------------|
     const res = importer.import(hugeTab);
     assert.strictEqual(res.status, 'FAILED');
     assert.ok(res.diagnostics.some((d) => d.code === 'INPUT_TOO_LARGE'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 19. DEFECTO B: CONTEOS IGUALES DE TOKENS Y COLUMNAS CON ALINEACIÓN DIRECTA
+  // --------------------------------------------------------------------------
+  it('19. should associate rhythm tokens when counts are equal and visually aligned 1-to-1', () => {
+    const tab = `
+     q   h
+e|---0---3---|
+B|---1---0---|
+G|---0---0---|
+D|-----------|
+A|-----------|
+E|-----------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    assert.strictEqual(parsed.rhythmicProvenance, 'EXPLICIT_HEADER');
+    assert.strictEqual(parsed.diagnostics.filter((d) => d.severity === 'WARNING').length, 0);
+
+    const m = parsed.measures[0]!;
+    const chord1 = m.notes.filter((n) => n.visualColumnIndex === 5);
+    const chord2 = m.notes.filter((n) => n.visualColumnIndex === 9);
+
+    assert.strictEqual(chord1.every((n) => n.startTick === 0 && n.durationTicks === 480), true);
+    assert.strictEqual(chord2.every((n) => n.startTick === 480 && n.durationTicks === 960), true);
+  });
+
+  // --------------------------------------------------------------------------
+  // 20. DEFECTO B: MENOS TOKENS DE RITMO QUE COLUMNAS (MISSING_RHYTHM_TOKEN)
+  // --------------------------------------------------------------------------
+  it('20. should detect missing rhythm tokens, preserve null timing, and break cumulative startTick', () => {
+    const tab = `
+     q       h
+e|---0---2---3---|
+B|---1---3---0---|
+G|---0---2---0---|
+D|---------------|
+A|---------------|
+E|---------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    assert.strictEqual(parsed.rhythmicProvenance, 'PARTIALLY_MEASURED');
+    assert.ok(parsed.diagnostics.some((d) => d.code === 'MISSING_RHYTHM_TOKEN'));
+
+    const m = parsed.measures[0]!;
+    const chord1 = m.notes.filter((n) => n.visualColumnIndex === 5);
+    const chord2Untimed = m.notes.filter((n) => n.visualColumnIndex === 9);
+    const chord3 = m.notes.filter((n) => n.visualColumnIndex === 13);
+
+    // Primer acorde tiene timing explícito conocido
+    assert.strictEqual(chord1[0]!.durationTicks, 480);
+    assert.strictEqual(chord1[0]!.startTick, 0);
+
+    // Segundo acorde carece de token: durationTicks y startTick DEBEN ser estrictamente null
+    assert.strictEqual(chord2Untimed[0]!.durationTicks, null);
+    assert.strictEqual(chord2Untimed[0]!.startTick, null);
+
+    // Tercer acorde tiene duración explícita (h = 960), pero startTick es null porque el anterior fue desconocido
+    assert.strictEqual(chord3[0]!.durationTicks, 960);
+    assert.strictEqual(chord3[0]!.startTick, null, 'startTick no debe inventarse si el evento previo no tiene duración');
+  });
+
+  // --------------------------------------------------------------------------
+  // 21. DEFECTO B: MÁS TOKENS DE RITMO QUE COLUMNAS (EXCESS_RHYTHM_TOKEN)
+  // --------------------------------------------------------------------------
+  it('21. should diagnose excess orphan rhythm tokens without assigning them to unrelated notes', () => {
+    const tab = `
+     q   q   h
+e|---0-------3---|
+B|---1-------0---|
+G|---0-------0---|
+D|---------------|
+A|---------------|
+E|---------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    // Token en col 9 ('q') es huérfano (no hay nota en col 9)
+    const excessDiag = parsed.diagnostics.find((d) => d.code === 'EXCESS_RHYTHM_TOKEN');
+    assert.ok(excessDiag, 'Debe registrar EXCESS_RHYTHM_TOKEN para el token en columna 9');
+    assert.strictEqual(excessDiag.lineNumber, 2);
+
+    const m = parsed.measures[0]!;
+    const notesCol5 = m.notes.filter((n) => n.visualColumnIndex === 5);
+    const notesCol13 = m.notes.filter((n) => n.visualColumnIndex === 13);
+    assert.strictEqual(notesCol5[0]!.durationTicks, 480);
+    assert.strictEqual(notesCol13[0]!.durationTicks, 960);
+  });
+
+  // --------------------------------------------------------------------------
+  // 22. DEFECTO B: DOS TOKENS EN LA MISMA COLUMNA (DUPLICATE_RHYTHM_TOKENS_FOR_COLUMN)
+  // --------------------------------------------------------------------------
+  it('22. should reject timing when multiple conflicting rhythm tokens map to the same visual column', () => {
+    // Columna 5 tiene 'q' en col 5 y 'e' en col 6 (ambos dentro de la ventana de la nota)
+    const tab = `
+     qe      h
+e|---0-------3---|
+B|---1-------0---|
+G|---0-------0---|
+D|---------------|
+A|---------------|
+E|---------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    const dupDiag = parsed.diagnostics.find(
+      (d) => d.code === 'DUPLICATE_RHYTHM_TOKENS_FOR_COLUMN'
+    );
+    assert.ok(dupDiag, 'Debe registrar DUPLICATE_RHYTHM_TOKENS_FOR_COLUMN');
+
+    const m = parsed.measures[0]!;
+    const chord1 = m.notes.filter((n) => n.visualColumnIndex === 5);
+    // La asociación ambigua debe ser rechazada, preservando timing null
+    assert.strictEqual(chord1[0]!.durationTicks, null);
+    assert.strictEqual(chord1[0]!.startTick, null);
+  });
+
+  // --------------------------------------------------------------------------
+  // 23. DEFECTO B: ANOTACIONES RÍTMICAS DESALINEADAS (NO SNAP A NOTAS DISTANTES)
+  // --------------------------------------------------------------------------
+  it('23. should NEVER silently associate distant or shifted rhythm tokens to unrelated notes', () => {
+    // Tokens en col 1 y col 9, pero notas en col 5 y col 13 (desplazadas por 4 caracteres)
+    const tab = `
+ q       h
+e|---0-------3---|
+B|---1-------0---|
+G|---0-------0---|
+D|---------------|
+A|---------------|
+E|---------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    // Ningún token coincide visualmente con las notas
+    assert.ok(parsed.diagnostics.some((d) => d.code === 'EXCESS_RHYTHM_TOKEN'));
+    assert.ok(parsed.diagnostics.some((d) => d.code === 'MISSING_RHYTHM_TOKEN'));
+
+    const m = parsed.measures[0]!;
+    for (const note of m.notes) {
+      assert.strictEqual(note.durationTicks, null, 'Notas no deben tomar tokens lejanos desalineados');
+      assert.strictEqual(note.startTick, null);
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 24. DEFECTO B & A: TABLATURA PARCIALMENTE MEDIDA EN MÚLTIPLES COMPASES Y CUERDAS
+  // --------------------------------------------------------------------------
+  it('24. should correctly process partially measured tablature across multiple measures and strings', () => {
+    const tab = `
+     q   q
+e|---0---1---|---3-------|
+B|---1---3---|---0-------|
+G|---0---2---|---0-------|
+D|-----------|-----------|
+A|-----------|-----------|
+E|-----------|-----------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    assert.strictEqual(parsed.rhythmicProvenance, 'PARTIALLY_MEASURED');
+
+    const res = importer.import(tab);
+    assert.strictEqual(res.status, 'SUCCESS');
+    assert.ok(res.payload);
+    assert.strictEqual((res.payload.metadata as any)?.rhythmicProvenance, 'PARTIALLY_MEASURED');
+
+    // Compás 1: Totalmente medido (q = 480 + q = 480 => durationTicks = 960)
+    const m1 = res.payload.measures[0]!;
+    assert.strictEqual(m1.startTick, 0);
+    assert.strictEqual(m1.durationTicks, 960);
+    const m1Notes = m1.getAllNotes();
+    assert.strictEqual(m1Notes.every((n) => n.startTick !== null && n.durationTicks === 480), true);
+
+    // Compás 2: No medido (sin línea de ritmo)
+    const m2 = res.payload.measures[1]!;
+    assert.strictEqual(m2.durationTicks, null, 'Compás sin ritmo no debe fabricar 1920 ticks');
+    const m2Notes = m2.getAllNotes();
+    for (const note of m2Notes) {
+      assert.strictEqual(note.startTick, null, 'Notas del compás 2 deben tener startTick === null');
+      assert.strictEqual(note.durationTicks, null, 'Notas del compás 2 deben tener durationTicks === null');
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 25. DEFECTO C: ARMÓNICOS NATURALES VALIDADOS Y SUS ALTURAS FÍSICAS EXACTAS
+  // --------------------------------------------------------------------------
+  it('25. should resolve exact physical sounding pitches for supported natural harmonics', () => {
+    // Afinación Estándar Guitarra: e=E4, B=B3, G=G3, D=D3, A=A2, E=E2
+    // Fret 12 (+12 st), Fret 7/19 (+19 st), Fret 5/24 (+24 st), Fret 4/9/16 (+28 st)
+    const tab = `
+e|---<12>---<7>---<5>---<4>---|
+B|----------------------------|
+G|----------------------------|
+D|----------------------------|
+A|---<19>---<9>---------------|
+E|---<24>---<16>--------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    assert.strictEqual(parsed.diagnostics.filter((d) => d.code === 'UNSUPPORTED_HARMONIC_FRET').length, 0);
+
+    const m = parsed.measures[0]!;
+    // 1. Cuerda 1 (E4 = MIDI 64) en traste 12 (+12 st => MIDI 76 = E5)
+    const h12 = m.notes.find((n) => n.stringNumber === 1 && n.fret === 12);
+    assert.ok(h12 && h12.resolvedPitch);
+    assert.strictEqual(h12.resolvedPitch.toString(), 'E5');
+    assert.strictEqual(h12.resolvedPitch.midiNumber, 76);
+
+    // 2. Cuerda 1 (E4 = MIDI 64) en traste 7 (+19 st => MIDI 83 = B5)
+    const h7 = m.notes.find((n) => n.stringNumber === 1 && n.fret === 7);
+    assert.ok(h7 && h7.resolvedPitch);
+    assert.strictEqual(h7.resolvedPitch.toString(), 'B5');
+    assert.strictEqual(h7.resolvedPitch.midiNumber, 83);
+
+    // 3. Cuerda 1 (E4 = MIDI 64) en traste 5 (+24 st => MIDI 88 = E6)
+    const h5 = m.notes.find((n) => n.stringNumber === 1 && n.fret === 5);
+    assert.ok(h5 && h5.resolvedPitch);
+    assert.strictEqual(h5.resolvedPitch.toString(), 'E6');
+    assert.strictEqual(h5.resolvedPitch.midiNumber, 88);
+
+    // 4. Cuerda 1 (E4 = MIDI 64) en traste 4 (+28 st => MIDI 92 = G#6)
+    const h4 = m.notes.find((n) => n.stringNumber === 1 && n.fret === 4);
+    assert.ok(h4 && h4.resolvedPitch);
+    assert.strictEqual(h4.resolvedPitch.toString(), 'G#6');
+    assert.strictEqual(h4.resolvedPitch.midiNumber, 92);
+
+    // 5. Cuerda 5 (A2 = MIDI 45) en traste 19 (+19 st => MIDI 64 = E4)
+    const h19 = m.notes.find((n) => n.stringNumber === 5 && n.fret === 19);
+    assert.ok(h19 && h19.resolvedPitch);
+    assert.strictEqual(h19.resolvedPitch.toString(), 'E4');
+    assert.strictEqual(h19.resolvedPitch.midiNumber, 64);
+
+    // 6. Cuerda 5 (A2 = MIDI 45) en traste 9 (+28 st => MIDI 73 = C#5)
+    const h9 = m.notes.find((n) => n.stringNumber === 5 && n.fret === 9);
+    assert.ok(h9 && h9.resolvedPitch);
+    assert.strictEqual(h9.resolvedPitch.toString(), 'C#5');
+    assert.strictEqual(h9.resolvedPitch.midiNumber, 73);
+
+    // 7. Cuerda 6 (E2 = MIDI 40) en traste 24 (+24 st => MIDI 64 = E4)
+    const h24 = m.notes.find((n) => n.stringNumber === 6 && n.fret === 24);
+    assert.ok(h24 && h24.resolvedPitch);
+    assert.strictEqual(h24.resolvedPitch.toString(), 'E4');
+    assert.strictEqual(h24.resolvedPitch.midiNumber, 64);
+
+    // 8. Cuerda 6 (E2 = MIDI 40) en traste 16 (+28 st => MIDI 68 = G#4)
+    const h16 = m.notes.find((n) => n.stringNumber === 6 && n.fret === 16);
+    assert.ok(h16 && h16.resolvedPitch);
+    assert.strictEqual(h16.resolvedPitch.toString(), 'G#4');
+    assert.strictEqual(h16.resolvedPitch.midiNumber, 68);
+  });
+
+  // --------------------------------------------------------------------------
+  // 26. DEFECTO C: ARMÓNICOS EN POSICIONES NO SOPORTADAS (CERO INVENCIÓN)
+  // --------------------------------------------------------------------------
+  it('26. should emit UNSUPPORTED_HARMONIC_FRET diagnostic and set pitch to null for unmodeled frets', () => {
+    const tab = `
+e|---<3>---<8>---<2>---|
+B|---------------------|
+G|---------------------|
+D|---------------------|
+A|---------------------|
+E|---------------------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    const unsuppDiags = parsed.diagnostics.filter((d) => d.code === 'UNSUPPORTED_HARMONIC_FRET');
+    assert.strictEqual(unsuppDiags.length, 3);
+
+    const m = parsed.measures[0]!;
+    for (const note of m.notes) {
+      assert.strictEqual(note.isHarmonic, true);
+      assert.strictEqual(note.resolvedPitch, null, 'Armónico no modelado no debe inventar tono');
+      assert.ok(['<3>', '<8>', '<2>'].includes(note.sourceFragment));
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 27. DEFECTO C: EVENTOS MUTEADOS PRESERVADOS COMO PERCUSIVOS SIN TONO ARBITRARIO
+  // --------------------------------------------------------------------------
+  it('27. should preserve muted strings with source provenance and zero synthetic audible pitch', () => {
+    const tab = `
+e|---x---X---|
+B|---x---X---|
+G|-----------|
+D|-----------|
+A|-----------|
+E|-----------|
+`;
+    const parsed = AsciiTabParser.parse(tab);
+    const unpitchedDiags = parsed.diagnostics.filter((d) => d.code === 'UNPITCHED_MUTED_NOTE');
+    assert.strictEqual(unpitchedDiags.length, 4);
+
+    const m = parsed.measures[0]!;
+    assert.strictEqual(m.notes.every((n) => n.isMuted), true);
+    assert.strictEqual(m.notes.every((n) => n.resolvedPitch === null), true);
+
+    const res = importer.import(tab);
+    assert.strictEqual(res.status, 'SUCCESS');
+    const unpitchedList = (res.payload!.metadata as any)?.unpitchedTabEvents;
+    assert.strictEqual(unpitchedList.length, 4);
+    assert.strictEqual(unpitchedList[0].sourceFragment, 'x');
+    assert.strictEqual(unpitchedList[1].sourceFragment, 'x');
+    assert.strictEqual(unpitchedList[2].sourceFragment, 'X');
+    assert.strictEqual(unpitchedList[3].sourceFragment, 'X');
   });
 });

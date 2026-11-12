@@ -638,7 +638,8 @@ export class FormatCapabilitiesEvaluator {
       const hasTiming =
         allNotes.length > 0 &&
         allNotes.every((n) => n.startTick !== null && n.durationTicks !== null) &&
-        (payload?.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance !== 'NONE';
+        (payload?.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance !== 'NONE' &&
+        (payload?.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance !== 'PARTIALLY_MEASURED';
 
       if (hasTiming) {
         midiCap.isAvailable = true;

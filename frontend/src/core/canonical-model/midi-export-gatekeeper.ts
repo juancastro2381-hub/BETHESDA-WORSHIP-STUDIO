@@ -39,11 +39,11 @@ export class MidiExportGatekeeper {
       (n) => n.startTick === null || n.durationTicks === null
     );
     const rhythmicProv = (score.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance;
-    if (hasUnassignedTiming || rhythmicProv === 'NONE') {
+    if (hasUnassignedTiming || rhythmicProv === 'NONE' || rhythmicProv === 'PARTIALLY_MEASURED') {
       return {
         eligible: false,
         reason:
-          'Tablaturas o partituras con métrica no asignada (unmeasured / rhythmicProvenance NONE) no pueden ser exportadas a MIDI sin alineación temporal explícita.',
+          'Tablaturas o partituras con métrica no asignada o incompleta (unmeasured / partially measured / rhythmicProvenance NONE) no pueden ser exportadas a MIDI sin alineación temporal explícita para todas las notas.',
         code: 'BLOCKED_ZERO_FABRICATION',
       };
     }
@@ -54,12 +54,44 @@ export class MidiExportGatekeeper {
       strictPickupRules: true,
       enforceMidiExportBounds: true,
     });
-    if (!validation.isValid) {
+
+    if (!validation.isStructurallyValid) {
+      return {
+        eligible: false,
+        reason: 'Estructura musical inválida para exportación MIDI.',
+        code: 'STRUCTURAL_VALIDATION_FAILED',
+        issues: validation.issues,
+      };
+    }
+
+    if (!validation.isTemporallyComplete) {
+      return {
+        eligible: false,
+        reason:
+          'Tablaturas o partituras con métrica no asignada o incompleta (unmeasured / partially measured) no pueden ser exportadas a MIDI sin alineación temporal explícita.',
+        code: 'BLOCKED_ZERO_FABRICATION',
+        issues: validation.issues,
+      };
+    }
+
+    if (!validation.isTemporallyValid) {
       const firstError = validation.issues.find((i) => i.severity === 'ERROR');
       return {
         eligible: false,
         reason: `Validación temporal fallida: ${firstError?.message ?? 'Inconsistencias temporales detectadas.'}`,
         code: firstError?.code ?? 'TEMPORAL_VALIDATION_FAILED',
+        issues: validation.issues,
+      };
+    }
+
+    if (!validation.isMidiEligible) {
+      const firstError = validation.issues.find((i) => i.severity === 'ERROR');
+      return {
+        eligible: false,
+        reason:
+          firstError?.message ??
+          'El documento musical no cumple con los límites físicos para exportación MIDI (0-127).',
+        code: firstError?.code ?? 'MIDI_EXPORT_INELIGIBLE',
         issues: validation.issues,
       };
     }

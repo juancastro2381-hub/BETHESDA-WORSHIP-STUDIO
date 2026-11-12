@@ -39,7 +39,7 @@ export class AsciiTabImporter implements MusicImporter {
 
     const trimmed = source.trim();
     // Detección de patrones característicos de tablatura (ej. e|---, |---2---3---|)
-    const hasTabLines = /\|[-0-9pxbshrv\/\*<>\s~]{4,}\|/.test(trimmed);
+    const hasTabLines = /\|[-0-9pxbshrv\/\*<>\s~]{4,}\|/i.test(trimmed);
     const hasStringPrefixes = /^[A-Ga-g][b#]?\d?\s*\|[-0-9]/m.test(trimmed);
 
     return hasTabLines || hasStringPrefixes;
@@ -212,15 +212,15 @@ export class AsciiTabImporter implements MusicImporter {
       const notes: Note[] = [];
 
       let measureDurationTicks: number | null = null;
-      if (!isUnmeasured) {
-        // Duración acumulada de notas si el ritmo está anotado
+      // CERO FABRICACIÓN (Defecto A): Un compás solo posee duración si TODAS sus notas tienen timing explícito
+      const hasUntimedNotesInMeasure = parsedM.notes.some(
+        (n) => n.startTick === null || n.durationTicks === null
+      );
+      if (!isUnmeasured && parsedM.notes.length > 0 && !hasUntimedNotesInMeasure) {
         const maxEndTick = parsedM.notes.reduce((max, n) => {
-          if (n.startTick !== null && n.durationTicks !== null) {
-            return Math.max(max, n.startTick + n.durationTicks);
-          }
-          return max;
+          return Math.max(max, (n.startTick ?? 0) + (n.durationTicks ?? 0));
         }, 0);
-        measureDurationTicks = maxEndTick > 0 ? maxEndTick : 1920;
+        measureDurationTicks = maxEndTick > 0 ? maxEndTick : null;
       }
 
       for (let nIdx = 0; nIdx < parsedM.notes.length; nIdx++) {
@@ -241,7 +241,7 @@ export class AsciiTabImporter implements MusicImporter {
           id: `tab_note_m${parsedM.measureNumber}_${nIdx + 1}`,
           pitch: pNote.resolvedPitch,
           startTick: absStartTick,
-          durationTicks: isUnmeasured ? null : pNote.durationTicks ?? 480,
+          durationTicks: isUnmeasured ? null : (pNote.durationTicks ?? null),
           voice: 1,
           staff: 1,
           velocity: pNote.isMuted ? 30 : 80,
@@ -289,8 +289,12 @@ export class AsciiTabImporter implements MusicImporter {
         arr.push(parsedM.measureNumber);
       }
 
-      if (cumulativeStartTick !== null && measureDurationTicks !== null) {
-        cumulativeStartTick += measureDurationTicks;
+      if (cumulativeStartTick !== null) {
+        if (measureDurationTicks !== null) {
+          cumulativeStartTick += measureDurationTicks;
+        } else {
+          cumulativeStartTick = null; // Un compás con duración desconocida corta el inicio de compases subsiguientes
+        }
       }
     }
 
@@ -315,13 +319,18 @@ export class AsciiTabImporter implements MusicImporter {
     }
 
     // 4. Timeline
+    const allNotesInPayload = canonicalMeasures.flatMap((m) => m.getAllNotes());
+    const hasAnyUntimedNotes =
+      allNotesInPayload.length === 0 ||
+      allNotesInPayload.some((n) => n.startTick === null || n.durationTicks === null);
+
     const totalTicks =
-      isUnmeasured || cumulativeStartTick === null ? null : cumulativeStartTick;
+      isUnmeasured || hasAnyUntimedNotes || cumulativeStartTick === null ? null : cumulativeStartTick;
     const timeline = new Timeline({
       tpqn: 480,
       totalDurationTicks: totalTicks,
       measureCount: canonicalMeasures.length,
-      isUnmetered: isUnmeasured,
+      isUnmetered: isUnmeasured || hasAnyUntimedNotes,
     });
 
     return new CanonicalMusicPayload({
@@ -336,6 +345,20 @@ export class AsciiTabImporter implements MusicImporter {
         stringLabels: score.stringLabels,
         instrument: score.instrument,
         tuningPitches: score.tuning.map((p) => p.toString()),
+        unpitchedTabEvents: score.measures.flatMap((m) =>
+          m.notes
+            .filter((n) => !n.resolvedPitch)
+            .map((n) => ({
+              measureNumber: m.measureNumber,
+              stringNumber: n.stringNumber,
+              fret: n.fret,
+              isMuted: n.isMuted,
+              isHarmonic: n.isHarmonic,
+              visualColumnIndex: n.visualColumnIndex,
+              sourceFragment: n.sourceFragment,
+              lineNumber: n.lineNumber,
+            }))
+        ),
       },
     });
   }

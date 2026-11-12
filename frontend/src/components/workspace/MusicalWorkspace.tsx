@@ -51,6 +51,7 @@ import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
 import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
+import { swLifecycleManager } from '../../core/offline/sw-lifecycle-manager.ts';
 import { VisualDocumentStand } from './VisualDocumentStand.tsx';
 import { ConversionCenterWorkspace } from '../conversion/ConversionCenterWorkspace.tsx';
 
@@ -64,7 +65,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   apiClient,
 }) => {
   const client = apiClient ?? BethesdaApiClient.getInstance();
-  const { user } = useAuth();
+  const { user, isReadOnlyOffline } = useAuth();
 
   // Modales y paneles emergentes
   const [showUploader, setShowUploader] = useState<boolean>(false);
@@ -103,10 +104,14 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const [zoomPercent, setZoomPercent] = useState<number>(DEFAULT_STAND_ZOOM);
   const [standFormatWarning, setStandFormatWarning] = useState<string | null>(null);
 
-  // Cargar preferencias del usuario al autenticarse y aplicarlas por defecto
+  // Cargar preferencias del usuario al autenticarse en línea y aplicarlas por defecto
   useEffect(() => {
     if (!user) {
       setUserPreferences(null);
+      return;
+    }
+
+    if (isReadOnlyOffline || !offlineManager.isOnline()) {
       return;
     }
 
@@ -125,13 +130,30 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [user, client, applyUserPreference]);
+  }, [user, isReadOnlyOffline, client, applyUserPreference]);
 
   // Hook de Ejecución de Setlist de Atril Litúrgico (WS6)
   const setlistExecution = useSetlistExecution({
     initialSetlistId,
     apiClient: client,
   });
+
+  // WS-2D-01 (Sección 3.2): Diferir cualquier actualización del Service Worker durante ejecución activa en escenario
+  useEffect(() => {
+    swLifecycleManager.setStageProtectionState({
+      isSetlistActive: setlistExecution.loadedSetlist?.status === 'ACTIVE',
+      isMusicStandMode,
+    });
+  }, [setlistExecution.loadedSetlist?.status, isMusicStandMode]);
+
+  useEffect(() => {
+    return () => {
+      swLifecycleManager.setStageProtectionState({
+        isSetlistActive: false,
+        isMusicStandMode: false,
+      });
+    };
+  }, []);
 
   // Decisión 2 (Opción A): Memoria volátil de sesión para caché de canciones canónicas
   const songCacheRef = useRef<Map<string, CanonicalMusicPayload>>(new Map());
@@ -160,6 +182,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const handleSavePreference = useCallback(
     async (primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
       if (!user) return;
+      offlineManager.assertCanMutateServer();
       const payload = {
         instrumentId: state.selectedInstrumentId,
         primaryRepresentation: primary,

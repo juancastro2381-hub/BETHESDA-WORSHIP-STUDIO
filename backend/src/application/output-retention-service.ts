@@ -89,11 +89,48 @@ export class OutputRetentionService {
   public static readonly DEFAULT_RETENTION_DAYS = 30;
   public static readonly DEFAULT_QUARANTINE_DAYS = 7;
   public static readonly DEFAULT_LOCK_TIMEOUT_MS = 10000;
+  public static readonly MIN_LOCK_TIMEOUT_MS = 0;
+  public static readonly MAX_LOCK_TIMEOUT_MS = 300000;
 
   private readonly retentionDays: number;
   private readonly quarantineDays: number;
   private readonly defaultLockTimeoutMs: number;
   private readonly pool: Pool;
+
+  /**
+   * Valida estrictamente un valor de timeout de bloqueo en milisegundos.
+   * 
+   * Invariantes de Seguridad y Validación:
+   * 1. Solo acepta valores de tipo 'number'.
+   * 2. Rechaza valores no finitos (NaN, +Infinity, -Infinity).
+   * 3. Rechaza números no enteros (flotantes como 12.5).
+   * 4. Rechaza números negativos (< 0).
+   * 5. Enforza un límite máximo seguro (MAX_LOCK_TIMEOUT_MS = 300,000 ms / 5 minutos).
+   * 6. Preserva 0 como valor semántico documentado para desactivar el timeout de sentencia.
+   */
+  public static validateLockTimeout(timeoutMs: unknown): number {
+    if (typeof timeoutMs !== 'number' || Number.isNaN(timeoutMs) || !Number.isFinite(timeoutMs)) {
+      throw new TypeError(
+        `El timeout de bloqueo debe ser un número entero finito. Recibido: ${String(timeoutMs)}`
+      );
+    }
+    if (!Number.isInteger(timeoutMs)) {
+      throw new TypeError(
+        `El timeout de bloqueo debe ser un número entero (sin decimales). Recibido: ${timeoutMs}`
+      );
+    }
+    if (timeoutMs < OutputRetentionService.MIN_LOCK_TIMEOUT_MS) {
+      throw new RangeError(
+        `El timeout de bloqueo no puede ser negativo (${timeoutMs} ms). Mínimo permitido: ${OutputRetentionService.MIN_LOCK_TIMEOUT_MS} ms.`
+      );
+    }
+    if (timeoutMs > OutputRetentionService.MAX_LOCK_TIMEOUT_MS) {
+      throw new RangeError(
+        `El timeout de bloqueo excede el límite máximo seguro (${timeoutMs} ms). Máximo permitido: ${OutputRetentionService.MAX_LOCK_TIMEOUT_MS} ms (5 minutos).`
+      );
+    }
+    return timeoutMs;
+  }
 
   public constructor(
     private readonly db: Database = defaultDb,
@@ -105,7 +142,11 @@ export class OutputRetentionService {
   ) {
     this.retentionDays = options?.defaultRetentionDays ?? OutputRetentionService.DEFAULT_RETENTION_DAYS;
     this.quarantineDays = options?.defaultQuarantineDays ?? OutputRetentionService.DEFAULT_QUARANTINE_DAYS;
-    this.defaultLockTimeoutMs = options?.defaultLockTimeoutMs ?? OutputRetentionService.DEFAULT_LOCK_TIMEOUT_MS;
+    if (options?.defaultLockTimeoutMs !== undefined) {
+      this.defaultLockTimeoutMs = OutputRetentionService.validateLockTimeout(options.defaultLockTimeoutMs);
+    } else {
+      this.defaultLockTimeoutMs = OutputRetentionService.DEFAULT_LOCK_TIMEOUT_MS;
+    }
     this.pool = customPool ?? defaultPool;
   }
 
@@ -145,14 +186,18 @@ export class OutputRetentionService {
   ): Promise<T> {
     const keyArray = Array.isArray(keys) ? keys : [keys];
     const sortedKeys = Array.from(new Set(keyArray.filter(Boolean))).sort();
-    const timeoutMs = options?.lockTimeoutMs ?? this.defaultLockTimeoutMs;
+
+    // Validación estricta y temprana de configuración de timeout antes del checkout de conexión
+    const rawTimeout = options?.lockTimeoutMs !== undefined ? options.lockTimeoutMs : this.defaultLockTimeoutMs;
+    const timeoutMs = OutputRetentionService.validateLockTimeout(rawTimeout);
+
     const client = await this.pool.connect();
     const acquiredKeys: string[] = [];
     let isConnectionDirty = false;
 
     try {
       if (timeoutMs > 0) {
-        await client.query(`SET lock_timeout = ${Math.floor(timeoutMs)}`);
+        await client.query(`SET lock_timeout = ${timeoutMs}`);
         isConnectionDirty = true;
       }
 
@@ -1149,12 +1194,15 @@ export class OutputRetentionService {
    * Reconcilia registros de intenciones completadas físicamente (DELETED o RETAINED)
    * cuya persistencia de auditoría falló previamente en la subtransacción SAVEPOINT (audited = false).
    * 
-   * Procedimiento de Reconciliación de Auditoría:
-   * 1. Consulta intenciones en estado terminal (DELETED, RETAINED) con audited = false.
-   * 2. Intenta registrar el evento de auditoría correspondiente de forma independiente en una transacción aislada.
-   * 3. Si la inserción en audit_logs tiene éxito, actualiza audited = true de forma atómica.
-   * 4. Si falla (p.ej. violación de restricción o BD en solo lectura), captura el error sin alterar
-   *    el estado físico ni falsear el campo audited.
+   * Procedimiento de Reconciliación Concurrente e Idempotente:
+   * 1. Consulta candidatos en estado terminal (DELETED, RETAINED) con audited = false.
+   * 2. Para cada candidato, abre una transacción PostgreSQL dedicada.
+   * 3. Adquiere bloqueo exclusivo de fila mediante SELECT ... FOR UPDATE.
+   * 4. Re-evalúa estado y audited bajo el bloqueo: si otro worker concurrente ya lo reconcilió, omite.
+   * 5. Verifica idempotencia contra audit_logs mediante el token de intención (metadata->>'intentId').
+   * 6. Inserta exactamente un evento de auditoría y actualiza audited = true dentro de la misma transacción.
+   * 7. Preserva el estado físico sin modificaciones (DELETED o RETAINED se mantienen intactos).
+   * 8. Ante fallo (p.ej. violación de FK en auditLogs), el rollback de tx preserva audited = false truthful.
    */
   public async reconcileUnauditedDeletions(options?: {
     userId?: string;
@@ -1162,6 +1210,7 @@ export class OutputRetentionService {
     scannedCount: number;
     reconciledCount: number;
     reconciledAuditCount: number;
+    skippedCount: number;
     failedCount: number;
     errors: Array<{ storageKey: string; error: string }>;
   }> {
@@ -1169,12 +1218,13 @@ export class OutputRetentionService {
       scannedCount: 0,
       reconciledCount: 0,
       reconciledAuditCount: 0,
+      skippedCount: 0,
       failedCount: 0,
       errors: [] as Array<{ storageKey: string; error: string }>,
     };
 
-    const unauditedIntents = await this.db
-      .select()
+    const candidates = await this.db
+      .select({ storageKey: casDeletionIntents.storageKey })
       .from(casDeletionIntents)
       .where(
         and(
@@ -1183,42 +1233,91 @@ export class OutputRetentionService {
         )
       );
 
-    report.scannedCount = unauditedIntents.length;
+    report.scannedCount = candidates.length;
 
-    for (const intent of unauditedIntents) {
+    for (const candidate of candidates) {
       try {
-        await this.db.transaction(async (tx) => {
+        const wasReconciled = await this.db.transaction(async (tx) => {
+          // Bloqueo exclusivo de fila para serializar workers concurrentes
+          const [lockedIntent] = await tx
+            .select()
+            .from(casDeletionIntents)
+            .where(eq(casDeletionIntents.storageKey, candidate.storageKey))
+            .for('update');
+
+          // Re-verificación bajo bloqueo: omitir si ya fue auditado o si el estado mutó
+          if (
+            !lockedIntent ||
+            lockedIntent.audited ||
+            !['DELETED', 'RETAINED'].includes(lockedIntent.state)
+          ) {
+            return false;
+          }
+
           const eventType =
-            intent.state === 'RETAINED'
+            lockedIntent.state === 'RETAINED'
               ? 'CAS_OBJECT_RETAINED'
               : 'CONVERSION_OUTPUT_DELETION_RECONCILED';
 
+          // Salvaguarda de idempotencia: comprobar si ya existe una entrada previa en audit_logs
+          const [existingAudit] = await tx
+            .select({ id: auditLogs.id })
+            .from(auditLogs)
+            .where(
+              and(
+                eq(auditLogs.resource, `storage/${lockedIntent.storageKey}`),
+                eq(auditLogs.eventType, eventType),
+                sql`(${auditLogs.metadata}->>'intentId' = ${lockedIntent.id})`
+              )
+            )
+            .limit(1);
+
+          if (existingAudit) {
+            await tx
+              .update(casDeletionIntents)
+              .set({ audited: true, updatedAt: new Date() })
+              .where(eq(casDeletionIntents.storageKey, lockedIntent.storageKey));
+            return false;
+          }
+
+          // Inserción de exactamente UN evento de auditoría
           await tx.insert(auditLogs).values({
             eventType,
             userId: options?.userId ?? null,
-            resource: `storage/${intent.storageKey}`,
+            resource: `storage/${lockedIntent.storageKey}`,
             metadata: {
-              storageKey: intent.storageKey,
-              canonicalKey: intent.canonicalKey,
-              checksumSha256: intent.checksumSha256,
-              state: intent.state,
+              intentId: lockedIntent.id,
+              storageKey: lockedIntent.storageKey,
+              canonicalKey: lockedIntent.canonicalKey,
+              checksumSha256: lockedIntent.checksumSha256,
+              state: lockedIntent.state,
               reconciledAt: new Date().toISOString(),
               reason: 'Audit reconciliation for previously unaudited physical lifecycle event',
             },
           });
 
+          // Actualizar audited = true en la MISMA transacción
+          // Invariante de Dominio: El estado físico (state) NUNCA se altera
           await tx
             .update(casDeletionIntents)
             .set({ audited: true, updatedAt: new Date() })
-            .where(eq(casDeletionIntents.storageKey, intent.storageKey));
+            .where(eq(casDeletionIntents.storageKey, lockedIntent.storageKey));
+
+          return true;
         });
 
-        report.reconciledCount++;
-        report.reconciledAuditCount++;
+        if (wasReconciled) {
+          report.reconciledCount++;
+          report.reconciledAuditCount++;
+        } else {
+          report.skippedCount++;
+        }
       } catch (err: any) {
+        // En caso de fallo transaccional (p.ej. violación de FK en auditLogs),
+        // el rollback de tx garantiza que audited continúe siendo false
         report.failedCount++;
         report.errors.push({
-          storageKey: intent.storageKey,
+          storageKey: candidate.storageKey,
           error: err.message || String(err),
         });
       }

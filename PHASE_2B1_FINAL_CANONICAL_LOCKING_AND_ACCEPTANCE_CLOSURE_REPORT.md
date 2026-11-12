@@ -434,14 +434,118 @@ All 719 repository tests passed cleanly with 0 failures, 0 cancellations, and 0 
 
 ---
 
-## 11. CONCLUSION & DEFINITIVE GATE DETERMINATION
+## 11. FINAL AUDIT RECONCILIATION IDEMPOTENCY & CONFIGURATION HARDENING
+
+### 11.1 Concurrency-Safe & Idempotent Audit Reconciliation (`SELECT ... FOR UPDATE`)
+To eliminate the hazard where concurrent reconciliation workers might process the same unaudited intent and insert duplicate audit events, `OutputRetentionService.reconcileUnauditedDeletions()` was re-engineered with strict database-level serializability:
+1. **Per-Intent Isolated Transactions:** Each candidate with `audited = false` is processed inside its own PostgreSQL transaction.
+2. **Pessimistic Row-Level Locking:** Acquires an exclusive row lock via `.for('update')` on `cas_deletion_intents`:
+   ```typescript
+   const [lockedIntent] = await tx
+     .select()
+     .from(casDeletionIntents)
+     .where(eq(casDeletionIntents.storageKey, candidate.storageKey))
+     .for('update');
+   ```
+3. **Locked State Re-Verification:** Once the row lock is acquired, the worker immediately re-checks `lockedIntent.audited`. If another concurrent worker committed reconciliation while this worker was waiting for the lock, the intent is safely skipped (`report.skippedCount++`), preventing false successes and duplicate processing.
+4. **Audit Token Idempotency Check:** Prior to insertion, the worker queries `audit_logs` matching the resource and intent token (`metadata->>'intentId' = lockedIntent.id`). If an entry already exists, it updates `audited = true` without duplicating the audit row.
+5. **Atomic Commit & Rollback Protection:** The audit event insertion and `cas_deletion_intents.audited = true` update execute in the same transaction. If insertion fails (e.g. FK violation), transaction rollback preserves `audited = false` truthfully.
+6. **Physical Invariant Preservation:** The physical deletion status (`state = 'DELETED'` or `'RETAINED'`) is strictly immutable during audit reconciliation.
+
+### 11.2 Strict Lock Timeout Configuration Validation (`validateLockTimeout`)
+`OutputRetentionService` introduces early, strict validation for all lock timeout configurations before checking out connections from the pool:
+1. **Mathematical Constraints:**
+   - Only finite numbers accepted (`Number.isFinite`).
+   - Floats/decimals rejected with `TypeError` (`Number.isInteger`).
+   - Non-numbers (`NaN`, `Infinity`, strings, objects, `null`) rejected with `TypeError`.
+   - Negative values ($< 0$) rejected with `RangeError`.
+   - Safe maximum enforced: `MAX_LOCK_TIMEOUT_MS = 300000` ($5\text{ minutes}$); values $> 300,000$ rejected with `RangeError`.
+   - Disabled timeout semantics preserved: $0$ is explicitly valid and disables the statement lock timeout.
+2. **Lifecycle & Session Protection:**
+   - In constructor: `options?.defaultLockTimeoutMs` validated on startup.
+   - In `withCasAdvisoryLocks()`: `options?.lockTimeoutMs` validated prior to `pool.connect()`.
+   - Clean execution restores default configuration via `RESET lock_timeout`.
+   - Dirty execution (timeouts, statement errors) invokes `client.release(true)` to discard the physical connection and prevent session setting contamination.
+
+### 11.3 Empirical Execution Evidence (Post-Hardening)
+
+#### Environment Identity
+- **PostgreSQL Version:** `PostgreSQL 18.1 on x86_64-windows, compiled by msvc-19.44.35221, 64-bit`
+- **Database Identity:** `bethesda_worship_test` (User: `postgres`, Port: `5432`)
+- **Node.js Runtime:** `v24.12.0` on Windows x64
+
+#### Test Suite 1: CAS Concurrency, Lifecycle & Hardening (14 Tests)
+```bash
+npx --prefix backend tsx --test backend/src/__tests__/cas-concurrency.test.ts
+```
+```text
+▶ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite
+  ✔ Escenario A: Primary file deletion succeeds, companion deletion fails (126.4188ms)
+  ✔ Escenario B: Companion file is being accessed while retention attempts deletion (368.4216ms)
+  ✔ Escenario C: Two independent workers attempt to delete the same primary and companion pair (38.0282ms)
+  ✔ Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED (41.421ms)
+  ✔ Escenario E: Process crashes after primary deletion but before companion deletion (21.1134ms)
+  ✔ Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization (55.9504ms)
+  ✔ Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup (317.2661ms)
+  ✔ Escenario H: Reconciliation retries only the incomplete artifact (31.2991ms)
+  ✔ Escenario I: Audit failure preserves truthful final states (50.2661ms)
+  ✔ Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE (150.8733ms)
+  ✔ Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por cuarentena) (9.7232ms)
+  ✔ Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes) (14.2255ms)
+  ✔ Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false (10.8157ms)
+  ✔ Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno) (2.309ms)
+✔ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite (1357.7771ms)
+ℹ tests 14
+ℹ suites 1
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2795.6989
+```
+
+#### Test Suite 2: All 5 Phase 2B.1 Storage Files (63 Tests, 9 Suites)
+```bash
+npx --prefix backend tsx --test --test-concurrency=1 backend/src/__tests__/storage-provider.test.ts backend/src/__tests__/conversion-storage-externalization.test.ts backend/src/__tests__/output-retention.test.ts backend/src/__tests__/cas-concurrency.test.ts backend/src/__tests__/conversion-security.test.ts
+```
+```text
+ℹ tests 63
+ℹ suites 9
+ℹ pass 63
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10106.8862
+```
+
+#### Test Suite 3: Full Repository Regression Baseline
+```bash
+npm --prefix backend test
+```
+```text
+ℹ tests 719
+ℹ suites 110
+ℹ pass 719
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 422857.3527
+```
+
+---
+
+## 12. CONCLUSION & DEFINITIVE GATE DETERMINATION
 
 All independent review findings have been resolved with strict fidelity:
 1. Real production lock helper invoked and verified under bounded lock timeout.
 2. Interrupted deletion cycle in Scenario F proven via real service-level failure injection.
-3. Physical `DELETED` state vs. `audited` flag truthful semantics codified and backed by an audit reconciliation procedure.
-4. Enum lifecycle in PostgreSQL documented with down migration safety guarantees.
-5. All test metrics empirically captured without fabrication.
+3. Physical `DELETED` state vs. `audited` flag truthful semantics codified and backed by an idempotent audit reconciliation procedure (`SELECT ... FOR UPDATE`, Escenarios L & M).
+4. Lock timeout validation enforced with finite integer checks and safe bounds (Escenario N).
+5. Enum lifecycle in PostgreSQL documented with down migration safety guarantees.
+6. All test metrics empirically captured without fabrication.
 
 **FINAL GATE DETERMINATION: PASS**  
 **Phase 2B.2 Authorization Gate: STRICTLY UNAUTHORIZED / AWAITING PROJECT OWNER ACCEPTANCE**

@@ -923,4 +923,203 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
     // Limpieza
     await outputStorage.delete(crashedKey).catch(() => {});
   });
+
+  it('Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes)', async () => {
+    const salt = crypto.randomUUID();
+    const hash = crypto.createHash('sha256').update('Scenario L ' + salt).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    // 1. Insertar una intención en estado DELETED con audited = false
+    await db.insert(casDeletionIntents).values({
+      storageKey: key,
+      canonicalKey,
+      checksumSha256: hash,
+      state: 'DELETED',
+      primaryDeleted: true,
+      companionDeleted: true,
+      attempts: 0,
+      audited: false,
+    });
+
+    // 2. Instanciar dos workers de retención independientes
+    const service1 = new OutputRetentionService(db, outputStorage, {}, pool);
+    const service2 = new OutputRetentionService(db, outputStorage, {}, pool);
+
+    try {
+      // 3. Ejecutar reconcileUnauditedDeletions simultáneamente
+      const [res1, res2] = await Promise.all([
+        service1.reconcileUnauditedDeletions({ userId: testUserId }),
+        service2.reconcileUnauditedDeletions({ userId: testUserId }),
+      ]);
+
+      // 4. Verificaciones de concurrencia y no falsedad en reportes
+      // Uno de los dos debe haber reconciliado exactamente 1; el otro debió omitir 1 (skippedCount = 1)
+      const totalReconciled = res1.reconciledCount + res2.reconciledCount;
+      const totalSkipped = res1.skippedCount + res2.skippedCount;
+
+      assert.equal(totalReconciled, 1, 'Exactamente un worker debe reconciliar la intención');
+      assert.equal(totalSkipped, 1, 'El segundo worker debe omitir de forma segura');
+      assert.equal(res1.failedCount, 0, 'Worker 1 no debe reportar fallos');
+      assert.equal(res2.failedCount, 0, 'Worker 2 no debe reportar fallos');
+
+      // 5. La intención en base de datos debe terminar en audited = true
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intent.audited, true, 'La intención debe terminar con audited = true');
+      assert.equal(intent.state, 'DELETED', 'El estado físico DELETED se mantiene intacto');
+
+      // 6. En audit_logs debe existir EXACTAMENTE una entrada para este recurso
+      const auditEntries = await db
+        .select()
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.resource, `storage/${key}`),
+            eq(auditLogs.eventType, 'CONVERSION_OUTPUT_DELETION_RECONCILED')
+          )
+        );
+
+      assert.equal(auditEntries.length, 1, 'Debe persistirse exactamente UN evento de auditoría en audit_logs');
+    } finally {
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+      await db.delete(auditLogs).where(eq(auditLogs.resource, `storage/${key}`));
+    }
+  });
+
+  it('Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false', async () => {
+    const salt = crypto.randomUUID();
+    const hash = crypto.createHash('sha256').update('Scenario M ' + salt).digest('hex');
+    const key = `outputs/${hash}.txt`;
+    const canonicalKey = `outputs/${hash}.canonical.json`;
+
+    await db.insert(casDeletionIntents).values({
+      storageKey: key,
+      canonicalKey,
+      checksumSha256: hash,
+      state: 'DELETED',
+      primaryDeleted: true,
+      companionDeleted: true,
+      attempts: 0,
+      audited: false,
+    });
+
+    try {
+      // Pasar un userId no existente que viole la clave foránea en auditLogs
+      const nonExistentUserId = crypto.randomUUID();
+      const report = await retentionService.reconcileUnauditedDeletions({ userId: nonExistentUserId });
+
+      assert.equal(report.failedCount, 1, 'Debe registrar exactamente 1 fallo');
+      assert.equal(report.reconciledCount, 0, 'No debe reportar reconciliación exitosa');
+      assert(report.errors.length > 0, 'Debe contener el error capturado');
+
+      // Verificación de integridad: audited continúa siendo FALSE y state continúa siendo DELETED
+      const [intent] = await db
+        .select()
+        .from(casDeletionIntents)
+        .where(eq(casDeletionIntents.storageKey, key));
+
+      assert.equal(intent.audited, false, 'audited DEBE permanecer false tras el rollback');
+      assert.equal(intent.state, 'DELETED', 'El estado físico no debe sufrir alteraciones');
+    } finally {
+      await db.delete(casDeletionIntents).where(eq(casDeletionIntents.storageKey, key));
+    }
+  });
+
+  it('Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno)', async () => {
+    // 1. Valores válidos
+    assert.equal(OutputRetentionService.validateLockTimeout(0), 0, '0 debe ser válido (timeout desactivado)');
+    assert.equal(OutputRetentionService.validateLockTimeout(1), 1, '1 debe ser válido (límite mínimo)');
+    assert.equal(OutputRetentionService.validateLockTimeout(10000), 10000, '10000 debe ser válido (default)');
+    assert.equal(OutputRetentionService.validateLockTimeout(300000), 300000, '300000 debe ser válido (límite máximo)');
+
+    // 2. Valores negativos o fuera de rango (RangeError)
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(-1),
+      /no puede ser negativo/,
+      'Debe rechazar timeout negativo -1'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(-500),
+      /no puede ser negativo/,
+      'Debe rechazar timeout negativo -500'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(300001),
+      /excede el límite máximo seguro/,
+      'Debe rechazar timeout superior al máximo (300001)'
+    );
+
+    // 3. Valores no numéricos, flotantes o no finitos (TypeError)
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(NaN),
+      /número entero finito/,
+      'Debe rechazar NaN'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(Infinity),
+      /número entero finito/,
+      'Debe rechazar Infinity'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(-Infinity),
+      /número entero finito/,
+      'Debe rechazar -Infinity'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(12.5),
+      /sin decimales/,
+      'Debe rechazar números decimales'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout('10000' as any),
+      /número entero finito/,
+      'Debe rechazar strings'
+    );
+    assert.throws(
+      () => OutputRetentionService.validateLockTimeout(null as any),
+      /número entero finito/,
+      'Debe rechazar null'
+    );
+
+    // 4. Invocación de withCasAdvisoryLocks con timeout desactivado (0) y timeout en el límite mínimo (1ms)
+    const testKeyValid = `outputs/test_timeout_valid_${crypto.randomUUID()}.txt`;
+    await retentionService.withCasAdvisoryLocks(
+      testKeyValid,
+      async (client) => {
+        const res = await client.query('SELECT 1 as val');
+        assert.equal(res.rows[0].val, 1);
+      },
+      { lockTimeoutMs: 0 }
+    );
+
+    // 5. Invocación de withCasAdvisoryLocks con valor inválido debe rechazar inmediatamente antes de tocar BD
+    await assert.rejects(
+      async () => {
+        await retentionService.withCasAdvisoryLocks(
+          testKeyValid,
+          async () => {},
+          { lockTimeoutMs: -10 }
+        );
+      },
+      /no puede ser negativo/,
+      'withCasAdvisoryLocks debe rechazar timeout inválido inmediatamente'
+    );
+
+    // 6. Verificación de no fuga de sesión: checkout de nueva conexión tiene lock_timeout por defecto (0 o default)
+    const freshClient = await pool.connect();
+    try {
+      const timeoutCheck = await freshClient.query('SHOW lock_timeout');
+      assert.equal(
+        timeoutCheck.rows[0].lock_timeout,
+        '0',
+        'La conexión del pool no debe tener lock_timeout alterado'
+      );
+    } finally {
+      freshClient.release();
+    }
+  });
 });

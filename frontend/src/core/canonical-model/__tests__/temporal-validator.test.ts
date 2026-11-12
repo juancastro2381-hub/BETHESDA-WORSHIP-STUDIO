@@ -616,4 +616,222 @@ describe('Phase 2B.2 — TemporalValidator & MidiExportGatekeeper Suite', () => 
     const gate = MidiExportGatekeeper.isEligible(payload);
     assert.strictEqual(gate.eligible, false);
   });
+
+  // --------------------------------------------------------------------------
+  // 16. REGRESIÓN: SCORE NO MEDIDO CON DATOS ESTRUCTURALES INVÁLIDOS (COMPÁS < 1)
+  // --------------------------------------------------------------------------
+  it('16. should reject structural validity on unmeasured score with invalid measure number (< 1)', () => {
+    const unmeasuredNote = new Note({
+      id: 'un_inv_1',
+      pitch: new Pitch(NoteName.E, 2),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 6, fret: 0 } },
+    });
+
+    // Compás mutado a 0 (inválido según la gramática musical canónica >= 1)
+    const invalidMeasure = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [unmeasuredNote])],
+    });
+    (invalidMeasure as any).number = 0;
+
+    const payload = createBasePayload([invalidMeasure], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Compás 0 no debe recibir veredicto estructural positivo');
+    assert.strictEqual(res.isInstrumentValid, true, 'Afinación de tablatura es físicamente válida');
+    assert.strictEqual(res.isTemporallyComplete, false, 'Score no medido no es completo');
+    assert.strictEqual(res.isMidiEligible, false, 'Score sin estructura válida no es elegible para MIDI');
+    assert.strictEqual(res.isValid, false, 'Documento con estructura inválida debe tener isValid = false');
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_MEASURE_NUMBER'));
+
+    // Gatekeeper Fail-Closed
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+  });
+
+  // --------------------------------------------------------------------------
+  // 17. REGRESIÓN: SCORE NO MEDIDO CON ESTRUCTURA INVÁLIDA (ID DE VOZ < 1 O COMPASES VACÍOS)
+  // --------------------------------------------------------------------------
+  it('17. should reject structural validity on unmeasured score with invalid voice ID or empty measures', () => {
+    // A. Payload sin compases
+    const emptyPayload = createBasePayload([], { rhythmicProvenance: 'NONE' });
+    const resEmpty = TemporalValidator.validate(emptyPayload);
+    assert.strictEqual(resEmpty.isStructurallyValid, false, 'Payload sin compases debe ser estructuralmente inválido');
+    assert.strictEqual(resEmpty.isValid, false);
+    assert.ok(resEmpty.issues.some((i) => i.code === 'STRUCTURAL_EMPTY_MEASURES'));
+
+    // B. Voz con id < 1 (mutada para simular payload deserializado corrupto)
+    const n = new Note({
+      id: 'un_inv_voice',
+      pitch: new Pitch(NoteName.A, 2),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const voice = new Voice(1, [n]);
+    (voice as any).id = 0;
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [voice],
+    });
+    const payloadVoice = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const resVoice = TemporalValidator.validate(payloadVoice);
+    assert.strictEqual(resVoice.isStructurallyValid, false, 'Voz con ID 0 debe ser estructuralmente inválida');
+    assert.strictEqual(resVoice.isValid, false);
+    assert.ok(resVoice.issues.some((i) => i.code === 'STRUCTURAL_INVALID_VOICE_ID'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 18. REGRESIÓN: SCORE NO MEDIDO CON METADATOS DE CUERDA INVÁLIDOS (> 12)
+  // --------------------------------------------------------------------------
+  it('18. should reject instrument validity on unmeasured score with invalid string number (> 12)', () => {
+    const invalidStringNote = new Note({
+      id: 'un_inv_str',
+      pitch: new Pitch(NoteName.E, 2),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 15, fret: 0 } }, // Cuerda 15 fuera de rango (1-12)
+    });
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [invalidStringNote])],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true, 'Estructura de compases y voces es válida');
+    assert.strictEqual(res.isInstrumentValid, false, 'Cuerda 15 no debe recibir veredicto de instrumento positivo');
+    assert.strictEqual(res.isTemporallyComplete, false, 'Score no medido no es completo');
+    assert.strictEqual(res.isMidiEligible, false, 'Score con instrumento inválido no es elegible para MIDI');
+    assert.strictEqual(res.isValid, false, 'Documento con instrumento inválido debe tener isValid = false');
+    assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_STRING_NUMBER'));
+
+    // Gatekeeper Fail-Closed
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+  });
+
+  // --------------------------------------------------------------------------
+  // 19. REGRESIÓN: SCORE NO MEDIDO CON TRASTE DE TABLATURA FÍSICAMENTE IMPOSIBLE (> 30)
+  // --------------------------------------------------------------------------
+  it('19. should reject instrument validity on unmeasured score with impossible fret (> 30)', () => {
+    const invalidFretNote = new Note({
+      id: 'un_inv_fret',
+      pitch: new Pitch(NoteName.E, 2),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 1, fret: 45 } }, // Traste 45 excede el límite físico de 30
+    });
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [invalidFretNote])],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true, 'Estructura es válida');
+    assert.strictEqual(res.isInstrumentValid, false, 'Traste 45 debe invalidar el instrumento');
+    assert.strictEqual(res.isTemporallyComplete, false);
+    assert.strictEqual(res.isMidiEligible, false);
+    assert.strictEqual(res.isValid, false);
+    assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_FRET'));
+
+    // Gatekeeper Fail-Closed
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false);
+  });
+
+  // --------------------------------------------------------------------------
+  // 20. REGRESIÓN: INTENTO DE EXPORTACIÓN MIDI EN SCORE NO MEDIDO (STRICT FAIL-CLOSED)
+  // --------------------------------------------------------------------------
+  it('20. should enforce strict fail-closed MIDI export rejection for fully unmeasured score', () => {
+    const unmeasuredNote = new Note({
+      id: 'un_midi_gate',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 2, fret: 1 } },
+    });
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [unmeasuredNote])],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    // Verificación de dimensiones
+    assert.strictEqual(res.isStructurallyValid, true);
+    assert.strictEqual(res.isInstrumentValid, true);
+    assert.strictEqual(res.isTemporallyComplete, false);
+    assert.strictEqual(res.isMidiEligible, false, 'isMidiEligible debe ser estrictamente false');
+
+    // Gatekeeper directo
+    const gate = MidiExportGatekeeper.isEligible(payload);
+    assert.strictEqual(gate.eligible, false, 'MIDI Gatekeeper debe rechazar score no medido');
+    assert.strictEqual(gate.code, 'BLOCKED_ZERO_FABRICATION');
+    assert.match(gate.reason || '', /unmeasured|rhythmicProvenance NONE/i);
+  });
+
+  // --------------------------------------------------------------------------
+  // 21. REGRESIÓN: SCORE NO MEDIDO CON ESTRUCTURA E INSTRUMENTO AMBOS INVÁLIDOS
+  // --------------------------------------------------------------------------
+  it('21. should reject both structural and instrument validity when both are corrupted in unmeasured score', () => {
+    const corruptedNote = new Note({
+      id: 'un_both_corrupt',
+      pitch: new Pitch(NoteName.D, 3),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+      notationMetadata: { tablature: { stringNumber: 99, fret: 88 } },
+    });
+
+    const corruptedMeasure = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [corruptedNote])],
+    });
+    (corruptedMeasure as any).number = -1; // Inválido (< 1) mutado para evaluar validador ante payloads corruptos
+
+    const payload = createBasePayload([corruptedMeasure], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Estructura debe ser inválida');
+    assert.strictEqual(res.isInstrumentValid, false, 'Instrumento debe ser inválido');
+    assert.strictEqual(res.isTemporallyComplete, false);
+    assert.strictEqual(res.isMidiEligible, false);
+    assert.strictEqual(res.isValid, false);
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_MEASURE_NUMBER'));
+    assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_STRING_NUMBER'));
+    assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_FRET'));
+  });
 });

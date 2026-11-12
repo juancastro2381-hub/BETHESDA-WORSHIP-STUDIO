@@ -47,7 +47,13 @@ export interface TemporalIssue {
     | 'TIE_TEMPORAL_DISCONTINUITY'
     | 'MIDI_PITCH_OUT_OF_RANGE'
     | 'MIDI_DURATION_NON_POSITIVE'
-    | 'MIDI_INVALID_NOTE_DURATION';
+    | 'MIDI_INVALID_NOTE_DURATION'
+    | 'STRUCTURAL_EMPTY_MEASURES'
+    | 'STRUCTURAL_INVALID_MEASURE_NUMBER'
+    | 'STRUCTURAL_INVALID_VOICE_ID'
+    | 'STRUCTURAL_MISSING_EVENT_ID'
+    | 'INSTRUMENT_INVALID_STRING_NUMBER'
+    | 'INSTRUMENT_INVALID_FRET';
   voiceId: number;
   measureNumber: number;
   startTick: number;
@@ -91,31 +97,16 @@ export class TemporalValidator {
       { decl: TupletGroupDeclaration; events: Array<{ id: string; duration: number }> }
     >();
 
-    const allNotes = payload.getAllNotes();
+    const allNotes = payload?.getAllNotes ? payload.getAllNotes() : [];
     const hasUnmeasuredNotes = allNotes.some(
       (n) => n.startTick === null || n.durationTicks === null
     );
+    const rhythmicProv = (payload?.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance;
     const isExplicitlyUnmeasured =
-      (payload.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance === 'NONE' ||
-      (allNotes.length > 0 && hasUnmeasuredNotes);
+      rhythmicProv === 'NONE' || (allNotes.length > 0 && hasUnmeasuredNotes);
 
-    // Si el score es completamente no medido (todos los eventos sin timing numérico),
-    // la estructura es válida, pero se marca isUnmeasured = true sin evaluar gaps temporales.
-    if (isExplicitlyUnmeasured && allNotes.every((n) => n.startTick === null)) {
-      return {
-        isValid: true,
-        issues: [],
-        isUnmeasured: true,
-        isPartiallyMeasured: false,
-        isStructurallyValid: true,
-        isInstrumentValid: true,
-        isTemporallyComplete: false,
-        isTemporallyValid: true,
-        isMidiEligible: false,
-      };
-    }
-
-    for (const measure of payload.measures) {
+    const measures = payload?.measures ?? [];
+    for (const measure of measures) {
       // -------------------------------------------------------------
       // ETAPA 1: VALIDACIÓN DE ANACRUSA / PICKUP MEASURE
       // -------------------------------------------------------------
@@ -154,11 +145,11 @@ export class TemporalValidator {
       // -------------------------------------------------------------
       // ETAPA 2: RECORRIDO DE LÍNEA DE TIEMPO POR VOZ
       // -------------------------------------------------------------
-      for (const voice of measure.voices) {
+      for (const voice of measure.voices ?? []) {
         const measureStart = measure.startTick ?? 0;
         let expectedVoiceTick = measureStart;
         let previousStartTick = -1;
-        const hasUntimedEventsInVoice = voice.events.some(
+        const hasUntimedEventsInVoice = (voice.events ?? []).some(
           (e) => e.startTick === null || e.durationTicks === null
         );
         const activeEventsInVoice: Array<{
@@ -168,7 +159,7 @@ export class TemporalValidator {
           chordId?: string;
         }> = [];
 
-        for (const ev of voice.events) {
+        for (const ev of voice.events ?? []) {
           const rawStartTick = ev.startTick;
           const evDurationTicks = ev.durationTicks;
           if (rawStartTick === null || evDurationTicks === null) {
@@ -448,15 +439,61 @@ export class TemporalValidator {
     // -------------------------------------------------------------
     // 1. Validez Estructural
     let isStructurallyValid = true;
-    if (!payload.measures || payload.measures.length === 0) {
+    if (!measures || measures.length === 0) {
       isStructurallyValid = false;
+      issues.push({
+        severity: 'ERROR',
+        code: 'STRUCTURAL_EMPTY_MEASURES',
+        voiceId: 0,
+        measureNumber: 0,
+        startTick: 0,
+        message: 'El documento musical no contiene compases.',
+      });
     } else {
-      for (const m of payload.measures) {
-        if (m.number < 1) isStructurallyValid = false;
-        for (const v of m.voices) {
-          if (v.id < 1) isStructurallyValid = false;
-          for (const ev of v.events) {
-            if (!ev.id) isStructurallyValid = false;
+      for (const m of measures) {
+        if (!m || typeof m.number !== 'number' || m.number < 1) {
+          isStructurallyValid = false;
+          issues.push({
+            severity: 'ERROR',
+            code: 'STRUCTURAL_INVALID_MEASURE_NUMBER',
+            voiceId: 0,
+            measureNumber: m?.number ?? 0,
+            startTick: m?.startTick ?? 0,
+            message: `Número de compás inválido (${m?.number}). Los compases deben numerarse con enteros >= 1.`,
+            context: { measureNumber: m?.number },
+          });
+        }
+        if (!m.voices || m.voices.length === 0) {
+          // Sin voces en el compás
+        } else {
+          for (const v of m.voices) {
+            if (!v || typeof v.id !== 'number' || v.id < 1) {
+              isStructurallyValid = false;
+              issues.push({
+                severity: 'ERROR',
+                code: 'STRUCTURAL_INVALID_VOICE_ID',
+                voiceId: v?.id ?? 0,
+                measureNumber: m.number,
+                startTick: m.startTick ?? 0,
+                message: `ID de voz inválido (${v?.id}) en compás ${m.number}. Los IDs de voz deben ser enteros >= 1.`,
+                context: { voiceId: v?.id },
+              });
+            }
+            if (v.events) {
+              for (const ev of v.events) {
+                if (!ev || !ev.id || typeof ev.id !== 'string' || ev.id.trim() === '') {
+                  isStructurallyValid = false;
+                  issues.push({
+                    severity: 'ERROR',
+                    code: 'STRUCTURAL_MISSING_EVENT_ID',
+                    voiceId: v?.id ?? 0,
+                    measureNumber: m.number,
+                    startTick: ev?.startTick ?? 0,
+                    message: `Evento musical sin identificador obligatorio en compás ${m.number}, voz ${v?.id}.`,
+                  });
+                }
+              }
+            }
           }
         }
       }
@@ -471,22 +508,41 @@ export class TemporalValidator {
       if (tabMeta) {
         if (
           tabMeta.stringNumber !== undefined &&
-          (tabMeta.stringNumber < 1 || tabMeta.stringNumber > 12)
+          (typeof tabMeta.stringNumber !== 'number' ||
+            tabMeta.stringNumber < 1 ||
+            tabMeta.stringNumber > 12)
         ) {
           isInstrumentValid = false;
+          issues.push({
+            severity: 'ERROR',
+            code: 'INSTRUMENT_INVALID_STRING_NUMBER',
+            voiceId: n.voice ?? 0,
+            measureNumber: 0,
+            startTick: n.startTick ?? 0,
+            message: `Número de cuerda de tablatura (${tabMeta.stringNumber}) fuera de rango válido (1-12) en nota ${n.id}.`,
+            context: { noteId: n.id, stringNumber: tabMeta.stringNumber },
+          });
         }
         if (
           tabMeta.fret !== undefined &&
           tabMeta.fret !== null &&
-          (tabMeta.fret < 0 || tabMeta.fret > 30)
+          (typeof tabMeta.fret !== 'number' || tabMeta.fret < 0 || tabMeta.fret > 30)
         ) {
           isInstrumentValid = false;
+          issues.push({
+            severity: 'ERROR',
+            code: 'INSTRUMENT_INVALID_FRET',
+            voiceId: n.voice ?? 0,
+            measureNumber: 0,
+            startTick: n.startTick ?? 0,
+            message: `Traste de tablatura (${tabMeta.fret}) fuera de rango físico válido (0-30) en nota ${n.id}.`,
+            context: { noteId: n.id, fret: tabMeta.fret },
+          });
         }
       }
     }
 
     // 3. Completitud Temporal
-    const rhythmicProv = (payload.metadata as Record<string, unknown> | undefined)?.rhythmicProvenance;
     const isTemporallyComplete =
       allNotes.length > 0 &&
       !hasUnmeasuredNotes &&

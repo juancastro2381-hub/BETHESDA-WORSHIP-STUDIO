@@ -72,6 +72,17 @@ Following the independent code review of commit `bdad8b4e7db686109a9e9a3c68bf8e4
    - **Atomic Transaction in `DrizzleSetlistRepository.create(dto)`:**
      Wraps setlist creation in `this.db.transaction(async (tx) => ...)`, locking any existing `ACTIVE` setlist (`FOR UPDATE`) when `dto.status === 'ACTIVE'` and relying on `idx_setlists_single_active` + `handleUniqueActiveConflict()` for atomic conflict translation and rollback.
 
+### 2.3 Test Database Isolation & Final Governance Hardening (`backend/src/__tests__/setlist-concurrency.test.ts`)
+
+1. **Finding:**
+   In `backend/src/__tests__/setlist-concurrency.test.ts`, the `before()` hook previously executed `await db.delete(setlists).where(eq(setlists.status, 'ACTIVE'));`, which broadly deleted any `ACTIVE` setlist in the connected test database regardless of whether it was created by the current test suite.
+2. **Exact Corrections Applied:**
+   - **Removed all status-based deletion (`WHERE status = 'ACTIVE'`)** from `backend/src/__tests__/setlist-concurrency.test.ts`.
+   - **Added `assertNoPreExistingActiveSetlists(allowedTrackedIds)` pre-flight guard:** Inspects whether any `ACTIVE` setlist exists in the isolated test database whose ID does not belong to `testSetlistIds`. If found, it fails safely with a clear diagnostic error (`❌ Violación de Aislamiento en Base de Datos de Pruebas...`) without ever deleting pre-existing records.
+   - **Strict ID-Scoped Cleanup (`cleanupTrackedSetlists`) in `try / finally` and `after()`:** Every setlist created by the suite is tracked by its exact generated UUID in `testSetlistIds` and `localIds`, and cleaned up exclusively via `inArray(setlists.id, ownedIds)` inside per-test `try / finally` blocks as well as the suite-level `after()` hook.
+   - **Explicit `TEST_DATABASE_URL` Assertion:** Verified in `before()` alongside `db/index.ts` isolation guards.
+   - **Added Safety Regression Test (`2.8`):** Proves that when a simulated pre-existing untracked `ACTIVE` setlist is present, `assertNoPreExistingActiveSetlists()` fails safely with an explicit diagnostic and `cleanupTrackedSetlists()` removes only owned IDs while leaving the untracked `ACTIVE` record completely untouched in PostgreSQL.
+
 ---
 
 ## 3. SECTION 4 ADDITIONAL ACCEPTANCE REVIEW VERIFICATION
@@ -144,37 +155,38 @@ Following the independent code review of commit `bdad8b4e7db686109a9e9a3c68bf8e4
   ℹ duration_ms 433.0787
   ```
 
-### 4.2 Focused Test — Critical Finding B (PostgreSQL Concurrency & Independent Connections)
+### 4.2 Focused Test — Critical Finding B & Test Database Isolation (PostgreSQL Concurrency Suite)
 - **Exact Command:**
   ```bash
   npx --prefix backend tsx --test backend/src/__tests__/setlist-concurrency.test.ts
   ```
 - **Exit Code:** `0`
-- **Test Counts:** `8 tests | 3 suites | 8 pass | 0 fail`
+- **Test Counts:** `9 tests | 3 suites | 9 pass | 0 fail`
 - **Actual Output:**
   ```text
   ▶ Phase 2C — WS4: Concurrency Remediation & Verification Suite
     ▶ 1. Historical Audit Evidence (Pre-Remediation TOCTOU Window)
-      ✔ 1.1 should demonstrate how application-level check alone was vulnerable to TOCTOU (1.1544ms)
-    ✔ 1. Historical Audit Evidence (Pre-Remediation TOCTOU Window) (1.6681ms)
+      ✔ 1.1 should demonstrate how application-level check alone was vulnerable to TOCTOU (0.7179ms)
+    ✔ 1. Historical Audit Evidence (Pre-Remediation TOCTOU Window) (1.0921ms)
     ▶ 2. Post-Remediation Verification (Independent PostgreSQL Connections & Atomic Transactions)
-      ✔ 2.1 should enforce partial unique index in PostgreSQL: reject 2nd ACTIVE insert directly with 23505 (169.3526ms)
-      ✔ 2.2 should reject activation while another setlist is already ACTIVE across independent connections (220.356ms)
-      ✔ 2.3 should handle two concurrent activation requests for DIFFERENT setlists over independent PostgreSQL connections (exactly 1 succeeds, 1 fails with ConflictError) (22.0291ms)
-      ✔ 2.4 should serialize two concurrent activation requests for the SAME setlist over independent PostgreSQL connections (SELECT ... FOR UPDATE) (9.9495ms)
-      ✔ 2.5 should perform complete transaction rollback after an activation conflict, preserving previous state in PostgreSQL (12.7677ms)
-      ✔ 2.6 should ensure sequential and concurrent deactivation + activation transitions never violate single-ACTIVE invariant (11.9833ms)
-      ✔ 2.7 should permit UNLIMITED coexistence of setlists in PLANNING, COMPLETED, and ARCHIVED (19.5451ms)
-    ✔ 2. Post-Remediation Verification (Independent PostgreSQL Connections & Atomic Transactions) (466.9322ms)
-  ✔ Phase 2C — WS4: Concurrency Remediation & Verification Suite (755.5343ms)
-  ℹ tests 8
+      ✔ 2.1 should enforce partial unique index in PostgreSQL: reject 2nd ACTIVE insert directly with 23505 (90.7187ms)
+      ✔ 2.2 should reject activation while another setlist is already ACTIVE across independent connections (62.672ms)
+      ✔ 2.3 should handle two concurrent activation requests for DIFFERENT setlists over independent PostgreSQL connections (exactly 1 succeeds, 1 fails with ConflictError) (14.6403ms)
+      ✔ 2.4 should serialize two concurrent activation requests for the SAME setlist over independent PostgreSQL connections (SELECT ... FOR UPDATE) (6.6082ms)
+      ✔ 2.5 should perform complete transaction rollback after an activation conflict, preserving previous state in PostgreSQL (9.9511ms)
+      ✔ 2.6 should ensure sequential and concurrent deactivation + activation transitions never violate single-ACTIVE invariant (10.6039ms)
+      ✔ 2.7 should permit UNLIMITED coexistence of setlists in PLANNING, COMPLETED, and ARCHIVED (14.7637ms)
+      ✔ 2.8 should NEVER delete pre-existing untracked ACTIVE setlists and should fail safely when one is detected (6.5308ms)
+    ✔ 2. Post-Remediation Verification (Independent PostgreSQL Connections & Atomic Transactions) (217.1546ms)
+  ✔ Phase 2C — WS4: Concurrency Remediation & Verification Suite (427.5416ms)
+  ℹ tests 9
   ℹ suites 3
-  ℹ pass 8
+  ℹ pass 9
   ℹ fail 0
   ℹ cancelled 0
   ℹ skipped 0
   ℹ todo 0
-  ℹ duration_ms 33469.214
+  ℹ duration_ms 31361.9527
   ```
 
 ### 4.3 Focused Test — Phase 2C PostgreSQL & Fastify Integration Suite
@@ -261,20 +273,20 @@ Following the independent code review of commit `bdad8b4e7db686109a9e9a3c68bf8e4
 ### 4.7 Full Backend Regression Suite
 - **Exact Command:** `npm --prefix backend test`
 - **Exit Code:** `0`
-- **Test Counts:** `745 tests | 115 suites | 745 pass | 0 fail`
+- **Test Counts:** `746 tests | 115 suites | 746 pass | 0 fail`
 - **Actual Output Summary:**
   ```text
   > @bethesda/backend@0.1.0 test
   > tsx --test --test-concurrency=1 "src/**/__tests__/**/*.test.ts"
   ...
-  ℹ tests 745
+  ℹ tests 746
   ℹ suites 115
-  ℹ pass 745
+  ℹ pass 746
   ℹ fail 0
   ℹ cancelled 0
   ℹ skipped 0
   ℹ todo 0
-  ℹ duration_ms 459954.7936
+  ℹ duration_ms 503633.4752
   ```
 
 ---
@@ -288,6 +300,6 @@ Following the independent code review of commit `bdad8b4e7db686109a9e9a3c68bf8e4
 
 ## 6. FINAL ACCEPTANCE DETERMINATION
 
-All Critical Findings (A and B) and all Section 4 review items have been remediated and verified with zero regressions across **592/592 frontend tests** and **745/745 backend tests** (`0` failures, `0` typecheck errors).
+All Critical Findings (A and B), the Test Database Isolation safety correction, and all Section 4 review items have been remediated and verified with zero regressions across **592/592 frontend tests** and **746/746 backend tests** (`0` failures, `0` typecheck errors), with a clean working tree (`git status --short` empty).
 
 **Final Determination:** **`PASS`**

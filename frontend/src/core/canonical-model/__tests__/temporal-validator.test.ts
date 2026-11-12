@@ -834,4 +834,178 @@ describe('Phase 2B.2 — TemporalValidator & MidiExportGatekeeper Suite', () => 
     assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_STRING_NUMBER'));
     assert.ok(res.issues.some((i) => i.code === 'INSTRUMENT_INVALID_FRET'));
   });
+
+  // --------------------------------------------------------------------------
+  // 22. REGRESIÓN: RECHAZO ESTRICTO DE NÚMERO DE COMPÁS DECIMAL (1.5)
+  // --------------------------------------------------------------------------
+  it('22. should reject decimal measure number (1.5) with isStructurallyValid = false', () => {
+    const note = new Note({
+      id: 'dec_m_note',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [note])],
+    });
+    (m as any).number = 1.5; // Decimal no entero
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Compás decimal 1.5 debe rechazar validez estructural');
+    assert.strictEqual(res.isValid, false, 'Documento debe ser inválido');
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_MEASURE_NUMBER'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 23. REGRESIÓN: RECHAZO ESTRICTO DE NÚMERO DE COMPÁS NO FINITO (Infinity)
+  // --------------------------------------------------------------------------
+  it('23. should reject non-finite measure number (Infinity) with isStructurallyValid = false', () => {
+    const note = new Note({
+      id: 'inf_m_note',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [new Voice(1, [note])],
+    });
+    (m as any).number = Infinity; // No finito
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Compás Infinity debe rechazar validez estructural');
+    assert.strictEqual(res.isValid, false, 'Documento debe ser inválido');
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_MEASURE_NUMBER'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 24. REGRESIÓN: RECHAZO ESTRICTO DE ID DE VOZ DECIMAL (1.5)
+  // --------------------------------------------------------------------------
+  it('24. should reject decimal voice ID (1.5) with isStructurallyValid = false', () => {
+    const note = new Note({
+      id: 'dec_v_note',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const voice = new Voice(1, [note]);
+    (voice as any).id = 1.5; // Decimal no entero
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [voice],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Voz decimal 1.5 debe rechazar validez estructural');
+    assert.strictEqual(res.isValid, false, 'Documento debe ser inválido');
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_VOICE_ID'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 25. REGRESIÓN: RECHAZO ESTRICTO DE ID DE VOZ NO FINITO (Infinity)
+  // --------------------------------------------------------------------------
+  it('25. should reject non-finite voice ID (Infinity) with isStructurallyValid = false', () => {
+    const note = new Note({
+      id: 'inf_v_note',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: null,
+      durationTicks: null,
+      voice: 1,
+    });
+    const voice = new Voice(1, [note]);
+    (voice as any).id = Infinity; // No finito
+
+    const m = new Measure({
+      number: 1,
+      timeSignature: null,
+      startTick: null,
+      durationTicks: null,
+      voices: [voice],
+    });
+
+    const payload = createBasePayload([m], { rhythmicProvenance: 'NONE' });
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, false, 'Voz Infinity debe rechazar validez estructural');
+    assert.strictEqual(res.isValid, false, 'Documento debe ser inválido');
+    assert.ok(res.issues.some((i) => i.code === 'STRUCTURAL_INVALID_VOICE_ID'));
+  });
+
+  // --------------------------------------------------------------------------
+  // 26. REGRESIÓN: ENTEROS VÁLIDOS EN COMPÁS Y VOZ CONTINÚAN PASANDO
+  // --------------------------------------------------------------------------
+  it('26. should continue to accept valid integer measure numbers and voice IDs (>= 1)', () => {
+    const note1a = new Note({
+      id: 'valid_note_1a',
+      pitch: new Pitch(NoteName.C, 4),
+      startTick: 0,
+      durationTicks: 960,
+      voice: 1,
+    });
+    const note1b = new Note({
+      id: 'valid_note_1b',
+      pitch: new Pitch(NoteName.D, 4),
+      startTick: 960,
+      durationTicks: 960,
+      voice: 1,
+    });
+    const note2a = new Note({
+      id: 'valid_note_2a',
+      pitch: new Pitch(NoteName.E, 4),
+      startTick: 0,
+      durationTicks: 960,
+      voice: 1,
+    });
+    const note2b = new Note({
+      id: 'valid_note_2b',
+      pitch: new Pitch(NoteName.F, 4),
+      startTick: 960,
+      durationTicks: 960,
+      voice: 1,
+    });
+
+    const m1 = new Measure({
+      number: 1, // Entero válido >= 1
+      timeSignature: time44,
+      startTick: 0,
+      durationTicks: 1920,
+      voices: [new Voice(1, [note1a, note1b])], // Voz 1 entero válido >= 1
+    });
+
+    const m2 = new Measure({
+      number: 2, // Entero válido >= 1
+      timeSignature: time44,
+      startTick: 1920,
+      durationTicks: 1920,
+      voices: [new Voice(1, [note2a, note2b])], // Voz 1 entero válido >= 1
+    });
+
+    const payload = createBasePayload([m1, m2]);
+    const res = TemporalValidator.validate(payload);
+
+    assert.strictEqual(res.isStructurallyValid, true, 'Compases y voces con enteros >= 1 deben ser estructuralmente válidos');
+    assert.strictEqual(res.isInstrumentValid, true);
+    assert.strictEqual(res.isValid, true);
+    assert.strictEqual(res.issues.filter((i) => i.code.startsWith('STRUCTURAL_')).length, 0);
+  });
 });

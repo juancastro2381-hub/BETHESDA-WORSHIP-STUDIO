@@ -451,7 +451,7 @@ export class TemporalValidator {
       });
     } else {
       for (const m of measures) {
-        if (!m || typeof m.number !== 'number' || m.number < 1) {
+        if (!m || !Number.isSafeInteger(m.number) || m.number < 1) {
           isStructurallyValid = false;
           issues.push({
             severity: 'ERROR',
@@ -459,7 +459,7 @@ export class TemporalValidator {
             voiceId: 0,
             measureNumber: m?.number ?? 0,
             startTick: m?.startTick ?? 0,
-            message: `Número de compás inválido (${m?.number}). Los compases deben numerarse con enteros >= 1.`,
+            message: `Número de compás inválido (${m?.number}). Los compases deben numerarse con enteros finitos >= 1.`,
             context: { measureNumber: m?.number },
           });
         }
@@ -467,7 +467,7 @@ export class TemporalValidator {
           // Sin voces en el compás
         } else {
           for (const v of m.voices) {
-            if (!v || typeof v.id !== 'number' || v.id < 1) {
+            if (!v || !Number.isSafeInteger(v.id) || v.id < 1) {
               isStructurallyValid = false;
               issues.push({
                 severity: 'ERROR',
@@ -475,7 +475,7 @@ export class TemporalValidator {
                 voiceId: v?.id ?? 0,
                 measureNumber: m.number,
                 startTick: m.startTick ?? 0,
-                message: `ID de voz inválido (${v?.id}) en compás ${m.number}. Los IDs de voz deben ser enteros >= 1.`,
+                message: `ID de voz inválido (${v?.id}) en compás ${m.number}. Los IDs de voz deben ser enteros finitos >= 1.`,
                 context: { voiceId: v?.id },
               });
             }
@@ -508,7 +508,7 @@ export class TemporalValidator {
       if (tabMeta) {
         if (
           tabMeta.stringNumber !== undefined &&
-          (typeof tabMeta.stringNumber !== 'number' ||
+          (!Number.isSafeInteger(tabMeta.stringNumber) ||
             tabMeta.stringNumber < 1 ||
             tabMeta.stringNumber > 12)
         ) {
@@ -526,7 +526,7 @@ export class TemporalValidator {
         if (
           tabMeta.fret !== undefined &&
           tabMeta.fret !== null &&
-          (typeof tabMeta.fret !== 'number' || tabMeta.fret < 0 || tabMeta.fret > 30)
+          (!Number.isSafeInteger(tabMeta.fret) || tabMeta.fret < 0 || tabMeta.fret > 30)
         ) {
           isInstrumentValid = false;
           issues.push({

@@ -490,46 +490,51 @@ The reporting semantics enforce the exact mathematical matrix required:
 | **SKIPPED** | **0** | **0** | **+1** | **0** | Intent missing, already audited, or state changed |
 | **Transaction Failure** | **0** | **0** | **0** | **+1** | Transaction rolled back; `audited = false` preserved; error recorded in `report.errors` |
 
-#### Scenario O — Empirical Regression Test
-A dedicated test was added to `backend/src/__tests__/cas-concurrency.test.ts`:
-- **Step 1:** Terminal intent created with `audited = false` and unique `intentId`.
-- **Step 2:** Pre-existing audit log inserted matching `resource`, `eventType`, and `metadata.intentId`.
-- **Step 3:** First execution of `reconcileUnauditedDeletions()` yields `reconciledCount = 1`, `reconciledAuditCount = 0`, `skippedCount = 0`, `failedCount = 0`.
-- **Step 4:** Verifies `audited = true`, `state = 'DELETED'` (physical state unchanged), and exactly 1 audit entry exists.
-- **Step 5:** Second execution yields `reconciledCount = 0`, `reconciledAuditCount = 0`, `skippedCount = 0`, `failedCount = 0`, with 0 duplicate audit rows created.
-- **Result:** **PASS (10.62ms)**.
+#### Scenario O — Empirical Regression Test & Completed Assertions
+A dedicated test was implemented in `backend/src/__tests__/cas-concurrency.test.ts`:
+- **Step 1 (Setup):** Terminal intent created with `audited = false`, `state = 'DELETED'`, and unique `intentId`.
+- **Step 2 (Pre-condition):** Pre-existing audit log inserted matching `resource`, `eventType`, and `metadata.intentId`.
+- **Step 3 (First Run):** First execution of `reconcileUnauditedDeletions()` yields `reconciledCount = 1`, `reconciledAuditCount = 0`, `skippedCount = 0`, `failedCount = 0`.
+- **Step 4 (Database Invariants):** Verifies `audited = true`, `state = 'DELETED'` (physical state unchanged), and exactly 1 audit entry exists.
+- **Step 5 (Second Run & Assertion Completion):** Second execution explicitly asserts:
+  - `report2.reconciledCount === 0` (no false reconciliations reported).
+  - `report2.reconciledAuditCount === 0` (no duplicate audit records inserted).
+  - `report2.skippedCount === 0` (cleanly identified as already reconciled; not processed as candidate).
+  - `report2.failedCount === 0` (zero transaction errors).
+  - Still exactly one matching audit event in `audit_logs` and `intent.audited === true`.
+- **Execution Result:** **PASS (12.86ms)**.
 
 ---
 
-### 11.4 Empirical Execution Evidence (Post-Hardening & Scenario O)
+### 11.4 Empirical Execution Evidence (Post-Hardening & Scenario O Focused Run)
 
 #### Environment Identity
 - **PostgreSQL Version:** `PostgreSQL 18.1 on x86_64-windows, compiled by msvc-19.44.35221, 64-bit`
 - **Database Identity:** `bethesda_worship_test` (User: `postgres`, Port: `5432`)
 - **Node.js Runtime:** `v24.12.0` on Windows x64
 
-#### Test Suite 1: CAS Concurrency, Lifecycle & Hardening (15 Tests)
+#### Latest Focused Execution: CAS Concurrency, Lifecycle & Hardening (15 Tests)
 ```bash
 npx --prefix backend tsx --test backend/src/__tests__/cas-concurrency.test.ts
 ```
 ```text
 ▶ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite
-  ✔ Escenario A: Primary file deletion succeeds, companion deletion fails (244.8652ms)
-  ✔ Escenario B: Companion file is being accessed while retention attempts deletion (310.5029ms)
-  ✔ Escenario C: Two independent workers attempt to delete the same primary and companion pair (31.0506ms)
-  ✔ Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED (43.7374ms)
-  ✔ Escenario E: Process crashes after primary deletion but before companion deletion (19.5711ms)
-  ✔ Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization (67.2921ms)
-  ✔ Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup (319.7173ms)
-  ✔ Escenario H: Reconciliation retries only the incomplete artifact (32.3436ms)
-  ✔ Escenario I: Audit failure preserves truthful final states (58.7083ms)
-  ✔ Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE (224.1909ms)
-  ✔ Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por cuarentena) (11.8558ms)
-  ✔ Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes) (19.1405ms)
-  ✔ Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false (13.7683ms)
-  ✔ Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno) (3.4067ms)
-  ✔ Escenario O — Existing audit event reconciliation without duplicate insertion (10.623ms)
-✔ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite (1575.771ms)
+  ✔ Escenario A: Primary file deletion succeeds, companion deletion fails (168.1014ms)
+  ✔ Escenario B: Companion file is being accessed while retention attempts deletion (349.6807ms)
+  ✔ Escenario C: Two independent workers attempt to delete the same primary and companion pair (56.6881ms)
+  ✔ Escenario D: Recovery discovers an active valid reference and cancels deletion without incorrectly reporting DELETED (54.2958ms)
+  ✔ Escenario E: Process crashes after primary deletion but before companion deletion (21.3194ms)
+  ✔ Escenario F: Interrupted deletion cycle with physical unlinking completed before terminal DB finalization (68.6349ms)
+  ✔ Escenario G: Production withCasAdvisoryLocks handles bounded lock timeout, reverse-order release and connection cleanup (442.332ms)
+  ✔ Escenario H: Reconciliation retries only the incomplete artifact (29.1001ms)
+  ✔ Escenario I: Audit failure preserves truthful final states (62.3208ms)
+  ✔ Escenario J: Carrera simultánea entre commitJobToCatalog y pruneExpiredOutputs serializada mediante FOR UPDATE (208.8005ms)
+  ✔ Escenario K: Worker cae tras escribir archivo físico antes del commit en BD (protección por cuarentena) (9.697ms)
+  ✔ Escenario L: Concurrencia e idempotencia estricta en reconcileUnauditedDeletions (Dos workers concurrentes) (21.42ms)
+  ✔ Escenario M: Fallo de inserción en reconcileUnauditedDeletions revierte transacción y preserva audited=false (13.6898ms)
+  ✔ Escenario N: Validación estricta de lock_timeout (valores válidos, inválidos y límites de contorno) (2.9075ms)
+  ✔ Escenario O — Existing audit event reconciliation without duplicate insertion (12.8597ms)
+✔ Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite (1662.5505ms)
 ℹ tests 15
 ℹ suites 1
 ℹ pass 15
@@ -537,38 +542,18 @@ npx --prefix backend tsx --test backend/src/__tests__/cas-concurrency.test.ts
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 3547.367
+ℹ duration_ms 3163.1122
 ```
 
-#### Test Suite 2: All 5 Phase 2B.1 Storage Files (63 Tests, 9 Suites)
-```bash
-npx --prefix backend tsx --test --test-concurrency=1 backend/src/__tests__/storage-provider.test.ts backend/src/__tests__/conversion-storage-externalization.test.ts backend/src/__tests__/output-retention.test.ts backend/src/__tests__/cas-concurrency.test.ts backend/src/__tests__/conversion-security.test.ts
-```
-```text
-ℹ tests 63
-ℹ suites 9
-ℹ pass 63
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 10106.8862
-```
+#### Historical Baseline Evidence (Prior Verified Milestones)
+1. **Phase 2B.1 Storage Subsystem Baseline (Verified at commit `d3a89af`):**
+   - Command: `npx --prefix backend tsx --test --test-concurrency=1 backend/src/__tests__/storage-provider.test.ts backend/src/__tests__/conversion-storage-externalization.test.ts backend/src/__tests__/output-retention.test.ts backend/src/__tests__/cas-concurrency.test.ts backend/src/__tests__/conversion-security.test.ts`
+   - Result: 63 tests across 9 suites, 63 pass, 0 fail (10,106.88ms).
+2. **Complete Repository Regression Baseline (Verified at commit `ba71291`):**
+   - Command: `npm --prefix backend test`
+   - Result: 719 tests across 110 suites, 719 pass, 0 fail, 0 cancelled, 0 skipped (422,857.35ms).
 
-#### Test Suite 3: Full Repository Regression Baseline
-```bash
-npm --prefix backend test
-```
-```text
-ℹ tests 719
-ℹ suites 110
-ℹ pass 719
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 422857.3527
-```
+*(Note: Per Project Owner instructions, the full 719-test repository suite was not re-run during this narrowly scoped assertion patch, as only `cas-concurrency.test.ts` and documentation were modified).*
 
 ---
 

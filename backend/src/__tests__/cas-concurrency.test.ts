@@ -1212,6 +1212,7 @@ describe('Phase 2B.1 — CAS Object Lifecycle Concurrency & Hardening Suite', ()
       // 6. Verify no duplicate audit event is created and no false reconciliation is reported
       assert.equal(report2.reconciledCount, 0, 'Second run must not report false reconciliation');
       assert.equal(report2.reconciledAuditCount, 0, 'Second run must not insert new audits');
+      assert.equal(report2.skippedCount, 0, 'Second run must have 0 skipped count');
       assert.equal(report2.failedCount, 0, 'Second run must have 0 failures');
 
       const auditEntries2 = await db

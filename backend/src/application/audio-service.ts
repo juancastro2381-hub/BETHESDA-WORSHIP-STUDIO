@@ -12,6 +12,7 @@ import { type IAudioRepository } from '../repositories/audio-repository.ts';
 import { type IAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { type ISongRepository } from '../repositories/song-repository.ts';
 import { DrizzleAuditLogRepository, type IAuditLogRepository } from '../repositories/audit-repository.ts';
+import type { AuditLogEntity } from '../domain/auth-types.ts';
 import { type AudioAsset } from '../db/schema.ts';
 import { ValidationError, NotFoundError, PersistenceError, RangeNotSatisfiableError } from '../domain/errors.ts';
 import { validateAudioBuffer } from '../domain/audio/audio-signature-validator.ts';
@@ -43,6 +44,7 @@ export interface AudioUploadCompensationReport {
   readonly compensationError?: string | undefined;
   readonly recoveryRecordId?: string | undefined;
   readonly persistedToAuditLog: boolean;
+  readonly durablyRecorded: boolean;
   readonly recordedAt: string;
 }
 
@@ -54,12 +56,50 @@ export type AudioRecoveryType =
 export type AudioRecoveryStatus =
   | 'PENDING_RECOVERY'
   | 'ABORTED_DB_PRESERVED'
-  | 'RECOVERED';
+  | 'RECOVERED'
+  | 'MANUAL_INTERVENTION_REQUIRED';
+
+export type AudioRecoveryLifecycleState =
+  | 'OPERATION_FAILURE'
+  | 'RECOVERY_PENDING'
+  | 'RECOVERY_COMPLETED'
+  | 'MANUAL_INTERVENTION_REQUIRED';
+
+export const AUDIO_RECOVERY_EVENT_TYPES = [
+  'AUDIO_UPLOAD_COMPENSATION_FAILED',
+  'AUDIO_DELETE_PHYSICAL_FAILED',
+  'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE',
+  'AUDIO_RECOVERY_COMPLETED',
+  'AUDIO_ORPHAN_FILE_PURGED',
+] as const;
+
+export interface AudioMalformedRecoveryAuditEntry {
+  readonly auditLogId: string;
+  readonly eventType: string;
+  readonly resource: string | null;
+  readonly storagePath?: string | undefined;
+  readonly reason: string;
+  readonly rawMetadata: Record<string, unknown>;
+  readonly detectedAt: string;
+  readonly lifecycleState: 'MANUAL_INTERVENTION_REQUIRED';
+}
+
+export interface AudioRecoveryRehydrationReport {
+  readonly rehydrationSucceeded: boolean;
+  readonly scannedAuditEvents: number;
+  readonly reconstructedRecords: number;
+  readonly pendingCount: number;
+  readonly completedCount: number;
+  readonly manualInterventionCount: number;
+  readonly malformedEvents: AudioMalformedRecoveryAuditEntry[];
+  readonly error?: string | undefined;
+}
 
 export interface AudioStorageRecoveryRecord {
   id: string;
   recoveryType: AudioRecoveryType;
   status: AudioRecoveryStatus;
+  lifecycleState: AudioRecoveryLifecycleState;
   storagePath: string;
   assetId?: string | undefined;
   songId: string;
@@ -70,7 +110,9 @@ export interface AudioStorageRecoveryRecord {
   primaryError: string;
   secondaryError?: string | undefined;
   persistedToAuditLog: boolean;
+  durablyRecorded: boolean;
   auditLogId?: string | undefined;
+  aliasRecoveryIds?: string[] | undefined;
   createdAt: string;
   recoveredAt?: string | undefined;
 }
@@ -92,6 +134,9 @@ export interface AudioStorageReconciliationReport {
   readonly ambiguousFiles: Array<{ storagePath: string; reason: string }>;
   readonly failedOrphanPurges: Array<{ storagePath: string; reason: string }>;
   readonly pendingRecoveryRecords: AudioStorageRecoveryRecord[];
+  readonly manualInterventionRecords: AudioStorageRecoveryRecord[];
+  readonly malformedRecoveryEvents: AudioMalformedRecoveryAuditEntry[];
+  readonly rehydrationReport: AudioRecoveryRehydrationReport;
   readonly recoveredOperations: Array<{
     recoveryRecordId: string;
     recoveryType: AudioRecoveryType;
@@ -170,6 +215,9 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
 export class AudioService {
   private readonly inFlightUploadPaths = new Set<string>();
   private readonly recoveryRecords = new Map<string, AudioStorageRecoveryRecord>();
+  private readonly aliasToCanonicalId = new Map<string, string>();
+  private readonly malformedAuditEntries = new Map<string, AudioMalformedRecoveryAuditEntry>();
+  private readonly malformedStoragePaths = new Set<string>();
 
   public constructor(
     private readonly audioRepo: IAudioRepository,
@@ -181,10 +229,436 @@ export class AudioService {
   ) {}
 
   /**
-   * Retorna una instantánea de los registros de recuperación de fallos de almacenamiento registrados por esta instancia.
+   * Retorna una instantánea de los registros de recuperación de fallos de almacenamiento registrados o rehidratados.
    */
   public getRecoveryRecords(): AudioStorageRecoveryRecord[] {
     return Array.from(this.recoveryRecords.values()).map((r) => ({ ...r }));
+  }
+
+  /**
+   * Retorna las entradas de auditoría de recuperación con metadatos inválidos o incompletos que requieren revisión manual.
+   */
+  public getMalformedRecoveryAuditEntries(): AudioMalformedRecoveryAuditEntry[] {
+    return Array.from(this.malformedAuditEntries.values()).map((e) => ({ ...e }));
+  }
+
+  private static getRecoveryTargetKey(
+    recoveryType: AudioRecoveryType,
+    storagePath: string,
+    assetId?: string
+  ): string {
+    return `${recoveryType}::${assetId ?? ''}::${storagePath}`;
+  }
+
+  private static mapAuditEventToRecoveryType(eventType: string): AudioRecoveryType | null {
+    switch (eventType) {
+      case 'AUDIO_UPLOAD_COMPENSATION_FAILED':
+        return 'UPLOAD_COMPENSATION_ORPHAN';
+      case 'AUDIO_DELETE_PHYSICAL_FAILED':
+        return 'DELETE_PHYSICAL_FAILED';
+      case 'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE':
+        return 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE';
+      default:
+        return null;
+    }
+  }
+
+  private static getEventReplayPriority(eventType: string): number {
+    switch (eventType) {
+      case 'AUDIO_UPLOAD_COMPENSATION_FAILED':
+      case 'AUDIO_DELETE_PHYSICAL_FAILED':
+      case 'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE':
+        return 1;
+      case 'AUDIO_ORPHAN_FILE_PURGED':
+        return 2;
+      case 'AUDIO_RECOVERY_COMPLETED':
+        return 3;
+      default:
+        return 9;
+    }
+  }
+
+  private static nonEmptyString(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  private parseFailureAuditEvent(
+    event: AuditLogEntity
+  ):
+    | { ok: true; record: AudioStorageRecoveryRecord }
+    | { ok: false; malformed: AudioMalformedRecoveryAuditEntry } {
+    const recoveryType = AudioService.mapAuditEventToRecoveryType(event.eventType);
+    const meta =
+      event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+        ? (event.metadata as Record<string, unknown>)
+        : null;
+
+    const rawCandidatePath =
+      AudioService.nonEmptyString(meta?.['storagePath']) ??
+      AudioService.nonEmptyString(event.resource) ??
+      undefined;
+
+    const fail = (reason: string): { ok: false; malformed: AudioMalformedRecoveryAuditEntry } => ({
+      ok: false,
+      malformed: {
+        auditLogId: event.id,
+        eventType: event.eventType,
+        resource: event.resource ?? null,
+        ...(rawCandidatePath ? { storagePath: rawCandidatePath } : {}),
+        reason,
+        rawMetadata: meta ?? {},
+        detectedAt: new Date().toISOString(),
+        lifecycleState: 'MANUAL_INTERVENTION_REQUIRED',
+      },
+    });
+
+    if (!recoveryType || !meta) {
+      return fail('Metadatos de recuperación ausentes o con estructura inválida.');
+    }
+
+    const recoveryRecordId = AudioService.nonEmptyString(meta['recoveryRecordId']);
+    if (!recoveryRecordId) {
+      return fail('Falta recoveryRecordId obligatorio en el evento de auditoría.');
+    }
+
+    const storagePath = AudioService.nonEmptyString(meta['storagePath']);
+    if (!storagePath) {
+      return fail('Falta storagePath obligatorio en el evento de auditoría.');
+    }
+
+    try {
+      this.storageProvider.resolveSafePath(storagePath);
+    } catch (pathErr) {
+      return fail(
+        `storagePath inválido o inseguro en evento de recuperación: ${
+          pathErr instanceof Error ? pathErr.message : String(pathErr)
+        }`
+      );
+    }
+
+    const songId = AudioService.nonEmptyString(meta['songId']);
+    if (!songId) {
+      return fail('Falta songId obligatorio en el evento de recuperación.');
+    }
+
+    const filename = AudioService.nonEmptyString(meta['filename']);
+    if (!filename) {
+      return fail('Falta filename obligatorio en el evento de recuperación.');
+    }
+
+    const mimeType = AudioService.nonEmptyString(meta['mimeType']);
+    if (!mimeType) {
+      return fail('Falta mimeType obligatorio en el evento de recuperación.');
+    }
+
+    const checksumSha256 = AudioService.nonEmptyString(meta['checksumSha256']);
+    if (!checksumSha256 || !/^[0-9a-fA-F]{64}$/.test(checksumSha256)) {
+      return fail('checksumSha256 ausente o sin formato hexadecimal SHA-256 válido de 64 caracteres.');
+    }
+
+    const fileSizeRaw = meta['fileSizeBytes'];
+    if (
+      typeof fileSizeRaw !== 'number' ||
+      !Number.isInteger(fileSizeRaw) ||
+      fileSizeRaw <= 0
+    ) {
+      return fail('fileSizeBytes ausente o no es un entero positivo válido.');
+    }
+
+    const assetId = AudioService.nonEmptyString(meta['assetId']) ?? undefined;
+    if (
+      (recoveryType === 'DELETE_PHYSICAL_FAILED' ||
+        recoveryType === 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE') &&
+      !assetId
+    ) {
+      return fail(`Falta assetId obligatorio para recuperación de tipo '${recoveryType}'.`);
+    }
+
+    const primaryError =
+      AudioService.nonEmptyString(meta['primaryError']) ??
+      AudioService.nonEmptyString(meta['cause']) ??
+      'Error registrado sin descripción detallada';
+    const secondaryError =
+      AudioService.nonEmptyString(meta['compensationError']) ?? undefined;
+    const createdAt =
+      AudioService.nonEmptyString(meta['recordedAt']) ??
+      AudioService.nonEmptyString(meta['createdAt']) ??
+      event.createdAt.toISOString();
+
+    const isAbortedPhysical = recoveryType === 'DELETE_PHYSICAL_FAILED';
+
+    return {
+      ok: true,
+      record: {
+        id: recoveryRecordId,
+        recoveryType,
+        status: isAbortedPhysical ? 'ABORTED_DB_PRESERVED' : 'PENDING_RECOVERY',
+        lifecycleState: isAbortedPhysical ? 'OPERATION_FAILURE' : 'RECOVERY_PENDING',
+        storagePath,
+        ...(assetId ? { assetId } : {}),
+        songId,
+        filename,
+        mimeType,
+        checksumSha256: checksumSha256.toLowerCase(),
+        fileSizeBytes: fileSizeRaw,
+        primaryError,
+        ...(secondaryError ? { secondaryError } : {}),
+        persistedToAuditLog: true,
+        durablyRecorded: true,
+        auditLogId: event.id,
+        createdAt,
+      },
+    };
+  }
+
+  /**
+   * Rehidrata de forma determinística e idempotente el estado de recuperación pendiente, completado
+   * o inválido desde los eventos durables en PostgreSQL `audit_logs`.
+   */
+  public async rehydrateRecoveryRecordsFromAuditLogs(): Promise<AudioRecoveryRehydrationReport> {
+    const pageSize = 1000;
+    const collectedEvents: AuditLogEntity[] = [];
+    const seenEventIds = new Set<string>();
+
+    try {
+      let offset = 0;
+      while (offset < 50_000) {
+        const page = await this.auditRepo.list({
+          eventTypes: [...AUDIO_RECOVERY_EVENT_TYPES],
+          limit: pageSize,
+          offset,
+          orderDirection: 'asc',
+        });
+
+        let newlyAdded = 0;
+        for (const ev of page) {
+          if (!seenEventIds.has(ev.id)) {
+            seenEventIds.add(ev.id);
+            collectedEvents.push(ev);
+            newlyAdded += 1;
+          }
+        }
+
+        if (page.length < pageSize || newlyAdded === 0) {
+          break;
+        }
+        offset += page.length;
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const current = Array.from(this.recoveryRecords.values());
+      return {
+        rehydrationSucceeded: false,
+        scannedAuditEvents: 0,
+        reconstructedRecords: current.filter((r) => r.durablyRecorded).length,
+        pendingCount: current.filter((r) => r.status === 'PENDING_RECOVERY').length,
+        completedCount: current.filter((r) => r.status === 'RECOVERED').length,
+        manualInterventionCount:
+          current.filter((r) => r.status === 'MANUAL_INTERVENTION_REQUIRED').length +
+          this.malformedAuditEntries.size,
+        malformedEvents: this.getMalformedRecoveryAuditEntries(),
+        error: `No se pudieron leer los eventos de recuperación desde PostgreSQL audit_logs: ${errorMsg}`,
+      };
+    }
+
+    const relevantEvents = collectedEvents
+      .filter((ev) =>
+        (AUDIO_RECOVERY_EVENT_TYPES as readonly string[]).includes(ev.eventType)
+      )
+      .sort((a, b) => {
+        const timeDiff = a.createdAt.getTime() - b.createdAt.getTime();
+        if (timeDiff !== 0) return timeDiff;
+        const prioDiff =
+          AudioService.getEventReplayPriority(a.eventType) -
+          AudioService.getEventReplayPriority(b.eventType);
+        if (prioDiff !== 0) return prioDiff;
+        return a.id.localeCompare(b.id);
+      });
+
+    // Preservar registros no durables en memoria y rehidratar determinísticamente desde eventos durables
+    for (const [recId, existing] of this.recoveryRecords.entries()) {
+      if (existing.durablyRecorded) {
+        this.recoveryRecords.delete(recId);
+      }
+    }
+    this.aliasToCanonicalId.clear();
+    this.malformedAuditEntries.clear();
+    this.malformedStoragePaths.clear();
+
+    const targetToCanonicalId = new Map<string, string>();
+    const completedTargetTimestamps = new Map<string, number>();
+
+    for (const event of relevantEvents) {
+      if (
+        event.eventType === 'AUDIO_UPLOAD_COMPENSATION_FAILED' ||
+        event.eventType === 'AUDIO_DELETE_PHYSICAL_FAILED' ||
+        event.eventType === 'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE'
+      ) {
+        const parsed = this.parseFailureAuditEvent(event);
+        if (!parsed.ok) {
+          this.malformedAuditEntries.set(event.id, parsed.malformed);
+          if (parsed.malformed.storagePath) {
+            this.malformedStoragePaths.add(parsed.malformed.storagePath);
+          }
+          continue;
+        }
+
+        const candidate = parsed.record;
+        const targetKey = AudioService.getRecoveryTargetKey(
+          candidate.recoveryType,
+          candidate.storagePath,
+          candidate.assetId
+        );
+
+        const existingById =
+          this.recoveryRecords.get(candidate.id) ??
+          (() => {
+            const aliased = this.aliasToCanonicalId.get(candidate.id);
+            return aliased ? this.recoveryRecords.get(aliased) : undefined;
+          })();
+
+        if (existingById) {
+          // Evento duplicado con el mismo ID: mantener estado actual (nunca resucitar RECOVERED ni MANUAL_INTERVENTION_REQUIRED)
+          continue;
+        }
+
+        const existingCanonicalId = targetToCanonicalId.get(targetKey);
+        if (existingCanonicalId) {
+          const existingCanonical = this.recoveryRecords.get(existingCanonicalId);
+          if (existingCanonical) {
+            this.aliasToCanonicalId.set(candidate.id, existingCanonicalId);
+            const aliases = new Set(existingCanonical.aliasRecoveryIds ?? []);
+            if (candidate.id !== existingCanonicalId) {
+              aliases.add(candidate.id);
+              existingCanonical.aliasRecoveryIds = Array.from(aliases);
+            }
+            continue;
+          }
+        }
+
+        // Si un target equivalente ya fue completado en una ventana igual o posterior, registrarlo como RECOVERED sin resucitarlo
+        const completedTs = completedTargetTimestamps.get(targetKey);
+        if (completedTs !== undefined && event.createdAt.getTime() <= completedTs) {
+          candidate.status = 'RECOVERED';
+          candidate.lifecycleState = 'RECOVERY_COMPLETED';
+          candidate.recoveredAt = new Date(completedTs).toISOString();
+        }
+
+        this.recoveryRecords.set(candidate.id, candidate);
+        targetToCanonicalId.set(targetKey, candidate.id);
+      } else if (event.eventType === 'AUDIO_RECOVERY_COMPLETED') {
+        const meta =
+          event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+            ? (event.metadata as Record<string, unknown>)
+            : null;
+        const recId = AudioService.nonEmptyString(meta?.['recoveryRecordId']);
+        const assetId = AudioService.nonEmptyString(meta?.['assetId']);
+        const storagePath =
+          AudioService.nonEmptyString(meta?.['storagePath']) ??
+          AudioService.nonEmptyString(event.resource);
+        const aliasIds = Array.isArray(meta?.['aliasRecoveryRecordIds'])
+          ? (meta['aliasRecoveryRecordIds'] as unknown[])
+              .map((v) => AudioService.nonEmptyString(v))
+              .filter((v): v is string => v !== null)
+          : [];
+
+        if (!recId && !assetId && !storagePath) {
+          this.malformedAuditEntries.set(event.id, {
+            auditLogId: event.id,
+            eventType: event.eventType,
+            resource: event.resource ?? null,
+            reason:
+              'AUDIO_RECOVERY_COMPLETED carece de recoveryRecordId, assetId y storagePath para vincular la recuperación.',
+            rawMetadata: meta ?? {},
+            detectedAt: new Date().toISOString(),
+            lifecycleState: 'MANUAL_INTERVENTION_REQUIRED',
+          });
+          continue;
+        }
+
+        const recoveredAtIso =
+          AudioService.nonEmptyString(meta?.['recoveredAt']) ?? event.createdAt.toISOString();
+        const recoveredAtMs = event.createdAt.getTime();
+        const matchIds = new Set<string>([
+          ...(recId ? [recId] : []),
+          ...aliasIds,
+        ]);
+
+        for (const rec of this.recoveryRecords.values()) {
+          const matchesId =
+            matchIds.has(rec.id) ||
+            Boolean(rec.aliasRecoveryIds?.some((a) => matchIds.has(a)));
+          const matchesAsset = Boolean(assetId && rec.assetId === assetId);
+          const matchesPath = Boolean(storagePath && rec.storagePath === storagePath);
+
+          if (!matchesId && !matchesAsset && !matchesPath) {
+            continue;
+          }
+
+          rec.status = 'RECOVERED';
+          rec.lifecycleState = 'RECOVERY_COMPLETED';
+          rec.recoveredAt = rec.recoveredAt ?? recoveredAtIso;
+
+          const tKey = AudioService.getRecoveryTargetKey(
+            rec.recoveryType,
+            rec.storagePath,
+            rec.assetId
+          );
+          completedTargetTimestamps.set(
+            tKey,
+            Math.max(completedTargetTimestamps.get(tKey) ?? 0, recoveredAtMs)
+          );
+        }
+      } else if (event.eventType === 'AUDIO_ORPHAN_FILE_PURGED') {
+        const meta =
+          event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+            ? (event.metadata as Record<string, unknown>)
+            : null;
+        const storagePath =
+          AudioService.nonEmptyString(meta?.['storagePath']) ??
+          AudioService.nonEmptyString(event.resource);
+        if (!storagePath) continue;
+
+        const purgedAtIso =
+          AudioService.nonEmptyString(meta?.['purgedAt']) ?? event.createdAt.toISOString();
+        const purgedAtMs = event.createdAt.getTime();
+
+        for (const rec of this.recoveryRecords.values()) {
+          if (
+            rec.recoveryType === 'UPLOAD_COMPENSATION_ORPHAN' &&
+            rec.storagePath === storagePath
+          ) {
+            rec.status = 'RECOVERED';
+            rec.lifecycleState = 'RECOVERY_COMPLETED';
+            rec.recoveredAt = rec.recoveredAt ?? purgedAtIso;
+            const tKey = AudioService.getRecoveryTargetKey(
+              rec.recoveryType,
+              rec.storagePath,
+              rec.assetId
+            );
+            completedTargetTimestamps.set(
+              tKey,
+              Math.max(completedTargetTimestamps.get(tKey) ?? 0, purgedAtMs)
+            );
+          }
+        }
+      }
+    }
+
+    const allRecords = Array.from(this.recoveryRecords.values());
+    return {
+      rehydrationSucceeded: true,
+      scannedAuditEvents: relevantEvents.length,
+      reconstructedRecords: allRecords.filter((r) => r.durablyRecorded).length,
+      pendingCount: allRecords.filter((r) => r.status === 'PENDING_RECOVERY').length,
+      completedCount: allRecords.filter((r) => r.status === 'RECOVERED').length,
+      manualInterventionCount:
+        allRecords.filter((r) => r.status === 'MANUAL_INTERVENTION_REQUIRED').length +
+        this.malformedAuditEntries.size,
+      malformedEvents: this.getMalformedRecoveryAuditEntries(),
+    };
   }
 
   private async persistAuditEvent(
@@ -249,7 +723,7 @@ export class AudioService {
   }
 
   private async markRelatedRecoveriesCompleted(
-    match: { assetId?: string | undefined; storagePath?: string | undefined },
+    match: { assetId?: string | undefined; storagePath?: string | undefined; recoveryRecordId?: string | undefined },
     actorUserId?: string | null
   ): Promise<Array<{ recoveryRecordId: string; recoveryType: AudioRecoveryType; target: string; auditLogId?: string }>> {
     const completed: Array<{
@@ -262,11 +736,17 @@ export class AudioService {
 
     for (const record of this.recoveryRecords.values()) {
       if (record.status === 'RECOVERED') continue;
+      const matchesId = Boolean(
+        match.recoveryRecordId &&
+          (record.id === match.recoveryRecordId ||
+            record.aliasRecoveryIds?.includes(match.recoveryRecordId))
+      );
       const matchesAsset = Boolean(match.assetId && record.assetId === match.assetId);
       const matchesPath = Boolean(match.storagePath && record.storagePath === match.storagePath);
-      if (!matchesAsset && !matchesPath) continue;
+      if (!matchesId && !matchesAsset && !matchesPath) continue;
 
       record.status = 'RECOVERED';
+      record.lifecycleState = 'RECOVERY_COMPLETED';
       record.recoveredAt = nowIso;
 
       const auditResult = await this.persistAuditEvent(
@@ -275,6 +755,7 @@ export class AudioService {
         record.storagePath,
         {
           recoveryRecordId: record.id,
+          aliasRecoveryRecordIds: record.aliasRecoveryIds ?? [],
           recoveryType: record.recoveryType,
           assetId: record.assetId ?? null,
           storagePath: record.storagePath,
@@ -411,6 +892,7 @@ export class AudioService {
       let compensationErrorMsg: string | undefined;
       let recoveryRecordId: string | undefined;
       let persistedToAuditLog = false;
+      let durablyRecorded = false;
 
       if (!compensationSucceeded) {
         compensationErrorMsg =
@@ -427,6 +909,7 @@ export class AudioService {
           id: recoveryId,
           recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
           status: 'PENDING_RECOVERY',
+          lifecycleState: 'RECOVERY_PENDING',
           storagePath: saveResult.storagePath,
           songId,
           filename: filename.trim(),
@@ -436,6 +919,7 @@ export class AudioService {
           primaryError: primaryMessage,
           secondaryError: compensationErrorMsg,
           persistedToAuditLog: false,
+          durablyRecorded: false,
           createdAt: recordedAt,
         };
 
@@ -460,9 +944,18 @@ export class AudioService {
         );
 
         persistedToAuditLog = auditResult.persisted;
+        durablyRecorded = auditResult.persisted;
         recoveryRecord.persistedToAuditLog = auditResult.persisted;
+        recoveryRecord.durablyRecorded = auditResult.persisted;
         if (auditResult.auditLogId) {
           recoveryRecord.auditLogId = auditResult.auditLogId;
+        }
+        if (!auditResult.persisted) {
+          recoveryRecord.status = 'MANUAL_INTERVENTION_REQUIRED';
+          recoveryRecord.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+          recoveryRecord.secondaryError = `${compensationErrorMsg} | AUDITORÍA NO DURABLE EN POSTGRESQL: ${
+            auditResult.error ?? 'Error desconocido al escribir audit_logs'
+          }`;
         }
         this.recoveryRecords.set(recoveryId, recoveryRecord);
       }
@@ -476,6 +969,7 @@ export class AudioService {
         ...(compensationErrorMsg ? { compensationError: compensationErrorMsg } : {}),
         ...(recoveryRecordId ? { recoveryRecordId } : {}),
         persistedToAuditLog,
+        durablyRecorded,
         recordedAt,
       };
 
@@ -672,12 +1166,14 @@ export class AudioService {
 
   /**
    * Reconcilia la consistencia entre los registros de `audio_assets` en PostgreSQL y los archivos físicos en disco.
-   * Detecta archivos huérfanos en disco, registros sin archivo físico y archivos físicamente alterados (SHA-256).
-   * Protege subidas en vuelo y archivos ambiguos, y permite recuperación idempotente y auditada de fallos previos.
+   * Rehidrata primero los registros durables de recuperación desde PostgreSQL `audit_logs`,
+   * detecta archivos huérfanos en disco, registros sin archivo físico y archivos físicamente alterados (SHA-256),
+   * protege subidas en vuelo y archivos ambiguos/no-durables/malformados, y ejecuta recuperación idempotente y auditada.
    */
   public async reconcileStorageConsistency(
     options: AudioStorageReconciliationOptions = {}
   ): Promise<AudioStorageReconciliationReport> {
+    const rehydrationReport = await this.rehydrateRecoveryRecordsFromAuditLogs();
     const shouldRecoverFailed = options.recoverFailedOperations ?? Boolean(options.purgeOrphanFiles);
     const recoveredOperations: Array<{
       recoveryRecordId: string;
@@ -686,57 +1182,75 @@ export class AudioService {
     }> = [];
     const auditLogIds: string[] = [];
 
-    // 1. Recuperación idempotente de operaciones fallidas pendientes (antes de inventariar estado actual)
-    if (shouldRecoverFailed) {
+    // 1. Recuperación idempotente de eliminaciones de BD pendientes solo para registros durables validados
+    if (shouldRecoverFailed && rehydrationReport.rehydrationSucceeded) {
       for (const rec of this.recoveryRecords.values()) {
-        if (rec.status !== 'PENDING_RECOVERY') continue;
+        if (rec.status !== 'PENDING_RECOVERY' || !rec.durablyRecorded || !rec.persistedToAuditLog) {
+          continue;
+        }
 
         if (rec.recoveryType === 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE' && rec.assetId) {
           const stillOnDisk = await this.storageProvider.exists(rec.storagePath).catch(() => true);
-          if (!stillOnDisk) {
-            try {
-              const existingAsset = await this.audioRepo.findById(rec.assetId);
-              const resolved = existingAsset ? await this.audioRepo.delete(rec.assetId) : true;
-              if (resolved) {
-                const completed = await this.markRelatedRecoveriesCompleted(
-                  { assetId: rec.assetId, storagePath: rec.storagePath },
-                  null
-                );
-                for (const item of completed) {
-                  recoveredOperations.push({
-                    recoveryRecordId: item.recoveryRecordId,
-                    recoveryType: item.recoveryType,
-                    target: item.target,
-                  });
-                  if (item.auditLogId) {
-                    auditLogIds.push(item.auditLogId);
-                  }
+          if (stillOnDisk) {
+            rec.status = 'MANUAL_INTERVENTION_REQUIRED';
+            rec.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+            rec.secondaryError =
+              'El archivo físico aún existe en disco durante recuperación de eliminación en BD; se requiere revisión manual.';
+            continue;
+          }
+
+          try {
+            const existingAsset = await this.audioRepo.findById(rec.assetId);
+            if (!existingAsset) {
+              const completed = await this.markRelatedRecoveriesCompleted(
+                { recoveryRecordId: rec.id, assetId: rec.assetId, storagePath: rec.storagePath },
+                null
+              );
+              for (const item of completed) {
+                recoveredOperations.push({
+                  recoveryRecordId: item.recoveryRecordId,
+                  recoveryType: item.recoveryType,
+                  target: item.target,
+                });
+                if (item.auditLogId) {
+                  auditLogIds.push(item.auditLogId);
                 }
               }
-            } catch (recErr) {
-              rec.secondaryError = recErr instanceof Error ? recErr.message : String(recErr);
+              continue;
             }
-          }
-        } else if (
-          rec.recoveryType === 'UPLOAD_COMPENSATION_ORPHAN' &&
-          !this.inFlightUploadPaths.has(rec.storagePath)
-        ) {
-          const stillOnDisk = await this.storageProvider.exists(rec.storagePath).catch(() => true);
-          if (!stillOnDisk) {
-            const completed = await this.markRelatedRecoveriesCompleted(
-              { storagePath: rec.storagePath },
-              null
-            );
-            for (const item of completed) {
-              recoveredOperations.push({
-                recoveryRecordId: item.recoveryRecordId,
-                recoveryType: item.recoveryType,
-                target: item.target,
-              });
-              if (item.auditLogId) {
-                auditLogIds.push(item.auditLogId);
+
+            const metadataMatches =
+              existingAsset.storagePath === rec.storagePath &&
+              existingAsset.checksumSha256.toLowerCase() === rec.checksumSha256.toLowerCase() &&
+              existingAsset.fileSizeBytes === rec.fileSizeBytes;
+
+            if (!metadataMatches) {
+              rec.status = 'MANUAL_INTERVENTION_REQUIRED';
+              rec.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+              rec.secondaryError =
+                'Los metadatos actuales de audio_assets en PostgreSQL no coinciden con el registro de recuperación; requiere intervención manual.';
+              continue;
+            }
+
+            const resolved = await this.audioRepo.delete(rec.assetId);
+            if (resolved) {
+              const completed = await this.markRelatedRecoveriesCompleted(
+                { recoveryRecordId: rec.id, assetId: rec.assetId, storagePath: rec.storagePath },
+                null
+              );
+              for (const item of completed) {
+                recoveredOperations.push({
+                  recoveryRecordId: item.recoveryRecordId,
+                  recoveryType: item.recoveryType,
+                  target: item.target,
+                });
+                if (item.auditLogId) {
+                  auditLogIds.push(item.auditLogId);
+                }
               }
             }
+          } catch (recErr) {
+            rec.secondaryError = recErr instanceof Error ? recErr.message : String(recErr);
           }
         }
       }
@@ -751,6 +1265,47 @@ export class AudioService {
     const healthyAssetIds: string[] = [];
     const missingPhysicalFiles: Array<{ assetId: string; storagePath: string }> = [];
     const corruptedPhysicalFiles: Array<{ assetId: string; storagePath: string; reason: string }> = [];
+
+    // Reconciliar casos UPLOAD_COMPENSATION_ORPHAN cuyo archivo físico ya desapareció o está referenciado en BD
+    if (shouldRecoverFailed && rehydrationReport.rehydrationSucceeded) {
+      for (const rec of this.recoveryRecords.values()) {
+        if (
+          rec.status !== 'PENDING_RECOVERY' ||
+          !rec.durablyRecorded ||
+          !rec.persistedToAuditLog ||
+          rec.recoveryType !== 'UPLOAD_COMPENSATION_ORPHAN' ||
+          this.inFlightUploadPaths.has(rec.storagePath)
+        ) {
+          continue;
+        }
+
+        if (referencedPaths.has(rec.storagePath)) {
+          rec.status = 'MANUAL_INTERVENTION_REQUIRED';
+          rec.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+          rec.secondaryError =
+            'El archivo señalado como huérfano ahora está referenciado por un registro activo en audio_assets; requiere revisión manual.';
+          continue;
+        }
+
+        const stillOnDisk = await this.storageProvider.exists(rec.storagePath).catch(() => true);
+        if (!stillOnDisk) {
+          const completed = await this.markRelatedRecoveriesCompleted(
+            { recoveryRecordId: rec.id, storagePath: rec.storagePath },
+            null
+          );
+          for (const item of completed) {
+            recoveredOperations.push({
+              recoveryRecordId: item.recoveryRecordId,
+              recoveryType: item.recoveryType,
+              target: item.target,
+            });
+            if (item.auditLogId) {
+              auditLogIds.push(item.auditLogId);
+            }
+          }
+        }
+      }
+    }
 
     for (const asset of assets) {
       try {
@@ -796,15 +1351,86 @@ export class AudioService {
         continue;
       }
 
-      const isConfirmedCompensationOrphan = Array.from(this.recoveryRecords.values()).some(
+      // Guardia 1.5: Si audit_logs en PostgreSQL no estuvo disponible, bloquear purga automática
+      if (!rehydrationReport.rehydrationSucceeded) {
+        ambiguousFiles.push({
+          storagePath: diskKey,
+          reason:
+            'No se pudo rehidratar audit_logs en PostgreSQL; se bloquea purga automática para prevenir pérdida de evidencia.',
+        });
+        continue;
+      }
+
+      // Guardia 2: Nunca purgar automáticamente archivos vinculados a metadatos malformados o no durables en memoria
+      if (this.malformedStoragePaths.has(diskKey)) {
+        ambiguousFiles.push({
+          storagePath: diskKey,
+          reason:
+            'El evento de auditoría asociado contiene metadatos de recuperación incompletos o inválidos; requiere intervención manual.',
+        });
+        continue;
+      }
+
+      const matchingNonDurableOrManual = Array.from(this.recoveryRecords.values()).find(
+        (r) =>
+          r.storagePath === diskKey &&
+          (!r.durablyRecorded ||
+            !r.persistedToAuditLog ||
+            r.status === 'MANUAL_INTERVENTION_REQUIRED')
+      );
+
+      if (matchingNonDurableOrManual) {
+        ambiguousFiles.push({
+          storagePath: diskKey,
+          reason:
+            !matchingNonDurableOrManual.durablyRecorded ||
+            !matchingNonDurableOrManual.persistedToAuditLog
+              ? 'El registro en memoria no fue persistido de forma durable en PostgreSQL audit_logs; nunca se purga automáticamente.'
+              : 'El registro de recuperación requiere intervención manual; nunca se purga automáticamente.',
+        });
+        continue;
+      }
+
+      const confirmedOrphanRecord = Array.from(this.recoveryRecords.values()).find(
         (r) =>
           r.status === 'PENDING_RECOVERY' &&
+          r.durablyRecorded &&
+          r.persistedToAuditLog &&
           r.recoveryType === 'UPLOAD_COMPENSATION_ORPHAN' &&
           r.storagePath === diskKey
       );
 
-      // Guardia 2: No clasificar como huérfanos elegibles a purga automática archivos ambiguos
-      if (!isConfirmedCompensationOrphan) {
+      if (confirmedOrphanRecord) {
+        // Verificar tamaño exacto y SHA-256 en disco contra el registro durable antes de confirmar purga
+        let hashMatched = false;
+        let verifyFailureReason = '';
+        try {
+          const probe = await this.storageProvider.getStream(diskKey, undefined, undefined, {
+            expectedChecksumSha256: confirmedOrphanRecord.checksumSha256,
+            expectedSizeBytes: confirmedOrphanRecord.fileSizeBytes,
+          });
+          (probe.stream as any).on?.('error', () => {});
+          if (typeof (probe.stream as any).destroy === 'function') {
+            (probe.stream as any).destroy();
+          }
+          hashMatched = true;
+        } catch (verifyErr) {
+          verifyFailureReason =
+            verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+        }
+
+        if (!hashMatched) {
+          confirmedOrphanRecord.status = 'MANUAL_INTERVENTION_REQUIRED';
+          confirmedOrphanRecord.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+          confirmedOrphanRecord.secondaryError = `Discrepancia al verificar el archivo huérfano contra metadatos durables: ${verifyFailureReason}`;
+          ambiguousFiles.push({
+            storagePath: diskKey,
+            reason: `El archivo en disco no coincide en tamaño/SHA-256 con el registro durable de recuperación (${verifyFailureReason}); requiere intervención manual.`,
+          });
+          continue;
+        }
+      } else {
+        // Guardia 3: No clasificar como huérfanos elegibles a purga automática archivos ambiguos
         const ext = path.extname(diskKey).toLowerCase();
         if (!ALLOWED_AUDIO_EXTENSIONS.has(ext)) {
           ambiguousFiles.push({
@@ -896,7 +1522,11 @@ export class AudioService {
     }
 
     const pendingRecoveryRecords = Array.from(this.recoveryRecords.values())
-      .filter((r) => r.status !== 'RECOVERED')
+      .filter((r) => r.status === 'PENDING_RECOVERY')
+      .map((r) => ({ ...r }));
+
+    const manualInterventionRecords = Array.from(this.recoveryRecords.values())
+      .filter((r) => r.status === 'MANUAL_INTERVENTION_REQUIRED')
       .map((r) => ({ ...r }));
 
     return {
@@ -910,6 +1540,9 @@ export class AudioService {
       ambiguousFiles,
       failedOrphanPurges,
       pendingRecoveryRecords,
+      manualInterventionRecords,
+      malformedRecoveryEvents: this.getMalformedRecoveryAuditEntries(),
+      rehydrationReport,
       recoveredOperations,
       auditLogIds,
     };
@@ -978,6 +1611,7 @@ export class AudioService {
         id: recoveryId,
         recoveryType: 'DELETE_PHYSICAL_FAILED',
         status: 'ABORTED_DB_PRESERVED',
+        lifecycleState: 'OPERATION_FAILURE',
         storagePath: asset.storagePath,
         assetId: asset.id,
         songId: asset.songId,
@@ -987,6 +1621,7 @@ export class AudioService {
         fileSizeBytes: asset.fileSizeBytes,
         primaryError: causeMessage,
         persistedToAuditLog: false,
+        durablyRecorded: false,
         createdAt,
       };
 
@@ -1010,19 +1645,31 @@ export class AudioService {
         }
       );
       record.persistedToAuditLog = auditRes.persisted;
+      record.durablyRecorded = auditRes.persisted;
       if (auditRes.auditLogId) {
         record.auditLogId = auditRes.auditLogId;
+      }
+      if (!auditRes.persisted) {
+        record.status = 'MANUAL_INTERVENTION_REQUIRED';
+        record.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+        record.secondaryError = `AUDITORÍA NO DURABLE EN POSTGRESQL: ${
+          auditRes.error ?? 'Error desconocido al escribir audit_logs'
+        }`;
       }
       this.recoveryRecords.set(recoveryId, record);
 
       throw new PersistenceError(
-        `Fallo al eliminar el archivo físico de audio '${asset.storagePath}'. El registro en base de datos fue preservado para mantener la consistencia.`,
+        `Fallo al eliminar el archivo físico de audio '${asset.storagePath}'. El registro en base de datos fue preservado para mantener la consistencia.${
+          auditRes.persisted ? '' : ' ADVERTENCIA: el evento de recuperación NO pudo persistirse de forma durable en PostgreSQL.'
+        }`,
         {
           assetId: asset.id,
           storagePath: asset.storagePath,
           recoveryRecordId: recoveryId,
           dbRecordPreserved: true,
           persistedToAuditLog: record.persistedToAuditLog,
+          durablyRecorded: record.durablyRecorded,
+          lifecycleState: record.lifecycleState,
           cause: causeMessage,
         }
       );
@@ -1051,6 +1698,7 @@ export class AudioService {
         id: recoveryId,
         recoveryType: 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE',
         status: 'PENDING_RECOVERY',
+        lifecycleState: 'RECOVERY_PENDING',
         storagePath: asset.storagePath,
         assetId: asset.id,
         songId: asset.songId,
@@ -1060,6 +1708,7 @@ export class AudioService {
         fileSizeBytes: asset.fileSizeBytes,
         primaryError: causeMessage,
         persistedToAuditLog: false,
+        durablyRecorded: false,
         createdAt,
       };
 
@@ -1083,13 +1732,25 @@ export class AudioService {
         }
       );
       record.persistedToAuditLog = auditRes.persisted;
+      record.durablyRecorded = auditRes.persisted;
       if (auditRes.auditLogId) {
         record.auditLogId = auditRes.auditLogId;
+      }
+      if (!auditRes.persisted) {
+        record.status = 'MANUAL_INTERVENTION_REQUIRED';
+        record.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+        record.secondaryError = `AUDITORÍA NO DURABLE EN POSTGRESQL: ${
+          auditRes.error ?? 'Error desconocido al escribir audit_logs'
+        }`;
       }
       this.recoveryRecords.set(recoveryId, record);
 
       throw new PersistenceError(
-        `El archivo físico '${asset.storagePath}' fue eliminado, pero falló la eliminación del registro en base de datos para el activo '${asset.id}'. Se generó el registro de recuperación '${recoveryId}'.`,
+        `El archivo físico '${asset.storagePath}' fue eliminado, pero falló la eliminación del registro en base de datos para el activo '${asset.id}'. ${
+          auditRes.persisted
+            ? `Se generó el registro durable de recuperación '${recoveryId}'.`
+            : `ADVERTENCIA: no se pudo persistir el evento de recuperación en PostgreSQL (solo registro local no durable '${recoveryId}'; requiere intervención manual).`
+        }`,
         {
           assetId: asset.id,
           storagePath: asset.storagePath,
@@ -1097,6 +1758,8 @@ export class AudioService {
           physicalDeleted: true,
           dbDeleted: false,
           persistedToAuditLog: record.persistedToAuditLog,
+          durablyRecorded: record.durablyRecorded,
+          lifecycleState: record.lifecycleState,
           cause: causeMessage,
         }
       );

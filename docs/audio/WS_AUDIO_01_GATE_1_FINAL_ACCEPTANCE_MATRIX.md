@@ -26,11 +26,11 @@
 | **G1-SEC-02 (Finding A)** | Atomic disk persistence (`.tmp` + `datasync` + `rename` + `chmod 0o444`) & symlink-safe path traversal defense | `LocalFileSystemAudioStorageProvider.save()`, `resolveSafePath()` | `audio-infrastructure.test.ts` (#9); `audio-preservation-and-worker.test.ts` (#14) | **PASS** |
 | **G1-SEC-03 (Finding B)** | Real-time active user & RBAC check plus immediate stream ticket revocation (`?ticket=` & Bearer) | `StreamTicketService.revokeTicketsForUser()`, `audio.routes.ts` (`verifyActiveAuthorizedStreamUser`) | `audio-preservation-and-worker.test.ts` (#15) | **PASS** |
 | **G1-SEC-04** | Anti-IDOR delete authorization (`uploadedByUserId === user.sub` or `SUPER_ADMIN`/`WORSHIP_LEADER`) | `DELETE /api/v1/audio/:id` in `audio.routes.ts` | `audio-preservation-and-worker.test.ts` (#9) | **PASS** |
-| **G1-GOV-01 (Finding C & Storage Failure Audit)** | Best-effort physical rollback on upload failure with primary-error preservation, persistent `audit_logs` recovery record (`UPLOAD_COMPENSATION_ORPHAN`), fail-closed delete consistency (`ABORTED_DB_PRESERVED` / `PENDING_RECOVERY`), in-flight & ambiguous file reconciliation guards, and idempotent audited recovery (`audio_assets.checksum_sha256`) | `AudioService.uploadAudio()`, `deleteAudio()`, `reconcileStorageConsistency()`, `LocalFileSystemAudioStorageProvider.delete()`, `DrizzleAuditLogRepository` | `audio-preservation-and-worker.test.ts` (#16, #18.1–18.5) | **PASS** |
+| **G1-GOV-01 (Finding C & Storage Failure Audit)** | Best-effort physical rollback on upload failure with primary-error preservation, persistent `audit_logs` recovery record (`UPLOAD_COMPENSATION_ORPHAN`), fail-closed delete consistency (`ABORTED_DB_PRESERVED` / `PENDING_RECOVERY`), in-flight & ambiguous file reconciliation guards, idempotent audited recovery (`audio_assets.checksum_sha256`), and durable process-restart rehydration | `AudioService.uploadAudio()`, `deleteAudio()`, `rehydrateRecoveryRecordsFromAuditLogs()`, `reconcileStorageConsistency()`, `LocalFileSystemAudioStorageProvider.delete()`, `DrizzleAuditLogRepository` | `audio-preservation-and-worker.test.ts` (#16, #18.1–18.5, #19.1–19.5) | **PASS** |
 | **G1-GOV-02 (Finding C)** | Production persistent volume infrastructure durability | Audited `docker-compose.yml` (dev Postgres only; no prod volume manifest for `backend/storage/audio`) | Documented in `WS_AUDIO_01_INDEPENDENT_REVIEW_REMEDIATION_REPORT.md` §2.C | **NOT PRODUCTION VERIFIED** |
 | **G1-WRK-01 (Finding E)** | Local Python worker integrated into production backend (`verifyWithWorker` & `POST /api/v1/audio/:id/verify`), memory-bounded, anti-overwrite, anti-URI, `-threads 1`, `AbortSignal` | `AudioService`, `audio.routes.ts`, `PythonAudioWorkerBridge`, `workers/audio_worker/main.py`, `audio_inspector.py` | `test_worker.py` (15 passed); `audio-preservation-and-worker.test.ts` (#10, #10b, #17) | **PASS** |
 | **G1-LIC-01** | Open-source license & GPLv3 bundled FFmpeg (`9.0.2-essentials_build-www.gyan.dev`) compliance | Out-of-process CLI invocation; `.venv` git-ignored; GPLv3 distribution rules documented | `requirements.txt` & Remediation Report §3 | **PASS (WITH DISTRIBUTION NOTICE)** |
-| **G1-REG-01** | Zero regression on MusicXML/ChordPro canonical formats, Conversion API, and TypeScript compilation | Backend + Frontend typechecks & focused backend test suites | Backend typecheck (`0` err), Frontend typecheck (`0` err), Focused Backend suites (`46/46`), Worker pytest (`15/15`) | **PASS** |
+| **G1-REG-01** | Zero regression on MusicXML/ChordPro canonical formats, Conversion API, and TypeScript compilation | Backend + Frontend typechecks & focused backend test suites | Backend typecheck (`0` err), Frontend typecheck (`0` err), Focused Backend suites (`51/51`), Worker pytest (`15/15`) | **PASS** |
 
 ---
 
@@ -50,6 +50,22 @@ All 10 procedures are specified in [`docs/audio/WS_AUDIO_01_MANUAL_ACCEPTANCE_CH
 | **MC-08** | Anti-IDOR deletion protection & RBAC enforcement | `PENDING` |
 | **MC-09** | Immediate stream ticket revocation upon user suspension/deactivation | `PENDING` |
 | **MC-10** | Application server restart & durable playback recovery | `PENDING` |
+
+---
+
+## Durable Recovery After Backend Process Restart
+
+- **Verified Restart Scenarios (`audio-preservation-and-worker.test.ts` Criterio 19.1–19.5):**
+  - **Scenario A (`19.1` — Upload Compensation Orphan Across Restart):** Simulates failed DB insert + failed physical rollback persisted as `AUDIO_UPLOAD_COMPENSATION_FAILED`, discards the original `AudioService` instance, reconstructs the canonical pending record on a fresh instance via `rehydrateRecoveryRecordsFromAuditLogs()`, verifies size/SHA-256 on disk even with `minOrphanAgeMs: 60_000`, purges the orphan, and logs `AUDIO_ORPHAN_FILE_PURGED` + `AUDIO_RECOVERY_COMPLETED`.
+  - **Scenario B (`19.2` — Delete DB Failure After Physical Delete Across Restart):** Simulates successful physical unlink followed by DB `delete()` failure persisted as `AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE`, reconstructs pending cleanup after restart, verifies physical absence on disk AND `audio_assets` metadata equality (`storagePath`, `checksumSha256`, `fileSizeBytes`), deletes the stale row, and transitions the record to `RECOVERED`.
+  - **Scenario C (`19.3` — Non-Resurrection Across Subsequent Restarts):** Verifies completed recoveries stay `RECOVERED` (`RECOVERY_COMPLETED`) across additional backend restarts with zero redundant `storageProvider.delete()` or `audioRepo.delete()` calls.
+  - **Scenario D (`19.4` — Deterministic Audit Deduplication):** Verifies duplicate failure events (same or distinct `recoveryRecordId` targeting the same operation) collapse onto a canonical record with `aliasRecoveryIds` and execute at most once.
+  - **Scenario E (`19.5` — Malformed Metadata & Audit DB Outage Safety):** Verifies missing/invalid audit fields (`checksumSha256`, `assetId`, etc.) produce zero fabricated recovery records, surface in `malformedRecoveryEvents` as `MANUAL_INTERVENTION_REQUIRED`, and protect referenced files from auto-purge; verifies PostgreSQL audit write failures mark local records `durablyRecorded: false` + `MANUAL_INTERVENTION_REQUIRED`, and audit read failures (`rehydrationSucceeded === false`) block automatic orphan purging.
+- **Explicit Lifecycle States:** `OPERATION_FAILURE`, `RECOVERY_PENDING`, `RECOVERY_COMPLETED`, and `MANUAL_INTERVENTION_REQUIRED`.
+- **Remaining Operational Limitations:**
+  - `AudioService.reconcileStorageConsistency()` is an explicit administrative/startup operation rather than an autonomous background cron daemon; operators or startup scripts must invoke it to execute pending recovery work after a crash.
+  - If PostgreSQL `audit_logs` is unreachable at the exact moment a storage failure occurs (`durablyRecorded: false`) and the process restarts before manual operator action, no durable database trace exists from that crash and manual reconciliation is required.
+  - Malformed audit entries or disk/database metadata divergence (`MANUAL_INTERVENTION_REQUIRED`) are intentionally excluded from automated deletion and require human review.
 
 ---
 

@@ -159,3 +159,17 @@ Implemented verbatim in `workers/audio_worker/main.py` and `backend/src/infrastr
 - **Backup & Durability Classification:**
   - Development `docker-compose.yml` configures only `postgres:16-alpine` (`postgres_data` local volume). No production persistent volume manifest or redundant object-store configuration exists in the repository for `backend/storage/audio/`.
   - **Production Persistent Volume Durability:** **`NOT PRODUCTION VERIFIED`**. Production deployments must mount persistent, snapshotted storage at `AUDIO_STORAGE_PATH`, back up PostgreSQL `audio_assets` alongside audio binaries, and run `AudioService.reconcileStorageConsistency()` after restores.
+
+### Durable Recovery After Backend Process Restart
+
+- **Audit-Log Rehydration Path:** Before reconciling disk and database consistency, `AudioService.reconcileStorageConsistency()` calls `AudioService.rehydrateRecoveryRecordsFromAuditLogs()`, querying PostgreSQL `audit_logs` via `IAuditLogRepository.list({ eventTypes: [...AUDIO_RECOVERY_EVENT_TYPES], orderDirection: 'asc' })` with secondary ordering by `audit_logs.id` and paginated batching (`pageSize = 1000`).
+- **Validated State Reconstruction:** Failure events (`AUDIO_UPLOAD_COMPENSATION_FAILED`, `AUDIO_DELETE_PHYSICAL_FAILED`, `AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE`) are validated strictly in `parseFailureAuditEvent()` (requiring `recoveryRecordId`, traversal-safe `storagePath`, `songId`, `filename`, `mimeType`, 64-hex `checksumSha256`, positive integer `fileSizeBytes`, and `assetId` for deletes). Duplicate events merge deterministically via `aliasRecoveryIds`, and completion events (`AUDIO_RECOVERY_COMPLETED`, `AUDIO_ORPHAN_FILE_PURGED`) transition matching records permanently to `RECOVERED` (`RECOVERY_COMPLETED`).
+- **Four Recovery Lifecycle States:** `OPERATION_FAILURE`, `RECOVERY_PENDING`, `RECOVERY_COMPLETED`, and `MANUAL_INTERVENTION_REQUIRED`.
+- **Pre-Action Safety & Failure Handling:**
+  - Pending `DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE` records only remove `audio_assets` rows after confirming both physical absence on disk and metadata equality (`storagePath`, `checksumSha256`, `fileSizeBytes`).
+  - Pending `UPLOAD_COMPENSATION_ORPHAN` records only purge disk files after confirming zero `audio_assets` references and bounded streaming size + SHA-256 verification.
+  - Malformed `audit_logs` events never synthesize records; they are exposed in `reconciliationReport.malformedRecoveryEvents` (`getMalformedRecoveryAuditEntries()`) as `MANUAL_INTERVENTION_REQUIRED`, and any candidate disk path is held in `ambiguousFiles` without auto-purge.
+  - Non-durable in-memory fallback records (`durablyRecorded: false` when `audit_logs` write fails) are marked `MANUAL_INTERVENTION_REQUIRED` and never trigger automated file purging; if `audit_logs` cannot be read during rehydration (`rehydrationSucceeded === false`), automatic orphan purge and automatic failed-operation recovery are both blocked.
+- **Operational Limitations:**
+  - Rehydration and recovery execute when operators or startup maintenance call `reconcileStorageConsistency()`; no automatic background scheduler is active in WS-AUDIO-01.
+  - Crashes during simultaneous PostgreSQL `audit_logs` unavailability (`durablyRecorded: false`) leave no durable database record across process restarts and require manual storage/database audit.

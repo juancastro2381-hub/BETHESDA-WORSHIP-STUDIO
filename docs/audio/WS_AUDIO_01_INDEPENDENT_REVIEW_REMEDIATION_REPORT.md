@@ -105,6 +105,24 @@ Following the independent security/architecture review (Findings **A through E**
 
 ---
 
+### Durable Recovery After Backend Process Restart
+
+- **Original Defect:**
+  - Although audio storage failure-path compensation persisted recovery events (`AUDIO_UPLOAD_COMPENSATION_FAILED`, `AUDIO_DELETE_PHYSICAL_FAILED`, `AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE`, `AUDIO_RECOVERY_COMPLETED`, `AUDIO_ORPHAN_FILE_PURGED`) into PostgreSQL `audit_logs`, `AudioService.recoveryRecords` existed strictly in process-local RAM.
+  - `IAuditLogRepository.list()` lacked server-side `eventTypes` filtering and chronological ordering (`createdAt`, `id`), so a restarted backend instance started with an empty `recoveryRecords` map and could not reconstruct pending recovery operations from durable database state.
+- **Implemented Remediation (Zero Schema Changes):**
+  - **Repository Query Filtering & Chronological Replay ([`backend/src/repositories/audit-repository.ts`](../../backend/src/repositories/audit-repository.ts)):** Extended `IAuditLogRepository.list(options?: ListAuditLogsOptions)` and `DrizzleAuditLogRepository.list()` with `eventTypes`, `limit`, `offset`, and `orderDirection: 'asc' | 'desc'`, adding deterministic secondary ordering by `audit_logs.id` so paginated recovery logs replay cleanly in exact chronological order.
+  - **PostgreSQL Audit-Log Rehydration ([`backend/src/application/audio-service.ts`](../../backend/src/application/audio-service.ts)):** Added `AudioService.rehydrateRecoveryRecordsFromAuditLogs()`, executed automatically at the start of `reconcileStorageConsistency()`. It pages through `AUDIO_RECOVERY_EVENT_TYPES` in chronological order and reconstructs `AudioStorageRecoveryRecord` entries preserving original `id`, `recoveryType`, `storagePath`, `assetId`, `songId`, `filename`, `mimeType`, `checksumSha256`, `fileSizeBytes`, `createdAt`, `durablyRecorded`, and `aliasRecoveryIds`.
+  - **Explicit Recovery Lifecycle States:** Added `AudioRecoveryLifecycleState` distinguishing `OPERATION_FAILURE`, `RECOVERY_PENDING`, `RECOVERY_COMPLETED`, and `MANUAL_INTERVENTION_REQUIRED` alongside `AudioRecoveryStatus` (`PENDING_RECOVERY`, `ABORTED_DB_PRESERVED`, `RECOVERED`, `MANUAL_INTERVENTION_REQUIRED`).
+  - **Deterministic Deduplication & Non-Resurrection:** Duplicate failure events with the same `recoveryRecordId` or matching `{recoveryType, storagePath, assetId}` merge deterministically onto a single canonical record (`aliasRecoveryIds`), while `AUDIO_RECOVERY_COMPLETED` and `AUDIO_ORPHAN_FILE_PURGED` pin matching records to `RECOVERED` (`RECOVERY_COMPLETED`) so completed operations never re-execute or resurrect after subsequent restarts.
+  - **Strict Metadata Validation & Zero Fabrication (`parseFailureAuditEvent()`):** Requires valid `recoveryRecordId`, traversal-safe `storagePath` (`resolveSafePath()`), `songId`, `filename`, `mimeType`, 64-hex `checksumSha256`, positive integer `fileSizeBytes`, and `assetId` for delete failures. Malformed or incomplete `audit_logs` entries never synthesize repairable records; they surface via `getMalformedRecoveryAuditEntries()` and `reconciliationReport.malformedRecoveryEvents` with `MANUAL_INTERVENTION_REQUIRED`, quarantining referenced disk paths inside `ambiguousFiles`.
+  - **Non-Durable Fallback & Outage Safety:** When PostgreSQL `audit_logs` write fails during upload/delete failure compensation, `durablyRecorded` is `false` and status transitions to `MANUAL_INTERVENTION_REQUIRED`; `reconcileStorageConsistency()` never auto-purges files backed only by non-durable in-memory state. When reading `audit_logs` fails during rehydration (`rehydrationReport.rehydrationSucceeded === false`), automatic failed-operation recovery and automatic orphan purging are both blocked.
+  - **Pre-Action Physical & DB Verification:** Before completing `DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE`, `reconcileStorageConsistency()` verifies that the physical file no longer exists on disk AND that the PostgreSQL `audio_assets` row matches `{storagePath, checksumSha256, fileSizeBytes}`. Before purging `UPLOAD_COMPENSATION_ORPHAN`, it verifies zero `audio_assets` references AND exact bounded streaming size + SHA-256 checksum match.
+- **Verification Evidence:**
+  - `backend/src/__tests__/audio-preservation-and-worker.test.ts` Criterio **19** (**`19.1`–`19.5`** / Scenarios A–E) verifies process-restart rehydration for upload compensation orphans, physical-deleted/DB-remaining cleanup, completed recovery non-resurrection across multiple restarts, duplicate audit-event deduplication, malformed metadata rejection without auto-purge, and PostgreSQL audit unavailability safety.
+
+---
+
 ## 3. License & Distribution Review (`workers/audio_worker/`)
 
 Inspected [`workers/audio_worker/requirements.txt`](../../workers/audio_worker/requirements.txt) and the local Python `.venv` environment (`workers/audio_worker/.venv/Scripts/python.exe`):
@@ -122,10 +140,10 @@ Inspected [`workers/audio_worker/requirements.txt`](../../workers/audio_worker/r
 
 | Verification Command | Result | Scope |
 | :--- | :--- | :--- |
-| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` | **15 passed in 7.24s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
-| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **46 passed, 0 failed** (3 suites) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E + Storage Failure-Path Audit 18.1–18.5 (23), Conversion API (9) |
+| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` | **15 passed in 11.46s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
+| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **51 passed, 0 failed** (3 suites) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E + Storage Failure-Path Audit 18.1–18.5 + Durable Recovery Rehydration Audit 19.1–19.5 (28), Conversion API (9) |
 | `npm --prefix backend run typecheck` | **0 errors** (Exit 0) | Full backend TypeScript compilation |
 | `npm --prefix frontend run typecheck` | **0 errors** (Exit 0) | Full frontend TypeScript compilation |
 
-*(Frontend production code and frontend test files were unmodified during the storage failure-path remediation pass.)*
+*(Frontend production code and frontend test files were unmodified during the storage failure-path and durable recovery rehydration remediations.)*
 

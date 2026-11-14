@@ -181,8 +181,13 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
     return fs.readFileSync(outPath);
   }
 
+  async function cleanAudioAuditLogs(): Promise<void> {
+    await pool.query("DELETE FROM audit_logs WHERE event_type LIKE 'AUDIO_%'");
+  }
+
   before(async () => {
     await runMigrations();
+    await cleanAudioAuditLogs();
     app = await buildApp();
     await app.ready();
 
@@ -263,6 +268,7 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
   });
 
   after(async () => {
+    await cleanAudioAuditLogs();
     if (createdSongIds.size > 0) {
       await pool.query('DELETE FROM songs WHERE id = ANY($1)', [Array.from(createdSongIds)]);
     }
@@ -1628,5 +1634,710 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
     assert.strictEqual(createdAsset.storagePath, inFlightKey);
     const downloaded = await service.downloadAudio(createdAsset.id);
     assert.strictEqual(Buffer.compare(downloaded.buffer, mp3Buffer), 0);
+  });
+
+  // =========================================================================
+  // CRITERIO 19: REHIDRATACIÓN Y RECUPERACIÓN DURABLE TRAS REINICIO DE BACKEND
+  // =========================================================================
+
+  function createInMemoryAudioRepo(
+    memStore: Map<string, AudioAsset>,
+    options: {
+      failCreate?: () => Error | null;
+      failDelete?: () => Error | null;
+      onDeleteCalled?: () => void;
+    } = {}
+  ): IAudioRepository {
+    return {
+      async create(data: NewAudioAsset) {
+        const err = options.failCreate?.() ?? null;
+        if (err) throw err;
+        const row: AudioAsset = {
+          id: crypto.randomUUID(),
+          songId: data.songId,
+          title: data.title,
+          filename: data.filename,
+          storagePath: data.storagePath,
+          mimeType: data.mimeType,
+          fileSizeBytes: data.fileSizeBytes,
+          checksumSha256: data.checksumSha256,
+          durationSeconds: data.durationSeconds ?? null,
+          uploadedByUserId: data.uploadedByUserId ?? null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        memStore.set(row.id, row);
+        return row;
+      },
+      async findById(id: string) {
+        return memStore.get(id) ?? null;
+      },
+      async findBySongId(sId: string) {
+        return Array.from(memStore.values()).filter((a) => a.songId === sId);
+      },
+      async findAll() {
+        return Array.from(memStore.values());
+      },
+      async delete(id: string) {
+        options.onDeleteCalled?.();
+        const err = options.failDelete?.() ?? null;
+        if (err) throw err;
+        return memStore.delete(id);
+      },
+    };
+  }
+
+  function createFaultyStorageWrapper(
+    baseStorage: LocalFileSystemAudioStorageProvider,
+    options: {
+      failDelete?: () => Error | null;
+      onDeleteCalled?: () => void;
+    } = {}
+  ): IAudioStorageProvider {
+    return {
+      save: (f, b) => baseStorage.save(f, b),
+      getStream: (p, s, e, o) => baseStorage.getStream(p, s, e, o),
+      getBuffer: (p) => baseStorage.getBuffer(p),
+      exists: (p) => baseStorage.exists(p),
+      stat: (p) => baseStorage.stat(p),
+      resolveSafePath: (p) => baseStorage.resolveSafePath(p),
+      listKeys: () => baseStorage.listKeys(),
+      delete: async (p) => {
+        options.onDeleteCalled?.();
+        const err = options.failDelete?.() ?? null;
+        if (err) throw err;
+        return await baseStorage.delete(p);
+      },
+    };
+  }
+
+  it('19.1 (Scenario A) should rehydrate upload compensation failure after backend restart and recover orphan safely', async () => {
+    await cleanAudioAuditLogs();
+
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_1_'));
+    tempDirsToClean.push(isolatedDir);
+    const baseStorage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const faultStorage = createFaultyStorageWrapper(baseStorage, {
+      failDelete: () => new PersistenceError('EPERM: simulated disk lock during upload compensation'),
+    });
+
+    const dbRows = new Map<string, AudioAsset>();
+    const primaryDbErr = new PersistenceError('PostgreSQL connection dropped during audio_assets insert');
+    const failingCreateRepo = createInMemoryAudioRepo(dbRows, {
+      failCreate: () => primaryDbErr,
+    });
+
+    const realAuditRepo = new DrizzleAuditLogRepository();
+    const process1Service = new AudioService(
+      failingCreateRepo,
+      faultStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      realAuditRepo
+    );
+
+    const mp3Buffer = makeValidMp3Buffer(4);
+    let thrownErr: unknown = null;
+    try {
+      await process1Service.uploadAudio({
+        songId: testSong.id,
+        title: 'Restart Orphan Recovery',
+        filename: 'restart-orphan.mp3',
+        mimeType: 'audio/mpeg',
+        buffer: mp3Buffer,
+        uploadedByUserId: directorUser.id,
+      });
+    } catch (err) {
+      thrownErr = err;
+    }
+
+    assert.strictEqual(thrownErr, primaryDbErr);
+    const compensation = (thrownErr as Error & { compensation?: AudioUploadCompensationReport }).compensation;
+    assert.ok(compensation);
+    assert.strictEqual(compensation.attempted, true);
+    assert.strictEqual(compensation.succeeded, false);
+    assert.strictEqual(compensation.persistedToAuditLog, true);
+    assert.strictEqual(compensation.durablyRecorded, true);
+    assert.ok(compensation.recoveryRecordId);
+
+    const originalRec = process1Service
+      .getRecoveryRecords()
+      .find((r) => r.id === compensation.recoveryRecordId);
+    assert.ok(originalRec);
+    assert.strictEqual(originalRec.status, 'PENDING_RECOVERY');
+    assert.strictEqual(originalRec.lifecycleState, 'RECOVERY_PENDING');
+    assert.strictEqual(originalRec.durablyRecorded, true);
+    assert.strictEqual(await baseStorage.exists(originalRec.storagePath), true);
+
+    // Simular reinicio completo del backend: nueva instancia AudioService sin estado previo en memoria
+    const process2Repo = createInMemoryAudioRepo(dbRows);
+    const process2Storage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const process2Service = new AudioService(
+      process2Repo,
+      process2Storage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+
+    assert.deepStrictEqual(process2Service.getRecoveryRecords(), []);
+
+    const rehydrationReport = await process2Service.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydrationReport.rehydrationSucceeded, true);
+    assert.strictEqual(rehydrationReport.reconstructedRecords, 1);
+    assert.strictEqual(rehydrationReport.pendingCount, 1);
+    assert.strictEqual(rehydrationReport.completedCount, 0);
+
+    const restored = process2Service.getRecoveryRecords();
+    assert.strictEqual(restored.length, 1);
+    const restoredRec = restored[0]!;
+    assert.strictEqual(restoredRec.id, originalRec.id);
+    assert.strictEqual(restoredRec.recoveryType, 'UPLOAD_COMPENSATION_ORPHAN');
+    assert.strictEqual(restoredRec.storagePath, originalRec.storagePath);
+    assert.strictEqual(restoredRec.checksumSha256, originalRec.checksumSha256);
+    assert.strictEqual(restoredRec.fileSizeBytes, originalRec.fileSizeBytes);
+    assert.strictEqual(restoredRec.createdAt, originalRec.createdAt);
+    assert.strictEqual(restoredRec.durablyRecorded, true);
+    assert.strictEqual(restoredRec.lifecycleState, 'RECOVERY_PENDING');
+
+    // Recuperar tras el reinicio respetando minOrphanAgeMs alto: el registro durable + SHA-256 autorizan la purga
+    const recReport = await process2Service.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+
+    assert.deepStrictEqual(recReport.purgedOrphanFiles, [originalRec.storagePath]);
+    assert.strictEqual(await process2Storage.exists(originalRec.storagePath), false);
+    assert.deepStrictEqual(recReport.pendingRecoveryRecords, []);
+    assert.strictEqual(recReport.recoveredOperations.length, 1);
+    assert.strictEqual(recReport.recoveredOperations[0]?.recoveryRecordId, originalRec.id);
+    assert.strictEqual(recReport.recoveredOperations[0]?.recoveryType, 'UPLOAD_COMPENSATION_ORPHAN');
+
+    const postRecovery = process2Service.getRecoveryRecords()[0]!;
+    assert.strictEqual(postRecovery.status, 'RECOVERED');
+    assert.strictEqual(postRecovery.lifecycleState, 'RECOVERY_COMPLETED');
+
+    const auditEvents = await realAuditRepo.list({
+      eventTypes: ['AUDIO_ORPHAN_FILE_PURGED', 'AUDIO_RECOVERY_COMPLETED'],
+      orderDirection: 'asc',
+    });
+    assert.ok(auditEvents.some((e) => e.eventType === 'AUDIO_ORPHAN_FILE_PURGED'));
+    assert.ok(auditEvents.some((e) => e.eventType === 'AUDIO_RECOVERY_COMPLETED'));
+  });
+
+  it('19.2 (Scenario B) should rehydrate DB-delete failure after physical delete across restart and clean DB row only after verifying absence and metadata match', async () => {
+    await cleanAudioAuditLogs();
+
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_2_'));
+    tempDirsToClean.push(isolatedDir);
+    const storage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const dbRows = new Map<string, AudioAsset>();
+
+    let failDbDelete = false;
+    const process1Repo = createInMemoryAudioRepo(dbRows, {
+      failDelete: () =>
+        failDbDelete ? new PersistenceError('Simulated PostgreSQL deadlock during DELETE FROM audio_assets') : null,
+    });
+
+    const realAuditRepo = new DrizzleAuditLogRepository();
+    const process1Service = new AudioService(
+      process1Repo,
+      storage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      realAuditRepo
+    );
+
+    const mp3Buffer = makeValidMp3Buffer(4);
+    const uploaded = await process1Service.uploadAudio({
+      songId: testSong.id,
+      title: 'Scenario B Asset',
+      filename: 'scenario-b.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: mp3Buffer,
+      uploadedByUserId: directorUser.id,
+    });
+
+    failDbDelete = true;
+    let deleteErr: unknown = null;
+    try {
+      await process1Service.deleteAudio(uploaded.id, directorUser.id);
+    } catch (err) {
+      deleteErr = err;
+    }
+
+    assert.ok(deleteErr instanceof PersistenceError);
+    assert.strictEqual(await storage.exists(uploaded.storagePath), false);
+    assert.strictEqual(dbRows.has(uploaded.id), true);
+
+    const originalRec = process1Service.getRecoveryRecords()[0]!;
+    assert.strictEqual(originalRec.recoveryType, 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE');
+    assert.strictEqual(originalRec.assetId, uploaded.id);
+    assert.strictEqual(originalRec.status, 'PENDING_RECOVERY');
+    assert.strictEqual(originalRec.lifecycleState, 'RECOVERY_PENDING');
+    assert.strictEqual(originalRec.durablyRecorded, true);
+
+    // Simular reinicio del backend con la BD ya disponible nuevamente
+    const process2Repo = createInMemoryAudioRepo(dbRows);
+    const process2Service = new AudioService(
+      process2Repo,
+      storage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+
+    const rehydration = await process2Service.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydration.rehydrationSucceeded, true);
+    assert.strictEqual(rehydration.reconstructedRecords, 1);
+    assert.strictEqual(rehydration.pendingCount, 1);
+
+    const restoredRec = process2Service.getRecoveryRecords()[0]!;
+    assert.strictEqual(restoredRec.id, originalRec.id);
+    assert.strictEqual(restoredRec.assetId, uploaded.id);
+    assert.strictEqual(restoredRec.storagePath, uploaded.storagePath);
+    assert.strictEqual(restoredRec.checksumSha256, uploaded.checksumSha256);
+    assert.strictEqual(restoredRec.fileSizeBytes, uploaded.fileSizeBytes);
+    assert.strictEqual(restoredRec.createdAt, originalRec.createdAt);
+
+    const recReport = await process2Service.reconcileStorageConsistency({
+      recoverFailedOperations: true,
+    });
+
+    assert.strictEqual(dbRows.has(uploaded.id), false);
+    assert.strictEqual(recReport.pendingRecoveryRecords.length, 0);
+    assert.strictEqual(recReport.recoveredOperations.length, 1);
+    assert.strictEqual(recReport.recoveredOperations[0]?.recoveryRecordId, originalRec.id);
+    assert.strictEqual(recReport.recoveredOperations[0]?.recoveryType, 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE');
+
+    const finalRec = process2Service.getRecoveryRecords()[0]!;
+    assert.strictEqual(finalRec.status, 'RECOVERED');
+    assert.strictEqual(finalRec.lifecycleState, 'RECOVERY_COMPLETED');
+  });
+
+  it('19.3 (Scenario C) should never re-execute or resurrect previously completed recoveries across subsequent restarts', async () => {
+    await cleanAudioAuditLogs();
+
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_3_'));
+    tempDirsToClean.push(isolatedDir);
+    const baseStorage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const dbRows = new Map<string, AudioAsset>();
+    const realAuditRepo = new DrizzleAuditLogRepository();
+
+    // 1. Generar y recuperar un UPLOAD_COMPENSATION_ORPHAN
+    let blockStorageDelete = true;
+    const faultStorage = createFaultyStorageWrapper(baseStorage, {
+      failDelete: () => (blockStorageDelete ? new PersistenceError('EBUSY') : null),
+    });
+    const serviceA = new AudioService(
+      createInMemoryAudioRepo(dbRows, {
+        failCreate: () => new PersistenceError('DB insert fail for Scenario C'),
+      }),
+      faultStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      realAuditRepo
+    );
+    await assert.rejects(
+      () =>
+        serviceA.uploadAudio({
+          songId: testSong.id,
+          title: 'Completed Upload Orphan',
+          filename: 'completed-c-upload.mp3',
+          mimeType: 'audio/mpeg',
+          buffer: makeValidMp3Buffer(4),
+          uploadedByUserId: directorUser.id,
+        }),
+      PersistenceError
+    );
+
+    // 2. Generar un DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE
+    let failDbDelete = false;
+    const repoB = createInMemoryAudioRepo(dbRows, {
+      failDelete: () => (failDbDelete ? new PersistenceError('DB delete fail for Scenario C') : null),
+    });
+    const serviceB = new AudioService(
+      repoB,
+      baseStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      realAuditRepo
+    );
+    const assetB = await serviceB.uploadAudio({
+      songId: testSong.id,
+      title: 'Completed Delete Orphan',
+      filename: 'completed-c-delete.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(4),
+      uploadedByUserId: directorUser.id,
+    });
+    failDbDelete = true;
+    await assert.rejects(() => serviceB.deleteAudio(assetB.id, directorUser.id), PersistenceError);
+
+    // 3. Ejecutar recuperación limpia tras un primer reinicio
+    blockStorageDelete = false;
+    failDbDelete = false;
+    const recoveryService = new AudioService(
+      createInMemoryAudioRepo(dbRows),
+      baseStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      realAuditRepo
+    );
+    const firstRecovery = await recoveryService.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+    assert.strictEqual(firstRecovery.pendingRecoveryRecords.length, 0);
+    assert.strictEqual(firstRecovery.recoveredOperations.length, 2);
+
+    // 4. Simular un nuevo reinicio y verificar 0 ejecuciones repetidas y 0 resurrecciones
+    let storageDeleteCalls = 0;
+    let repoDeleteCalls = 0;
+    const spiedStorage = createFaultyStorageWrapper(baseStorage, {
+      onDeleteCalled: () => {
+        storageDeleteCalls += 1;
+      },
+    });
+    const spiedRepo = createInMemoryAudioRepo(dbRows, {
+      onDeleteCalled: () => {
+        repoDeleteCalls += 1;
+      },
+    });
+    const restartedService = new AudioService(
+      spiedRepo,
+      spiedStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+
+    const rehydrateAfterCompletion = await restartedService.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydrateAfterCompletion.rehydrationSucceeded, true);
+    assert.strictEqual(rehydrateAfterCompletion.reconstructedRecords, 2);
+    assert.strictEqual(rehydrateAfterCompletion.pendingCount, 0);
+    assert.strictEqual(rehydrateAfterCompletion.completedCount, 2);
+
+    const secondReconcile = await restartedService.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 0,
+    });
+    assert.deepStrictEqual(secondReconcile.recoveredOperations, []);
+    assert.deepStrictEqual(secondReconcile.pendingRecoveryRecords, []);
+    assert.deepStrictEqual(secondReconcile.purgedOrphanFiles, []);
+    assert.strictEqual(storageDeleteCalls, 0);
+    assert.strictEqual(repoDeleteCalls, 0);
+    assert.ok(
+      restartedService
+        .getRecoveryRecords()
+        .every((r) => r.status === 'RECOVERED' && r.lifecycleState === 'RECOVERY_COMPLETED')
+    );
+  });
+
+  it('19.4 (Scenario D) should deterministically deduplicate duplicate recovery audit events across restart', async () => {
+    await cleanAudioAuditLogs();
+
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_4_'));
+    tempDirsToClean.push(isolatedDir);
+    const baseStorage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const mp3Buffer = makeValidMp3Buffer(4);
+    const saved = await baseStorage.save('dup-target.mp3', mp3Buffer);
+    const checksumSha256 = crypto.createHash('sha256').update(mp3Buffer).digest('hex');
+
+    const realAuditRepo = new DrizzleAuditLogRepository();
+    const recIdA = crypto.randomUUID();
+    const recIdB = crypto.randomUUID();
+    const createdAtIso = new Date().toISOString();
+
+    const buildMeta = (recoveryRecordId: string) => ({
+      recoveryRecordId,
+      recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
+      status: 'PENDING_RECOVERY',
+      songId: testSong.id,
+      storagePath: saved.storagePath,
+      filename: 'dup-target.mp3',
+      mimeType: 'audio/mpeg',
+      checksumSha256,
+      fileSizeBytes: mp3Buffer.byteLength,
+      primaryError: 'Simulated duplicate primary DB error',
+      compensationError: 'Simulated duplicate compensation error',
+      createdAt: createdAtIso,
+    });
+
+    await realAuditRepo.create({
+      eventType: 'AUDIO_UPLOAD_COMPENSATION_FAILED',
+      userId: directorUser.id,
+      resource: saved.storagePath,
+      metadata: buildMeta(recIdA),
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    // Duplicado con mismo recoveryRecordId
+    await realAuditRepo.create({
+      eventType: 'AUDIO_UPLOAD_COMPENSATION_FAILED',
+      userId: directorUser.id,
+      resource: saved.storagePath,
+      metadata: buildMeta(recIdA),
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    // Duplicado con distinto recoveryRecordId apuntando al mismo storagePath
+    await realAuditRepo.create({
+      eventType: 'AUDIO_UPLOAD_COMPENSATION_FAILED',
+      userId: directorUser.id,
+      resource: saved.storagePath,
+      metadata: buildMeta(recIdB),
+    });
+
+    let deleteCalls = 0;
+    const spiedStorage = createFaultyStorageWrapper(baseStorage, {
+      onDeleteCalled: () => {
+        deleteCalls += 1;
+      },
+    });
+    const dbRows = new Map<string, AudioAsset>();
+    const restartedService = new AudioService(
+      createInMemoryAudioRepo(dbRows),
+      spiedStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+
+    const rehydration = await restartedService.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydration.rehydrationSucceeded, true);
+    assert.strictEqual(rehydration.reconstructedRecords, 1);
+    assert.strictEqual(rehydration.pendingCount, 1);
+
+    const canonicalRecords = restartedService.getRecoveryRecords();
+    assert.strictEqual(canonicalRecords.length, 1);
+    assert.strictEqual(canonicalRecords[0]!.id, recIdA);
+    assert.ok(canonicalRecords[0]!.aliasRecoveryIds?.includes(recIdB));
+
+    const recReport = await restartedService.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+    assert.strictEqual(deleteCalls, 1);
+    assert.deepStrictEqual(recReport.purgedOrphanFiles, [saved.storagePath]);
+    assert.deepStrictEqual(recReport.pendingRecoveryRecords, []);
+    assert.strictEqual(await baseStorage.exists(saved.storagePath), false);
+
+    // Verificar en un segundo reinicio que tanto el ID canónico como el alias permanecen completados
+    const restartedAgain = new AudioService(
+      createInMemoryAudioRepo(dbRows),
+      baseStorage,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+    const rehydrationAgain = await restartedAgain.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydrationAgain.reconstructedRecords, 1);
+    assert.strictEqual(rehydrationAgain.pendingCount, 0);
+    assert.strictEqual(rehydrationAgain.completedCount, 1);
+  });
+
+  it('19.5 (Scenario E) should reject malformed recovery events without fabrication and block unsafe auto-purge when PostgreSQL audit is unavailable', async () => {
+    await cleanAudioAuditLogs();
+
+    // Subcaso E1: eventos malformados/incompletos en PostgreSQL audit_logs
+    const dirE1 = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_5_e1_'));
+    tempDirsToClean.push(dirE1);
+    const storageE1 = new LocalFileSystemAudioStorageProvider(dirE1, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const mp3Buffer = makeValidMp3Buffer(4);
+    const savedMalformed = await storageE1.save('malformed-protected.mp3', mp3Buffer);
+    const oldTime = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(storageE1.resolveSafePath(savedMalformed.storagePath), oldTime, oldTime);
+
+    const realAuditRepo = new DrizzleAuditLogRepository();
+    // 1. Falta checksumSha256 obligatorio para el archivo guardado en disco
+    await realAuditRepo.create({
+      eventType: 'AUDIO_UPLOAD_COMPENSATION_FAILED',
+      userId: directorUser.id,
+      resource: savedMalformed.storagePath,
+      metadata: {
+        recoveryRecordId: crypto.randomUUID(),
+        recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
+        songId: testSong.id,
+        storagePath: savedMalformed.storagePath,
+        filename: 'malformed-protected.mp3',
+        mimeType: 'audio/mpeg',
+        fileSizeBytes: mp3Buffer.byteLength,
+      },
+    });
+    // 2. checksumSha256 inválido (no hex SHA-256)
+    await realAuditRepo.create({
+      eventType: 'AUDIO_UPLOAD_COMPENSATION_FAILED',
+      userId: directorUser.id,
+      resource: 'other-invalid.mp3',
+      metadata: {
+        recoveryRecordId: crypto.randomUUID(),
+        songId: testSong.id,
+        storagePath: 'other-invalid.mp3',
+        filename: 'other-invalid.mp3',
+        mimeType: 'audio/mpeg',
+        checksumSha256: 'not-a-valid-sha256',
+        fileSizeBytes: mp3Buffer.byteLength,
+      },
+    });
+    // 3. DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE sin assetId obligatorio
+    await realAuditRepo.create({
+      eventType: 'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE',
+      userId: directorUser.id,
+      resource: 'missing-asset-id.mp3',
+      metadata: {
+        recoveryRecordId: crypto.randomUUID(),
+        songId: testSong.id,
+        storagePath: 'missing-asset-id.mp3',
+        filename: 'missing-asset-id.mp3',
+        mimeType: 'audio/mpeg',
+        checksumSha256: 'a'.repeat(64),
+        fileSizeBytes: 1024,
+      },
+    });
+
+    const dbRowsE1 = new Map<string, AudioAsset>();
+    const serviceE1 = new AudioService(
+      createInMemoryAudioRepo(dbRowsE1),
+      storageE1,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      new DrizzleAuditLogRepository()
+    );
+
+    const rehydrationE1 = await serviceE1.rehydrateRecoveryRecordsFromAuditLogs();
+    assert.strictEqual(rehydrationE1.rehydrationSucceeded, true);
+    assert.strictEqual(rehydrationE1.reconstructedRecords, 0);
+    assert.strictEqual(rehydrationE1.malformedEvents.length, 3);
+    assert.strictEqual(rehydrationE1.manualInterventionCount, 3);
+    assert.deepStrictEqual(serviceE1.getRecoveryRecords(), []);
+    assert.ok(
+      serviceE1
+        .getMalformedRecoveryAuditEntries()
+        .every((m) => m.lifecycleState === 'MANUAL_INTERVENTION_REQUIRED')
+    );
+
+    const reconcileE1 = await serviceE1.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+    assert.deepStrictEqual(reconcileE1.purgedOrphanFiles, []);
+    assert.ok(reconcileE1.ambiguousFiles.some((f) => f.storagePath === savedMalformed.storagePath));
+    assert.strictEqual(await storageE1.exists(savedMalformed.storagePath), true);
+
+    // Subcaso E2: falla escritura en PostgreSQL audit_logs -> registro local marcado no durable y nunca auto-purgado
+    const dirE2 = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_5_e2_'));
+    tempDirsToClean.push(dirE2);
+    const storageE2Base = new LocalFileSystemAudioStorageProvider(dirE2, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    let blockDeleteE2 = true;
+    const storageE2 = createFaultyStorageWrapper(storageE2Base, {
+      failDelete: () => (blockDeleteE2 ? new PersistenceError('EPERM') : null),
+    });
+    const unavailableWriteAuditRepo: IAuditLogRepository = {
+      async create() {
+        throw new Error('ECONNREFUSED postgresql audit_logs write failed');
+      },
+      async list() {
+        return [];
+      },
+    };
+    const serviceE2 = new AudioService(
+      createInMemoryAudioRepo(new Map<string, AudioAsset>(), {
+        failCreate: () => new PersistenceError('DB upload insert error'),
+      }),
+      storageE2,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      unavailableWriteAuditRepo
+    );
+
+    let errE2: unknown = null;
+    try {
+      await serviceE2.uploadAudio({
+        songId: testSong.id,
+        title: 'Non Durable Audit Test',
+        filename: 'non-durable.mp3',
+        mimeType: 'audio/mpeg',
+        buffer: mp3Buffer,
+        uploadedByUserId: directorUser.id,
+      });
+    } catch (err) {
+      errE2 = err;
+    }
+
+    const compE2 = (errE2 as Error & { compensation?: AudioUploadCompensationReport }).compensation;
+    assert.ok(compE2);
+    assert.strictEqual(compE2.persistedToAuditLog, false);
+    assert.strictEqual(compE2.durablyRecorded, false);
+
+    const recE2Local = serviceE2.getRecoveryRecords()[0]!;
+    assert.strictEqual(recE2Local.durablyRecorded, false);
+    assert.strictEqual(recE2Local.status, 'MANUAL_INTERVENTION_REQUIRED');
+    assert.strictEqual(recE2Local.lifecycleState, 'MANUAL_INTERVENTION_REQUIRED');
+
+    // Envejecer el archivo y habilitar eliminación física: aún así NO debe auto-purgarse porque no es durable
+    blockDeleteE2 = false;
+    fs.utimesSync(storageE2Base.resolveSafePath(recE2Local.storagePath), oldTime, oldTime);
+
+    const reconcileE2 = await serviceE2.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+    assert.strictEqual(reconcileE2.manualInterventionRecords.length, 1);
+    assert.deepStrictEqual(reconcileE2.recoveredOperations, []);
+    assert.deepStrictEqual(reconcileE2.purgedOrphanFiles, []);
+    assert.ok(reconcileE2.ambiguousFiles.some((f) => f.storagePath === recE2Local.storagePath));
+    assert.strictEqual(await storageE2Base.exists(recE2Local.storagePath), true);
+
+    // Subcaso E3: falla lectura de PostgreSQL audit_logs en rehidratación -> rehydrationSucceeded=false y bloqueo de purga
+    const dirE3 = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_rehydrate_19_5_e3_'));
+    tempDirsToClean.push(dirE3);
+    const storageE3 = new LocalFileSystemAudioStorageProvider(dirE3, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const agedFileE3 = await storageE3.save('aged-unverified.mp3', mp3Buffer);
+    fs.utimesSync(storageE3.resolveSafePath(agedFileE3.storagePath), oldTime, oldTime);
+
+    const unavailableReadAuditRepo: IAuditLogRepository = {
+      async create(input) {
+        return await realAuditRepo.create(input);
+      },
+      async list() {
+        throw new Error('PostgreSQL timeout reading audit_logs');
+      },
+    };
+    const serviceE3 = new AudioService(
+      createInMemoryAudioRepo(new Map<string, AudioAsset>()),
+      storageE3,
+      songRepo,
+      env.MAX_AUDIO_FILE_SIZE_BYTES,
+      globalPythonAudioWorkerBridge,
+      unavailableReadAuditRepo
+    );
+
+    const reconcileE3 = await serviceE3.reconcileStorageConsistency({
+      purgeOrphanFiles: true,
+      recoverFailedOperations: true,
+      minOrphanAgeMs: 60_000,
+    });
+    assert.strictEqual(reconcileE3.rehydrationReport.rehydrationSucceeded, false);
+    assert.ok(reconcileE3.rehydrationReport.error);
+    assert.deepStrictEqual(reconcileE3.purgedOrphanFiles, []);
+    assert.ok(reconcileE3.ambiguousFiles.some((f) => f.storagePath === agedFileE3.storagePath));
+    assert.strictEqual(await storageE3.exists(agedFileE3.storagePath), true);
   });
 });

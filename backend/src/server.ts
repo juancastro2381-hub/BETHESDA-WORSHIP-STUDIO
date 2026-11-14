@@ -13,6 +13,7 @@ import { DrizzleAuditLogRepository } from './repositories/audit-repository.ts';
 import { AuditService } from './application/audit-service.ts';
 import { ConversionWorker } from './application/conversion-worker.ts';
 import { stopConversionQueue } from './infrastructure/queue/conversion-queue.ts';
+import { globalAudioService } from './interfaces/http/routes/audio.routes.ts';
 
 async function start() {
   try {
@@ -33,8 +34,17 @@ async function start() {
       await bootstrapSuperAdmin(userRepo, hasher, auditService);
     }
 
-    // 3. Construir e iniciar servidor Fastify
+    // 3. Construir aplicación y ejecutar recuperación durable controlada de audio tras DB y almacenamiento
     const app = await buildApp();
+    const audioRecoveryStatus = await globalAudioService.runStartupRecovery({
+      enabled: env.AUDIO_STARTUP_RECOVERY_ENABLED,
+      purgeConfirmedOrphans: env.AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS,
+      logger: app.log,
+    });
+    console.log(
+      `🛡️ Recuperación durable de audio al arranque: estado=${audioRecoveryStatus.status}, rehidratación=${audioRecoveryStatus.rehydrationSucceeded}, purgaAuto=${env.AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS}`
+    );
+
     const address = await app.listen({ port: env.PORT, host: env.HOST });
     console.log(`\n🎵 Bethesda Worship Studio API escuchando en: ${address}`);
     console.log(`📖 Documentación Swagger disponible en: ${address}/documentation\n`);

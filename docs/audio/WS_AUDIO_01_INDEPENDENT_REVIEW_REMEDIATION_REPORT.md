@@ -123,6 +123,25 @@ Following the independent security/architecture review (Findings **A through E**
 
 ---
 
+### Final Test Isolation & Startup Recovery Governance
+
+- **Finding A — Non-Destructive Test Audit Isolation ([`backend/src/__tests__/audio-preservation-and-worker.test.ts`](../../backend/src/__tests__/audio-preservation-and-worker.test.ts)):**
+  - **Original Defect:** `cleanAudioAuditLogs()` ran broad SQL `DELETE FROM audit_logs WHERE event_type LIKE 'AUDIO_%'`, risking loss of unrelated or pre-existing historical `AUDIO_` audit entries if executed against shared state.
+  - **Implemented Remediation:**
+    - Removed `cleanAudioAuditLogs()` and eliminated all broad `DELETE FROM audit_logs WHERE event_type ...` statements across the codebase.
+    - Added `assertIsolatedTestDatabaseForAuditCleanup()` validating `NODE_ENV === 'test'`, non-empty valid `TEST_DATABASE_URL`, `!areDatabaseTargetsEquivalent(TEST_DATABASE_URL, DATABASE_URL)`, non-production DB naming, and a strict per-run correlation format (`SUITE_TEST_RUN_ID = ws-audio-01-run-<ts>-<uuid>`). Suite startup aborts immediately if isolation cannot be guaranteed.
+    - Added `createScopedTestAuditRepo()` and `withIsolatedTestScope()` (`try / finally`) stamping every test-generated audit row with `{ testRunCorrelationId, testScopeCorrelationId }`, scoping rehydration reads to the active scope, and cleaning ONLY matching UUIDs inside PostgreSQL via `WHERE id = ANY($1::uuid[]) AND metadata->>'testRunCorrelationId' = $2 [AND metadata->>'testScopeCorrelationId' = $3]`. Production append-only `IAuditLogRepository` / `AuditService` behavior was left completely untouched.
+  - **Historical Audit Preservation Evidence (Criterio 20.1–20.4):**
+    - Verified against isolated test database `bethesda_worship_test` (`primaryDbName: /bethesda_worship_dev`, `testDbName: /bethesda_worship_test`, `isolatedTargets: true`): pre-existing `audit_logs` snapshots and a seeded unrelated `AUDIO_HISTORICAL_AUDIT_SEED` record survived the entire 36-test Gate 1 suite and correlated cleanups untouched (`20.1`), single-scope cleanup removed only that scope (`20.2`), unexpected mid-test failures still cleaned only failing-test correlated rows via `finally` (`20.3`), and production/development/equivalent-DB/invalid-correlation cleanup attempts threw before touching PostgreSQL (`20.4`).
+- **Finding B — Controlled Startup Recovery Invocation & Admin Governance ([`backend/src/server.ts`](../../backend/src/server.ts), [`backend/src/config/env.ts`](../../backend/src/config/env.ts), [`backend/src/application/audio-service.ts`](../../backend/src/application/audio-service.ts), [`backend/src/interfaces/http/routes/audio.routes.ts`](../../backend/src/interfaces/http/routes/audio.routes.ts)):**
+  - **Bootstrap Lifecycle Integration:** `start()` in `server.ts` invokes `globalAudioService.runStartupRecovery({ enabled: env.AUDIO_STARTUP_RECOVERY_ENABLED, purgeConfirmedOrphans: env.AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS, logger: app.log })` immediately after `runMigrations()` and `buildApp()` finish DB and route initialization (before listening), avoiding race conditions and eliminating unbounded background cron daemons.
+  - **Safe Defaults & Destructive Opt-In:** `AUDIO_STARTUP_RECOVERY_ENABLED` defaults to `true`; `AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS` defaults to `false` (strict boolean parsing in `env.ts`), ensuring startup never deletes orphan disk files automatically without explicit administrator configuration while still completing verified, non-destructive `DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE` row cleanups.
+  - **Non-Fatal Degradation, Serialization & Observability:** `withRecoveryLock()` serializes concurrent `rehydrateRecoveryRecordsFromAuditLogs()` and `reconcileStorageConsistency()` calls, and `runStartupRecovery()` coalesces concurrent calls cleanly. Failed PostgreSQL `audit_logs` rehydration sets `status: 'FAILED_NON_FATAL'` and `destructiveRecoveryBlocked: true` without throwing or blocking API availability, emitting structured logs (`AUDIO_STARTUP_RECOVERY_SKIPPED`, `AUDIO_STARTUP_RECOVERY_DEGRADED`, `AUDIO_STARTUP_RECOVERY_ATTENTION_REQUIRED`, `AUDIO_STARTUP_RECOVERY_COMPLETED`, `AUDIO_STARTUP_RECOVERY_FAILED`).
+  - **Administrative Endpoints:** Exposed `GET /api/v1/audio/recovery/status` and `POST /api/v1/audio/recovery/reconcile` (Zod-validated defaults `{ purgeOrphanFiles: false, recoverFailedOperations: true, minOrphanAgeMs: 60000 }`), guarded by `authGuard.requirePermission('audit:read', true)` (`SUPER_ADMIN` / `ADMIN`).
+  - **Verification Evidence:** Criterio **21.1–21.4** verifies safe default vs opt-in purge behavior, non-fatal `FAILED_NON_FATAL` blocking on audit outage, concurrent recovery serialization (`1` physical delete across 3 concurrent calls), and HTTP RBAC enforcement (`401`/`403`/`200`/`400`).
+
+---
+
 ## 3. License & Distribution Review (`workers/audio_worker/`)
 
 Inspected [`workers/audio_worker/requirements.txt`](../../workers/audio_worker/requirements.txt) and the local Python `.venv` environment (`workers/audio_worker/.venv/Scripts/python.exe`):
@@ -140,10 +159,10 @@ Inspected [`workers/audio_worker/requirements.txt`](../../workers/audio_worker/r
 
 | Verification Command | Result | Scope |
 | :--- | :--- | :--- |
-| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` | **15 passed in 11.46s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
-| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **51 passed, 0 failed** (3 suites) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E + Storage Failure-Path Audit 18.1–18.5 + Durable Recovery Rehydration Audit 19.1–19.5 (28), Conversion API (9) |
+| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **59 passed, 0 failed** (3 suites, isolated DB `bethesda_worship_test`) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E + Storage Failure-Path Audit 18.1–18.5 + Durable Recovery 19.1–19.5 + Test Isolation 20.1–20.4 + Startup Recovery & Admin RBAC 21.1–21.4 (36), Conversion API (9) |
 | `npm --prefix backend run typecheck` | **0 errors** (Exit 0) | Full backend TypeScript compilation |
 | `npm --prefix frontend run typecheck` | **0 errors** (Exit 0) | Full frontend TypeScript compilation |
+| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` *(prior run; Python files unchanged)* | **15 passed in 11.46s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
 
-*(Frontend production code and frontend test files were unmodified during the storage failure-path and durable recovery rehydration remediations.)*
+*(Frontend production code, frontend tests, Python worker code, and canonical musical schemas were unmodified during this remediation.)*
 

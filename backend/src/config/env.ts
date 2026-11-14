@@ -24,6 +24,18 @@ if (isTestExecution && process.env.NODE_ENV !== 'test') {
   process.env.NODE_ENV = 'test';
 }
 
+const parseEnvBoolean = (defaultValue: boolean) =>
+  z.preprocess((val) => {
+    if (val === undefined || val === '') return defaultValue;
+    if (typeof val === 'boolean') return val;
+    if (typeof val === 'string') {
+      const normalized = val.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') return true;
+      if (normalized === 'false' || normalized === '0') return false;
+    }
+    return val;
+  }, z.boolean());
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -56,6 +68,8 @@ const envSchema = z
     // Workstream A: Almacenamiento seguro de audio
     AUDIO_STORAGE_PATH: z.string().default('storage/audio'),
     MAX_AUDIO_FILE_SIZE_BYTES: z.coerce.number().default(50 * 1024 * 1024), // 50MB (Decisión U-03)
+    AUDIO_STARTUP_RECOVERY_ENABLED: parseEnvBoolean(true),
+    AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS: parseEnvBoolean(false),
 
     // Phase 2B.1: Almacenamiento seguro y firma de URLs HMAC (CR-01 Remediation)
     STORAGE_SIGNING_SECRET: z

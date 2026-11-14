@@ -35,24 +35,32 @@ const AudioIdParamSchema = z.object({
   id: z.string().uuid(),
 });
 
+const ReconcileRecoveryBodySchema = z
+  .object({
+    purgeOrphanFiles: z.boolean().optional().default(false),
+    recoverFailedOperations: z.boolean().optional().default(true),
+    minOrphanAgeMs: z.number().int().nonnegative().optional().default(60_000),
+  })
+  .default({
+    purgeOrphanFiles: false,
+    recoverFailedOperations: true,
+    minOrphanAgeMs: 60_000,
+  });
+
+export const globalAudioService = new AudioService(
+  new DrizzleAudioRepository(),
+  new LocalFileSystemAudioStorageProvider(env.AUDIO_STORAGE_PATH, env.MAX_AUDIO_FILE_SIZE_BYTES),
+  new DrizzleSongRepository(),
+  env.MAX_AUDIO_FILE_SIZE_BYTES,
+  globalPythonAudioWorkerBridge
+);
+
 export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const userRepo = new DrizzleUserRepository();
   const authGuard = new AuthGuard(tokenService, userRepo);
 
-  const audioRepo = new DrizzleAudioRepository();
-  const songRepo = new DrizzleSongRepository();
-  const storageProvider = new LocalFileSystemAudioStorageProvider(
-    env.AUDIO_STORAGE_PATH,
-    env.MAX_AUDIO_FILE_SIZE_BYTES
-  );
-  const audioService = new AudioService(
-    audioRepo,
-    storageProvider,
-    songRepo,
-    env.MAX_AUDIO_FILE_SIZE_BYTES,
-    globalPythonAudioWorkerBridge
-  );
+  const audioService = globalAudioService;
 
   /**
    * Valida en tiempo real contra PostgreSQL que el usuario dueño del ticket o Bearer token
@@ -259,6 +267,63 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
       const report = await audioService.inspectAndVerifyStoredAudio(id);
+
+      return reply.status(200).send({
+        status: 'success',
+        data: report,
+      });
+    }
+  );
+
+  // 4d. GET /api/v1/audio/recovery/status - Estado observable de recuperación al arranque y reconciliación
+  fastify.get(
+    '/audio/recovery/status',
+    {
+      preHandler: [authGuard.requirePermission('audit:read', true)],
+    },
+    async (_request, reply) => {
+      const recoveryRecords = audioService.getRecoveryRecords();
+      return reply.status(200).send({
+        status: 'success',
+        data: {
+          startupRecovery: audioService.getLastStartupRecoveryStatus(),
+          pendingRecoveryRecords: recoveryRecords.filter((r) => r.status === 'PENDING_RECOVERY'),
+          manualInterventionRecords: recoveryRecords.filter(
+            (r) => r.status === 'MANUAL_INTERVENTION_REQUIRED'
+          ),
+          recoveryRecords,
+          malformedRecoveryEvents: audioService.getMalformedRecoveryAuditEntries(),
+          lastReconciliationReport: audioService.getLastReconciliationReport(),
+        },
+      });
+    }
+  );
+
+  // 4e. POST /api/v1/audio/recovery/reconcile - Ejecución administrativa idempotente y serializada
+  fastify.post(
+    '/audio/recovery/reconcile',
+    {
+      preHandler: [authGuard.requirePermission('audit:read', true)],
+    },
+    async (request, reply) => {
+      const options = ReconcileRecoveryBodySchema.parse(request.body ?? {});
+      const report = await audioService.reconcileStorageConsistency(options);
+
+      request.log.info(
+        {
+          event: 'AUDIO_ADMIN_RECOVERY_RECONCILED',
+          actorUserId: request.user?.sub ?? null,
+          purgeOrphanFiles: options.purgeOrphanFiles,
+          recoverFailedOperations: options.recoverFailedOperations,
+          rehydrationSucceeded: report.rehydrationReport.rehydrationSucceeded,
+          recoveredCount: report.recoveredOperations.length,
+          purgedOrphansCount: report.purgedOrphanFiles.length,
+          pendingRecoveryCount: report.pendingRecoveryRecords.length,
+          manualInterventionCount: report.manualInterventionRecords.length,
+          malformedEventsCount: report.malformedRecoveryEvents.length,
+        },
+        'Reconciliación administrativa de almacenamiento de audio ejecutada.'
+      );
 
       return reply.status(200).send({
         status: 'success',

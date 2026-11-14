@@ -145,6 +145,39 @@ export interface AudioStorageReconciliationReport {
   readonly auditLogIds: string[];
 }
 
+export interface AudioStartupRecoveryLogger {
+  info(obj: Record<string, unknown>, msg?: string): void;
+  warn(obj: Record<string, unknown>, msg?: string): void;
+  error(obj: Record<string, unknown>, msg?: string): void;
+}
+
+export interface AudioStartupRecoveryOptions {
+  readonly enabled?: boolean | undefined;
+  readonly purgeConfirmedOrphans?: boolean | undefined;
+  readonly minOrphanAgeMs?: number | undefined;
+  readonly logger?: AudioStartupRecoveryLogger | undefined;
+}
+
+export type AudioStartupRecoveryOutcome =
+  | 'NOT_RUN'
+  | 'SKIPPED_DISABLED'
+  | 'COMPLETED'
+  | 'DEGRADED_MANUAL_ACTION_REQUIRED'
+  | 'FAILED_NON_FATAL';
+
+export interface AudioStartupRecoveryStatus {
+  readonly invoked: boolean;
+  readonly enabled: boolean;
+  readonly purgeConfirmedOrphansConfigured: boolean;
+  readonly status: AudioStartupRecoveryOutcome;
+  readonly startedAt?: string | undefined;
+  readonly completedAt?: string | undefined;
+  readonly rehydrationSucceeded: boolean;
+  readonly destructiveRecoveryBlocked: boolean;
+  readonly reconciliationReport?: AudioStorageReconciliationReport | undefined;
+  readonly error?: string | undefined;
+}
+
 export interface AudioStreamResponse {
   readonly stream: NodeJS.ReadableStream;
   readonly statusCode: 200 | 206;
@@ -218,6 +251,17 @@ export class AudioService {
   private readonly aliasToCanonicalId = new Map<string, string>();
   private readonly malformedAuditEntries = new Map<string, AudioMalformedRecoveryAuditEntry>();
   private readonly malformedStoragePaths = new Set<string>();
+  private recoveryLockChain: Promise<unknown> = Promise.resolve();
+  private activeStartupRecoveryPromise: Promise<AudioStartupRecoveryStatus> | null = null;
+  private lastReconciliationReport: AudioStorageReconciliationReport | null = null;
+  private lastStartupRecoveryStatus: AudioStartupRecoveryStatus = {
+    invoked: false,
+    enabled: true,
+    purgeConfirmedOrphansConfigured: false,
+    status: 'NOT_RUN',
+    rehydrationSucceeded: false,
+    destructiveRecoveryBlocked: false,
+  };
 
   public constructor(
     private readonly audioRepo: IAudioRepository,
@@ -227,6 +271,23 @@ export class AudioService {
     private readonly pythonWorkerBridge: PythonAudioWorkerBridge = globalPythonAudioWorkerBridge,
     private readonly auditRepo: IAuditLogRepository = new DrizzleAuditLogRepository()
   ) {}
+
+  private async withRecoveryLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.recoveryLockChain.then(fn, fn);
+    this.recoveryLockChain = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+
+  public getLastReconciliationReport(): AudioStorageReconciliationReport | null {
+    return this.lastReconciliationReport ? { ...this.lastReconciliationReport } : null;
+  }
+
+  public getLastStartupRecoveryStatus(): AudioStartupRecoveryStatus {
+    return { ...this.lastStartupRecoveryStatus };
+  }
 
   /**
    * Retorna una instantánea de los registros de recuperación de fallos de almacenamiento registrados o rehidratados.
@@ -416,8 +477,13 @@ export class AudioService {
   /**
    * Rehidrata de forma determinística e idempotente el estado de recuperación pendiente, completado
    * o inválido desde los eventos durables en PostgreSQL `audit_logs`.
+   * Serializado mediante bloqueo de recuperación para evitar carreras concurrentes.
    */
   public async rehydrateRecoveryRecordsFromAuditLogs(): Promise<AudioRecoveryRehydrationReport> {
+    return await this.withRecoveryLock(() => this.rehydrateRecoveryRecordsInternal());
+  }
+
+  private async rehydrateRecoveryRecordsInternal(): Promise<AudioRecoveryRehydrationReport> {
     const pageSize = 1000;
     const collectedEvents: AuditLogEntity[] = [];
     const seenEventIds = new Set<string>();
@@ -1165,15 +1231,193 @@ export class AudioService {
   }
 
   /**
+   * Ejecuta la recuperación controlada al arranque del backend o bajo solicitud de gobierno operativo:
+   * - Si `enabled === false`, omite la ejecución de forma observable sin lanzar excepciones.
+   * - Si ya hay una recuperación de arranque en vuelo, reutiliza la ejecución única (single-flight).
+   * - Primero rehidrata y valida eventos en PostgreSQL `audit_logs`.
+   * - Nunca purga huérfanos destructivamente si `purgeConfirmedOrphans` no es `true` explícitamente o si falló la rehidratación.
+   * - Nunca lanza excepciones fatales que bloqueen la disponibilidad o el reporte de estado del backend.
+   */
+  public async runStartupRecovery(
+    options: AudioStartupRecoveryOptions = {}
+  ): Promise<AudioStartupRecoveryStatus> {
+    const enabled = options.enabled ?? true;
+    const purgeConfirmedOrphans = options.purgeConfirmedOrphans ?? false;
+    const log: AudioStartupRecoveryLogger = options.logger ?? {
+      info: (obj, msg) => console.info(msg ?? '[AudioStartupRecovery]', JSON.stringify(obj)),
+      warn: (obj, msg) => console.warn(msg ?? '[AudioStartupRecovery]', JSON.stringify(obj)),
+      error: (obj, msg) => console.error(msg ?? '[AudioStartupRecovery]', JSON.stringify(obj)),
+    };
+
+    if (!enabled) {
+      const skipped: AudioStartupRecoveryStatus = {
+        invoked: true,
+        enabled: false,
+        purgeConfirmedOrphansConfigured: purgeConfirmedOrphans,
+        status: 'SKIPPED_DISABLED',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        rehydrationSucceeded: false,
+        destructiveRecoveryBlocked: true,
+      };
+      this.lastStartupRecoveryStatus = skipped;
+      log.info(
+        {
+          event: 'AUDIO_STARTUP_RECOVERY_SKIPPED',
+          enabled: false,
+          purgeConfirmedOrphans,
+        },
+        'Recuperación durable de audio al arranque omitida por configuración.'
+      );
+      return { ...skipped };
+    }
+
+    if (this.activeStartupRecoveryPromise) {
+      return await this.activeStartupRecoveryPromise;
+    }
+
+    const execution = (async (): Promise<AudioStartupRecoveryStatus> => {
+      const startedAt = new Date().toISOString();
+      try {
+        const report = await this.reconcileStorageConsistency({
+          recoverFailedOperations: true,
+          purgeOrphanFiles: purgeConfirmedOrphans,
+          minOrphanAgeMs: options.minOrphanAgeMs ?? 60_000,
+        });
+        const completedAt = new Date().toISOString();
+
+        if (!report.rehydrationReport.rehydrationSucceeded) {
+          const failedRehydrationStatus: AudioStartupRecoveryStatus = {
+            invoked: true,
+            enabled: true,
+            purgeConfirmedOrphansConfigured: purgeConfirmedOrphans,
+            status: 'FAILED_NON_FATAL',
+            startedAt,
+            completedAt,
+            rehydrationSucceeded: false,
+            destructiveRecoveryBlocked: true,
+            reconciliationReport: report,
+            error:
+              report.rehydrationReport.error ??
+              'Error desconocido rehidratando registros de recuperación desde audit_logs.',
+          };
+          this.lastStartupRecoveryStatus = failedRehydrationStatus;
+          log.warn(
+            {
+              event: 'AUDIO_STARTUP_RECOVERY_DEGRADED',
+              status: failedRehydrationStatus.status,
+              rehydrationSucceeded: false,
+              destructiveRecoveryBlocked: true,
+              error: failedRehydrationStatus.error,
+            },
+            'Recuperación durable de audio al arranque degradada: falló rehidratación de audit_logs; purga destructiva bloqueada.'
+          );
+          return { ...failedRehydrationStatus };
+        }
+
+        const needsAttention =
+          report.manualInterventionRecords.length > 0 ||
+          report.malformedRecoveryEvents.length > 0 ||
+          report.missingPhysicalFiles.length > 0 ||
+          report.corruptedPhysicalFiles.length > 0 ||
+          report.failedOrphanPurges.length > 0 ||
+          report.pendingRecoveryRecords.length > 0;
+
+        const outcomeStatus: AudioStartupRecoveryStatus = {
+          invoked: true,
+          enabled: true,
+          purgeConfirmedOrphansConfigured: purgeConfirmedOrphans,
+          status: needsAttention ? 'DEGRADED_MANUAL_ACTION_REQUIRED' : 'COMPLETED',
+          startedAt,
+          completedAt,
+          rehydrationSucceeded: true,
+          destructiveRecoveryBlocked: !purgeConfirmedOrphans,
+          reconciliationReport: report,
+        };
+        this.lastStartupRecoveryStatus = outcomeStatus;
+
+        if (needsAttention) {
+          log.warn(
+            {
+              event: 'AUDIO_STARTUP_RECOVERY_ATTENTION_REQUIRED',
+              status: outcomeStatus.status,
+              purgeConfirmedOrphans,
+              destructiveRecoveryBlocked: outcomeStatus.destructiveRecoveryBlocked,
+              recoveredCount: report.recoveredOperations.length,
+              pendingRecoveryCount: report.pendingRecoveryRecords.length,
+              manualInterventionCount: report.manualInterventionRecords.length,
+              malformedEventsCount: report.malformedRecoveryEvents.length,
+              missingPhysicalFilesCount: report.missingPhysicalFiles.length,
+              corruptedPhysicalFilesCount: report.corruptedPhysicalFiles.length,
+              orphanFilesCount: report.orphanFiles.length,
+            },
+            'Recuperación durable de audio al arranque completada con hallazgos que requieren revisión operativa.'
+          );
+        } else {
+          log.info(
+            {
+              event: 'AUDIO_STARTUP_RECOVERY_COMPLETED',
+              status: outcomeStatus.status,
+              purgeConfirmedOrphans,
+              recoveredCount: report.recoveredOperations.length,
+              purgedOrphansCount: report.purgedOrphanFiles.length,
+              checkedAssets: report.checkedAssets,
+            },
+            'Recuperación durable de audio al arranque completada correctamente.'
+          );
+        }
+
+        return { ...outcomeStatus };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const failedStatus: AudioStartupRecoveryStatus = {
+          invoked: true,
+          enabled: true,
+          purgeConfirmedOrphansConfigured: purgeConfirmedOrphans,
+          status: 'FAILED_NON_FATAL',
+          startedAt,
+          completedAt: new Date().toISOString(),
+          rehydrationSucceeded: false,
+          destructiveRecoveryBlocked: true,
+          error: errorMessage,
+        };
+        this.lastStartupRecoveryStatus = failedStatus;
+        log.error(
+          {
+            event: 'AUDIO_STARTUP_RECOVERY_FAILED',
+            status: failedStatus.status,
+            destructiveRecoveryBlocked: true,
+            error: errorMessage,
+          },
+          'Fallo no fatal durante la recuperación durable de audio al arranque; el servidor continúa en estado degradado.'
+        );
+        return { ...failedStatus };
+      } finally {
+        this.activeStartupRecoveryPromise = null;
+      }
+    })();
+
+    this.activeStartupRecoveryPromise = execution;
+    return await execution;
+  }
+
+  /**
    * Reconcilia la consistencia entre los registros de `audio_assets` en PostgreSQL y los archivos físicos en disco.
    * Rehidrata primero los registros durables de recuperación desde PostgreSQL `audit_logs`,
    * detecta archivos huérfanos en disco, registros sin archivo físico y archivos físicamente alterados (SHA-256),
    * protege subidas en vuelo y archivos ambiguos/no-durables/malformados, y ejecuta recuperación idempotente y auditada.
+   * Ejecución serializada para prevenir condiciones de carrera concurrentes.
    */
   public async reconcileStorageConsistency(
     options: AudioStorageReconciliationOptions = {}
   ): Promise<AudioStorageReconciliationReport> {
-    const rehydrationReport = await this.rehydrateRecoveryRecordsFromAuditLogs();
+    return await this.withRecoveryLock(() => this.reconcileStorageConsistencyInternal(options));
+  }
+
+  private async reconcileStorageConsistencyInternal(
+    options: AudioStorageReconciliationOptions = {}
+  ): Promise<AudioStorageReconciliationReport> {
+    const rehydrationReport = await this.rehydrateRecoveryRecordsInternal();
     const shouldRecoverFailed = options.recoverFailedOperations ?? Boolean(options.purgeOrphanFiles);
     const recoveredOperations: Array<{
       recoveryRecordId: string;
@@ -1529,7 +1773,7 @@ export class AudioService {
       .filter((r) => r.status === 'MANUAL_INTERVENTION_REQUIRED')
       .map((r) => ({ ...r }));
 
-    return {
+    const report: AudioStorageReconciliationReport = {
       checkedAssets: assets.length,
       healthyAssetIds,
       missingPhysicalFiles,
@@ -1546,6 +1790,8 @@ export class AudioService {
       recoveredOperations,
       auditLogIds,
     };
+    this.lastReconciliationReport = report;
+    return report;
   }
 
   /**

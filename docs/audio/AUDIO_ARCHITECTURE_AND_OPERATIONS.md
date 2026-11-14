@@ -2,9 +2,9 @@
 # AUDIO SUBSYSTEM ARCHITECTURE & OPERATIONS MANUAL
 ## Scope 1C — Local Audio Processing Pipeline, Storage Governance & Worker Lifecycle
 
-**Document Version:** 2.0.0  
+**Document Version:** 2.1.0  
 **Phase:** Scope 1C — WS-AUDIO-01 Audio Foundation  
-**Status:** ACTIVE (Revalidated)  
+**Status:** ACTIVE (Storage Failure-Path Hardened)  
 **Repository Branch:** `feature/phase-1a-core-foundation`
 
 ---
@@ -48,9 +48,9 @@ Mandatory Scope 1C Invariants:
 |  +-----------------------------------------------------------------------------+  |
 |  | AudioService (audio-service.ts)                                             |  |
 |  | - validateAudioMagicBytes() -> audio-signature-validator.ts                 |  |
-|  | - uploadAudio() with worker option & transactional disk rollback            |  |
+|  | - uploadAudio() (best-effort rollback + audit_logs recovery)                 |  |
 |  | - streamAudio() enforcing pre-stream descriptor-bound SHA-256               |  |
-|  | - reconcileStorageConsistency() (healthy/orphan/missing/corrupted audit)    |  |
+|  | - deleteAudio() + reconcileStorageConsistency() (in-flight & ambiguous guards)|  |
 |  +------------------+------------------------------------+---------------------+  |
 +---------------------|------------------------------------|------------------------+
                       |                                    |
@@ -59,7 +59,7 @@ Mandatory Scope 1C Invariants:
 | PERSISTENCE & ATOMIC DISK STORAGE    |   | LOCAL WORKER SUBPROCESS BRIDGE         |
 |                                      |   |                                        |
 | 1. PostgreSQL (Drizzle ORM):         |   | PythonAudioWorkerBridge                |
-|    Table: audio_assets               |   | (python-audio-worker-bridge.ts)        |
+|    Tables: audio_assets, audit_logs  |   | (python-audio-worker-bridge.ts)        |
 |    - id, song_id, title, filename    |   | - Discovers workers/audio_worker/.venv |
 |    - storage_path, mime_type         |   | - stdin/stdout JSON Lines IPC (v1)     |
 |    - file_size_bytes, checksum_sha256|   | - 30s default timeout + AbortSignal    |
@@ -76,17 +76,33 @@ Mandatory Scope 1C Invariants:
 
 ---
 
-## 3. Ingestion, Verification & Reconciliation Lifecycle
+## 3. Ingestion, Verification, Failure Compensation & Reconciliation Lifecycle
 
 1. **Client Preflight** (`frontend/src/core/conversion/audio-signature.ts`): Inspects file container headers in-browser without fabricating notation.
-2. **Upload API** (`POST /api/v1/songs/:songId/audio`):
+2. **Upload API & Compensation Failure Handling** (`POST /api/v1/songs/:songId/audio` -> `AudioService.uploadAudio()`):
    - `authGuard.requirePermission('songs:create', true)` validates active DB status, role, and lockout.
    - `AudioService.uploadAudio()` checks song existence, MIME allowlist, size quota (`<= 50 MiB`), and binary magic bytes via `validateAudioMagicBytes()`.
    - `LocalFileSystemAudioStorageProvider.save()` writes `${targetPath}.tmp.${uuid}`, calls `datasync()`, renames atomically to `${uuid}${ext}`, and sets `chmod(0o444)`.
+   - The key is registered in `inFlightUploadPaths` immediately after disk creation and cleared in `finally` to shield concurrent uploads from reconciliation purges.
    - If `verifyWithPythonWorker: true`, `PythonAudioWorkerBridge` runs container + FFmpeg PCM verification before inserting into PostgreSQL.
-   - Any failure during worker verification or `DrizzleAudioRepository.create()` triggers `storageProvider.delete()` in `catch`, preventing orphan files on disk.
-3. **On-Demand Deep Verification** (`POST /api/v1/audio/:id/verify`): Runs `AudioService.inspectAndVerifyStoredAudio()` on any stored asset, mapping missing physical files to `404 NOT_FOUND` and invalid/undecodable payloads to `400 VALIDATION_ERROR`.
-4. **Consistency Reconciliation** (`AudioService.reconcileStorageConsistency({ purgeOrphanFiles })`): Compares `audio_assets` rows (`audioRepo.findAll()`) with physical files (`storageProvider.listKeys()`), verifying size and SHA-256 via bounded 64 KiB streaming reads to report `healthyAssetIds`, `missingPhysicalFiles`, `corruptedPhysicalFiles`, and `orphanFiles`.
+   - If worker verification or `audioRepo.create()` throws `primaryError`, `AudioService.uploadAudio()` attempts `storageProvider.delete(saveResult.storagePath)` and checks `!exists()`.
+     - **Compensation succeeds:** The original `primaryError` is re-thrown with `.compensation = { attempted: true, succeeded: true, ... }`.
+     - **Compensation fails:** The original `primaryError` is preserved unchanged (never masked by cleanup errors), `.compensation = { attempted: true, succeeded: false, compensationError, recoveryRecordId, persistedToAuditLog }` is attached, and an actionable recovery record (`UPLOAD_COMPENSATION_ORPHAN`, status `PENDING_RECOVERY`) is stored in `audit_logs` (`AUDIO_UPLOAD_COMPENSATION_FAILED`) and `AudioService.getRecoveryRecords()`. Zero orphan files is therefore achieved *when physical deletion succeeds*, NOT promised unconditionally under filesystem locks.
+3. **Delete Consistency Lifecycle** (`DELETE /api/v1/audio/:id` -> `AudioService.deleteAudio(audioId, actorUserId)`):
+   - Anti-IDOR ownership (`uploadedByUserId === user.sub` or `SUPER_ADMIN` / `WORSHIP_LEADER`) runs at the HTTP boundary (`audio.routes.ts`).
+   - `LocalFileSystemAudioStorageProvider.delete()` restores `0o666` permissions before `unlink()`. Returns `false` idempotently **only** for missing files (`ENOENT`); throws `PersistenceError` on actual unlink/OS errors (`EACCES`, `EBUSY`, `EPERM`, `EIO`).
+   - **Scenario A — Physical delete fails before DB delete:** `audioRepo.delete()` is NOT executed. The `audio_assets` row stays attached to its intact disk file, `AUDIO_DELETE_PHYSICAL_FAILED` (`ABORTED_DB_PRESERVED`) is written to `audit_logs`, and `PersistenceError` is thrown.
+   - **Scenario B — Physical delete succeeds, then DB delete fails:** Never returns `204`/success. Persists `AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE` (`PENDING_RECOVERY`) with full asset metadata (`assetId`, `songId`, `storagePath`, `checksumSha256`, `fileSizeBytes`) in `audit_logs` + `recoveryRecords`, and throws `PersistenceError`. Retrying `deleteAudio()` or running `reconcileStorageConsistency({ recoverFailedOperations: true })` completes DB removal idempotently and logs `AUDIO_RECOVERY_COMPLETED`.
+4. **On-Demand Deep Verification** (`POST /api/v1/audio/:id/verify`): Runs `AudioService.inspectAndVerifyStoredAudio()` on any stored asset, mapping missing physical files to `404 NOT_FOUND` and invalid/undecodable payloads to `400 VALIDATION_ERROR`.
+5. **Safe Consistency Reconciliation & Recovery Procedures** (`AudioService.reconcileStorageConsistency(options)`):
+   - **Detected states:** `healthyAssetIds`, `missingPhysicalFiles`, `corruptedPhysicalFiles`, `orphanFiles`, `skippedInFlightFiles`, `ambiguousFiles`, `failedOrphanPurges`, `pendingRecoveryRecords`, `recoveredOperations`, and `auditLogIds`.
+   - **Concurrency & Ambiguous File Safety:** Keys in `inFlightUploadPaths` and `.tmp.*` temp files are never purged. Unreferenced files with non-audio extensions or newer than `minOrphanAgeMs` (unless matched to a confirmed `UPLOAD_COMPENSATION_ORPHAN` record) are flagged in `ambiguousFiles` and never auto-purged.
+   - **Operational Recovery Procedure:**
+     1. Run dry inspection first: `reconcileStorageConsistency({ purgeOrphanFiles: false, recoverFailedOperations: false })`.
+     2. Review `pendingRecoveryRecords`, `missingPhysicalFiles`, `corruptedPhysicalFiles`, and `ambiguousFiles`, resolving any underlying disk permissions (`chmod`/`chkdsk`/volume remount) or DB connectivity issues.
+     3. Execute idempotent recovery & orphan cleanup: `reconcileStorageConsistency({ purgeOrphanFiles: true, recoverFailedOperations: true, minOrphanAgeMs: 60_000 })`.
+     4. Verify `audit_logs` contains `AUDIO_ORPHAN_FILE_PURGED` / `AUDIO_RECOVERY_COMPLETED` and `failedOrphanPurges` is empty.
+   - **Residual Limitations:** Absence of distributed 2PC between disk and PostgreSQL means a simultaneous storage lock + PostgreSQL outage keeps recovery metadata in process memory (`AudioService.getRecoveryRecords()`) until either subsystem recovers; files flagged in `ambiguousFiles` always require manual operator disposition.
 
 ---
 

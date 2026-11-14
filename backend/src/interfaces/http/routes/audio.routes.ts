@@ -288,7 +288,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const deleted = await audioService.deleteAudio(id);
+      const deleted = await audioService.deleteAudio(id, user.sub);
 
       if (!deleted) {
         return reply.status(404).send({

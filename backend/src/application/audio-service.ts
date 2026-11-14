@@ -6,11 +6,14 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { type IAudioRepository } from '../repositories/audio-repository.ts';
 import { type IAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { type ISongRepository } from '../repositories/song-repository.ts';
+import { DrizzleAuditLogRepository, type IAuditLogRepository } from '../repositories/audit-repository.ts';
 import { type AudioAsset } from '../db/schema.ts';
-import { ValidationError, NotFoundError, RangeNotSatisfiableError } from '../domain/errors.ts';
+import { ValidationError, NotFoundError, PersistenceError, RangeNotSatisfiableError } from '../domain/errors.ts';
 import { validateAudioBuffer } from '../domain/audio/audio-signature-validator.ts';
 import {
   PythonAudioWorkerBridge,
@@ -31,6 +34,53 @@ export interface UploadAudioParams {
   readonly verifyWithPythonWorker?: boolean | undefined;
 }
 
+export interface AudioUploadCompensationReport {
+  readonly attempted: boolean;
+  readonly succeeded: boolean;
+  readonly storagePath: string;
+  readonly checksumSha256: string;
+  readonly fileSizeBytes: number;
+  readonly compensationError?: string | undefined;
+  readonly recoveryRecordId?: string | undefined;
+  readonly persistedToAuditLog: boolean;
+  readonly recordedAt: string;
+}
+
+export type AudioRecoveryType =
+  | 'UPLOAD_COMPENSATION_ORPHAN'
+  | 'DELETE_PHYSICAL_FAILED'
+  | 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE';
+
+export type AudioRecoveryStatus =
+  | 'PENDING_RECOVERY'
+  | 'ABORTED_DB_PRESERVED'
+  | 'RECOVERED';
+
+export interface AudioStorageRecoveryRecord {
+  id: string;
+  recoveryType: AudioRecoveryType;
+  status: AudioRecoveryStatus;
+  storagePath: string;
+  assetId?: string | undefined;
+  songId: string;
+  filename: string;
+  mimeType: string;
+  checksumSha256: string;
+  fileSizeBytes: number;
+  primaryError: string;
+  secondaryError?: string | undefined;
+  persistedToAuditLog: boolean;
+  auditLogId?: string | undefined;
+  createdAt: string;
+  recoveredAt?: string | undefined;
+}
+
+export interface AudioStorageReconciliationOptions {
+  readonly purgeOrphanFiles?: boolean | undefined;
+  readonly recoverFailedOperations?: boolean | undefined;
+  readonly minOrphanAgeMs?: number | undefined;
+}
+
 export interface AudioStorageReconciliationReport {
   readonly checkedAssets: number;
   readonly healthyAssetIds: string[];
@@ -38,6 +88,16 @@ export interface AudioStorageReconciliationReport {
   readonly corruptedPhysicalFiles: Array<{ assetId: string; storagePath: string; reason: string }>;
   readonly orphanFiles: string[];
   readonly purgedOrphanFiles: string[];
+  readonly skippedInFlightFiles: string[];
+  readonly ambiguousFiles: Array<{ storagePath: string; reason: string }>;
+  readonly failedOrphanPurges: Array<{ storagePath: string; reason: string }>;
+  readonly pendingRecoveryRecords: AudioStorageRecoveryRecord[];
+  readonly recoveredOperations: Array<{
+    recoveryRecordId: string;
+    recoveryType: AudioRecoveryType;
+    target: string;
+  }>;
+  readonly auditLogIds: string[];
 }
 
 export interface AudioStreamResponse {
@@ -69,6 +129,18 @@ const ALLOWED_MIME_TYPES = new Set([
   'audio/flac',
 ]);
 
+const ALLOWED_AUDIO_EXTENSIONS = new Set([
+  '.mp3',
+  '.wav',
+  '.wave',
+  '.ogg',
+  '.m4a',
+  '.mp4',
+  '.aac',
+  '.flac',
+  '.webm',
+]);
+
 /**
  * Valida la firma binaria ("magic bytes") del archivo para prevenir falsificación MIME.
  */
@@ -96,13 +168,132 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
 }
 
 export class AudioService {
+  private readonly inFlightUploadPaths = new Set<string>();
+  private readonly recoveryRecords = new Map<string, AudioStorageRecoveryRecord>();
+
   public constructor(
     private readonly audioRepo: IAudioRepository,
     private readonly storageProvider: IAudioStorageProvider,
     private readonly songRepo: ISongRepository,
     private readonly maxFileSizeBytes: number = 50 * 1024 * 1024, // 50MB
-    private readonly pythonWorkerBridge: PythonAudioWorkerBridge = globalPythonAudioWorkerBridge
+    private readonly pythonWorkerBridge: PythonAudioWorkerBridge = globalPythonAudioWorkerBridge,
+    private readonly auditRepo: IAuditLogRepository = new DrizzleAuditLogRepository()
   ) {}
+
+  /**
+   * Retorna una instantánea de los registros de recuperación de fallos de almacenamiento registrados por esta instancia.
+   */
+  public getRecoveryRecords(): AudioStorageRecoveryRecord[] {
+    return Array.from(this.recoveryRecords.values()).map((r) => ({ ...r }));
+  }
+
+  private async persistAuditEvent(
+    eventType: string,
+    userId: string | null | undefined,
+    resource: string,
+    metadata: Record<string, unknown>
+  ): Promise<{ persisted: boolean; auditLogId?: string; error?: string }> {
+    const safeResource = resource.slice(0, 128);
+    const enrichedMetadata: Record<string, unknown> = {
+      ...metadata,
+      actorUserId: userId ?? null,
+    };
+
+    try {
+      const created = await this.auditRepo.create({
+        eventType,
+        userId: userId ?? null,
+        resource: safeResource,
+        metadata: enrichedMetadata,
+      });
+      return { persisted: true, auditLogId: created.id };
+    } catch (firstErr) {
+      if (userId) {
+        try {
+          const fallbackCreated = await this.auditRepo.create({
+            eventType,
+            userId: null,
+            resource: safeResource,
+            metadata: {
+              ...enrichedMetadata,
+              userIdFallbackReason: firstErr instanceof Error ? firstErr.message : String(firstErr),
+            },
+          });
+          return { persisted: true, auditLogId: fallbackCreated.id };
+        } catch (secondErr) {
+          const msg = secondErr instanceof Error ? secondErr.message : String(secondErr);
+          console.error(`[AudioService] Failed to persist audit event ${eventType}: ${msg}`);
+          return { persisted: false, error: msg };
+        }
+      }
+
+      const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.error(`[AudioService] Failed to persist audit event ${eventType}: ${msg}`);
+      return { persisted: false, error: msg };
+    }
+  }
+
+  private async getFileMtimeMs(storagePath: string): Promise<number | null> {
+    if (typeof this.storageProvider.stat === 'function') {
+      const statResult = await this.storageProvider.stat(storagePath).catch(() => null);
+      return statResult ? statResult.mtimeMs : null;
+    }
+
+    try {
+      const fullPath = this.storageProvider.resolveSafePath(storagePath);
+      const statResult = await fs.promises.stat(fullPath);
+      return statResult.isFile() ? statResult.mtimeMs : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async markRelatedRecoveriesCompleted(
+    match: { assetId?: string | undefined; storagePath?: string | undefined },
+    actorUserId?: string | null
+  ): Promise<Array<{ recoveryRecordId: string; recoveryType: AudioRecoveryType; target: string; auditLogId?: string }>> {
+    const completed: Array<{
+      recoveryRecordId: string;
+      recoveryType: AudioRecoveryType;
+      target: string;
+      auditLogId?: string;
+    }> = [];
+    const nowIso = new Date().toISOString();
+
+    for (const record of this.recoveryRecords.values()) {
+      if (record.status === 'RECOVERED') continue;
+      const matchesAsset = Boolean(match.assetId && record.assetId === match.assetId);
+      const matchesPath = Boolean(match.storagePath && record.storagePath === match.storagePath);
+      if (!matchesAsset && !matchesPath) continue;
+
+      record.status = 'RECOVERED';
+      record.recoveredAt = nowIso;
+
+      const auditResult = await this.persistAuditEvent(
+        'AUDIO_RECOVERY_COMPLETED',
+        actorUserId ?? null,
+        record.storagePath,
+        {
+          recoveryRecordId: record.id,
+          recoveryType: record.recoveryType,
+          assetId: record.assetId ?? null,
+          storagePath: record.storagePath,
+          songId: record.songId,
+          checksumSha256: record.checksumSha256,
+          recoveredAt: nowIso,
+        }
+      );
+
+      completed.push({
+        recoveryRecordId: record.id,
+        recoveryType: record.recoveryType,
+        target: record.assetId ?? record.storagePath,
+        ...(auditResult.auditLogId ? { auditLogId: auditResult.auditLogId } : {}),
+      });
+    }
+
+    return completed;
+  }
 
   private async executeWorkerInspect(
     jobId: string,
@@ -139,7 +330,8 @@ export class AudioService {
   /**
    * Sube y registra un nuevo activo de audio asociado a una canción.
    * Valida existencia de la canción, cuota de tamaño, tipo MIME y magic bytes binarios.
-   * Garantiza reversión física automática si falla la verificación del worker o la inserción en BD.
+   * Ejecuta compensación física cuando falla el worker o la persistencia en BD; si la compensación física
+   * también falla, preserva el error primario, adjunta telemetría y persiste un registro accionable de recuperación.
    */
   public async uploadAudio(params: UploadAudioParams): Promise<AudioAsset> {
     const { songId, title, filename, mimeType, buffer, durationSeconds, uploadedByUserId } = params;
@@ -172,6 +364,7 @@ export class AudioService {
 
     // 5. Guardar archivo físico de forma atómica e inmutable en el storage provider seguro
     const saveResult = await this.storageProvider.save(filename, buffer);
+    this.inFlightUploadPaths.add(saveResult.storagePath);
 
     try {
       // 6. Verificación profunda opcional mediante worker local en Python
@@ -198,10 +391,102 @@ export class AudioService {
       });
 
       return created;
-    } catch (err) {
-      // Limpieza transaccional compensatoria para impedir archivos huérfanos en disco
-      await this.storageProvider.delete(saveResult.storagePath).catch(() => {});
-      throw err;
+    } catch (primaryError) {
+      const recordedAt = new Date().toISOString();
+      const primaryMessage =
+        primaryError instanceof Error ? primaryError.message : String(primaryError);
+
+      let cleanupError: unknown = null;
+      try {
+        await this.storageProvider.delete(saveResult.storagePath);
+      } catch (err) {
+        cleanupError = err;
+      }
+
+      const stillExists = await this.storageProvider
+        .exists(saveResult.storagePath)
+        .catch(() => true);
+
+      const compensationSucceeded = !cleanupError && !stillExists;
+      let compensationErrorMsg: string | undefined;
+      let recoveryRecordId: string | undefined;
+      let persistedToAuditLog = false;
+
+      if (!compensationSucceeded) {
+        compensationErrorMsg =
+          cleanupError instanceof Error
+            ? cleanupError.message
+            : cleanupError !== null
+              ? String(cleanupError)
+              : 'El archivo físico permanece en disco tras intentar la limpieza compensatoria.';
+
+        const recoveryId = crypto.randomUUID();
+        recoveryRecordId = recoveryId;
+
+        const recoveryRecord: AudioStorageRecoveryRecord = {
+          id: recoveryId,
+          recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
+          status: 'PENDING_RECOVERY',
+          storagePath: saveResult.storagePath,
+          songId,
+          filename: filename.trim(),
+          mimeType: normalizedMime,
+          checksumSha256: saveResult.checksumSha256,
+          fileSizeBytes: saveResult.fileSizeBytes,
+          primaryError: primaryMessage,
+          secondaryError: compensationErrorMsg,
+          persistedToAuditLog: false,
+          createdAt: recordedAt,
+        };
+
+        const auditResult = await this.persistAuditEvent(
+          'AUDIO_UPLOAD_COMPENSATION_FAILED',
+          uploadedByUserId ?? null,
+          saveResult.storagePath,
+          {
+            recoveryRecordId: recoveryId,
+            recoveryType: recoveryRecord.recoveryType,
+            status: recoveryRecord.status,
+            storagePath: saveResult.storagePath,
+            songId,
+            filename: recoveryRecord.filename,
+            mimeType: normalizedMime,
+            checksumSha256: saveResult.checksumSha256,
+            fileSizeBytes: saveResult.fileSizeBytes,
+            primaryError: primaryMessage,
+            compensationError: compensationErrorMsg,
+            recordedAt,
+          }
+        );
+
+        persistedToAuditLog = auditResult.persisted;
+        recoveryRecord.persistedToAuditLog = auditResult.persisted;
+        if (auditResult.auditLogId) {
+          recoveryRecord.auditLogId = auditResult.auditLogId;
+        }
+        this.recoveryRecords.set(recoveryId, recoveryRecord);
+      }
+
+      const compensationReport: AudioUploadCompensationReport = {
+        attempted: true,
+        succeeded: compensationSucceeded,
+        storagePath: saveResult.storagePath,
+        checksumSha256: saveResult.checksumSha256,
+        fileSizeBytes: saveResult.fileSizeBytes,
+        ...(compensationErrorMsg ? { compensationError: compensationErrorMsg } : {}),
+        ...(recoveryRecordId ? { recoveryRecordId } : {}),
+        persistedToAuditLog,
+        recordedAt,
+      };
+
+      if (primaryError && typeof primaryError === 'object') {
+        (primaryError as Error & { compensation?: AudioUploadCompensationReport }).compensation =
+          compensationReport;
+      }
+
+      throw primaryError;
+    } finally {
+      this.inFlightUploadPaths.delete(saveResult.storagePath);
     }
   }
 
@@ -388,10 +673,75 @@ export class AudioService {
   /**
    * Reconcilia la consistencia entre los registros de `audio_assets` en PostgreSQL y los archivos físicos en disco.
    * Detecta archivos huérfanos en disco, registros sin archivo físico y archivos físicamente alterados (SHA-256).
+   * Protege subidas en vuelo y archivos ambiguos, y permite recuperación idempotente y auditada de fallos previos.
    */
   public async reconcileStorageConsistency(
-    options: { purgeOrphanFiles?: boolean } = {}
+    options: AudioStorageReconciliationOptions = {}
   ): Promise<AudioStorageReconciliationReport> {
+    const shouldRecoverFailed = options.recoverFailedOperations ?? Boolean(options.purgeOrphanFiles);
+    const recoveredOperations: Array<{
+      recoveryRecordId: string;
+      recoveryType: AudioRecoveryType;
+      target: string;
+    }> = [];
+    const auditLogIds: string[] = [];
+
+    // 1. Recuperación idempotente de operaciones fallidas pendientes (antes de inventariar estado actual)
+    if (shouldRecoverFailed) {
+      for (const rec of this.recoveryRecords.values()) {
+        if (rec.status !== 'PENDING_RECOVERY') continue;
+
+        if (rec.recoveryType === 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE' && rec.assetId) {
+          const stillOnDisk = await this.storageProvider.exists(rec.storagePath).catch(() => true);
+          if (!stillOnDisk) {
+            try {
+              const existingAsset = await this.audioRepo.findById(rec.assetId);
+              const resolved = existingAsset ? await this.audioRepo.delete(rec.assetId) : true;
+              if (resolved) {
+                const completed = await this.markRelatedRecoveriesCompleted(
+                  { assetId: rec.assetId, storagePath: rec.storagePath },
+                  null
+                );
+                for (const item of completed) {
+                  recoveredOperations.push({
+                    recoveryRecordId: item.recoveryRecordId,
+                    recoveryType: item.recoveryType,
+                    target: item.target,
+                  });
+                  if (item.auditLogId) {
+                    auditLogIds.push(item.auditLogId);
+                  }
+                }
+              }
+            } catch (recErr) {
+              rec.secondaryError = recErr instanceof Error ? recErr.message : String(recErr);
+            }
+          }
+        } else if (
+          rec.recoveryType === 'UPLOAD_COMPENSATION_ORPHAN' &&
+          !this.inFlightUploadPaths.has(rec.storagePath)
+        ) {
+          const stillOnDisk = await this.storageProvider.exists(rec.storagePath).catch(() => true);
+          if (!stillOnDisk) {
+            const completed = await this.markRelatedRecoveriesCompleted(
+              { storagePath: rec.storagePath },
+              null
+            );
+            for (const item of completed) {
+              recoveredOperations.push({
+                recoveryRecordId: item.recoveryRecordId,
+                recoveryType: item.recoveryType,
+                target: item.target,
+              });
+              if (item.auditLogId) {
+                auditLogIds.push(item.auditLogId);
+              }
+            }
+          }
+        }
+      }
+    }
+
     const [assets, physicalKeys] = await Promise.all([
       this.audioRepo.findAll(),
       this.storageProvider.listKeys(),
@@ -429,17 +779,125 @@ export class AudioService {
       }
     }
 
-    const orphanFiles = physicalKeys.filter((key) => !referencedPaths.has(key));
+    const orphanFiles: string[] = [];
     const purgedOrphanFiles: string[] = [];
+    const skippedInFlightFiles: string[] = [];
+    const ambiguousFiles: Array<{ storagePath: string; reason: string }> = [];
+    const failedOrphanPurges: Array<{ storagePath: string; reason: string }> = [];
+
+    for (const diskKey of physicalKeys) {
+      if (referencedPaths.has(diskKey)) {
+        continue;
+      }
+
+      // Guardia 1: Nunca clasificar ni purgar una subida actualmente en vuelo
+      if (this.inFlightUploadPaths.has(diskKey)) {
+        skippedInFlightFiles.push(diskKey);
+        continue;
+      }
+
+      const isConfirmedCompensationOrphan = Array.from(this.recoveryRecords.values()).some(
+        (r) =>
+          r.status === 'PENDING_RECOVERY' &&
+          r.recoveryType === 'UPLOAD_COMPENSATION_ORPHAN' &&
+          r.storagePath === diskKey
+      );
+
+      // Guardia 2: No clasificar como huérfanos elegibles a purga automática archivos ambiguos
+      if (!isConfirmedCompensationOrphan) {
+        const ext = path.extname(diskKey).toLowerCase();
+        if (!ALLOWED_AUDIO_EXTENSIONS.has(ext)) {
+          ambiguousFiles.push({
+            storagePath: diskKey,
+            reason: 'Extensión no perteneciente al catálogo de audio gestionado; requiere revisión manual.',
+          });
+          continue;
+        }
+
+        if (options.minOrphanAgeMs !== undefined && options.minOrphanAgeMs > 0) {
+          const mtimeMs = await this.getFileMtimeMs(diskKey);
+          if (mtimeMs === null || Date.now() - mtimeMs < options.minOrphanAgeMs) {
+            ambiguousFiles.push({
+              storagePath: diskKey,
+              reason: 'Archivo reciente o marca temporal no verificable dentro de la ventana de seguridad.',
+            });
+            continue;
+          }
+        }
+      }
+
+      orphanFiles.push(diskKey);
+    }
 
     if (options.purgeOrphanFiles) {
       for (const orphanKey of orphanFiles) {
-        const deleted = await this.storageProvider.delete(orphanKey);
-        if (deleted) {
+        let purgeErr: unknown = null;
+        try {
+          await this.storageProvider.delete(orphanKey);
+        } catch (err) {
+          purgeErr = err;
+        }
+
+        const existsAfter = await this.storageProvider.exists(orphanKey).catch(() => true);
+        if (!purgeErr && !existsAfter) {
           purgedOrphanFiles.push(orphanKey);
+
+          const purgeAudit = await this.persistAuditEvent(
+            'AUDIO_ORPHAN_FILE_PURGED',
+            null,
+            orphanKey,
+            {
+              storagePath: orphanKey,
+              purgedAt: new Date().toISOString(),
+            }
+          );
+          if (purgeAudit.auditLogId) {
+            auditLogIds.push(purgeAudit.auditLogId);
+          }
+
+          const completed = await this.markRelatedRecoveriesCompleted(
+            { storagePath: orphanKey },
+            null
+          );
+          for (const item of completed) {
+            recoveredOperations.push({
+              recoveryRecordId: item.recoveryRecordId,
+              recoveryType: item.recoveryType,
+              target: item.target,
+            });
+            if (item.auditLogId) {
+              auditLogIds.push(item.auditLogId);
+            }
+          }
+        } else {
+          const reason =
+            purgeErr instanceof Error
+              ? purgeErr.message
+              : purgeErr !== null
+                ? String(purgeErr)
+                : 'El archivo huérfano permanece en disco tras intentar purgarlo.';
+          failedOrphanPurges.push({ storagePath: orphanKey, reason });
+
+          const failAudit = await this.persistAuditEvent(
+            'AUDIO_ORPHAN_PURGE_FAILED',
+            null,
+            orphanKey,
+            {
+              storagePath: orphanKey,
+              reason,
+              attemptedAt: new Date().toISOString(),
+            }
+          );
+          if (failAudit.auditLogId) {
+            auditLogIds.push(failAudit.auditLogId);
+          }
         }
       }
     }
+
+    const pendingRecoveryRecords = Array.from(this.recoveryRecords.values())
+      .filter((r) => r.status !== 'RECOVERED')
+      .map((r) => ({ ...r }));
 
     return {
       checkedAssets: assets.length,
@@ -448,6 +906,12 @@ export class AudioService {
       corruptedPhysicalFiles,
       orphanFiles,
       purgedOrphanFiles,
+      skippedInFlightFiles,
+      ambiguousFiles,
+      failedOrphanPurges,
+      pendingRecoveryRecords,
+      recoveredOperations,
+      auditLogIds,
     };
   }
 
@@ -476,18 +940,173 @@ export class AudioService {
   }
 
   /**
-   * Elimina un archivo de audio tanto de la base de datos como del disco físico.
+   * Elimina un archivo de audio tanto del disco físico como de la base de datos.
+   * Si falla la eliminación física, preserva el registro en BD y lanza PersistenceError (sin falsos positivos).
+   * Si el archivo físico fue eliminado pero falla la eliminación en BD, persiste metadatos accionables de recuperación y lanza PersistenceError.
+   * Es seguro frente a reintentos idempotentes.
    */
-  public async deleteAudio(audioId: string): Promise<boolean> {
+  public async deleteAudio(audioId: string, actorUserId?: string): Promise<boolean> {
     const asset = await this.audioRepo.findById(audioId);
     if (!asset) {
       return false;
     }
 
-    // 1. Eliminar archivo físico
-    await this.storageProvider.delete(asset.storagePath);
+    const effectiveActorId = actorUserId ?? asset.uploadedByUserId ?? null;
+    const existedBefore = await this.storageProvider.exists(asset.storagePath).catch(() => true);
 
-    // 2. Eliminar registro en base de datos
-    return await this.audioRepo.delete(audioId);
+    // Fase 1: Eliminar archivo físico verificando resultado real
+    let deletedPhysical = false;
+    let physicalError: unknown = null;
+    try {
+      deletedPhysical = await this.storageProvider.delete(asset.storagePath);
+    } catch (err) {
+      physicalError = err;
+    }
+
+    const existsAfter = await this.storageProvider.exists(asset.storagePath).catch(() => true);
+    if (physicalError || (existedBefore && !deletedPhysical) || existsAfter) {
+      const causeMessage =
+        physicalError instanceof Error
+          ? physicalError.message
+          : physicalError !== null
+            ? String(physicalError)
+            : `El archivo físico '${asset.storagePath}' permanece en disco tras intentar eliminarlo.`;
+      const createdAt = new Date().toISOString();
+      const recoveryId = crypto.randomUUID();
+
+      const record: AudioStorageRecoveryRecord = {
+        id: recoveryId,
+        recoveryType: 'DELETE_PHYSICAL_FAILED',
+        status: 'ABORTED_DB_PRESERVED',
+        storagePath: asset.storagePath,
+        assetId: asset.id,
+        songId: asset.songId,
+        filename: asset.filename,
+        mimeType: asset.mimeType,
+        checksumSha256: asset.checksumSha256,
+        fileSizeBytes: asset.fileSizeBytes,
+        primaryError: causeMessage,
+        persistedToAuditLog: false,
+        createdAt,
+      };
+
+      const auditRes = await this.persistAuditEvent(
+        'AUDIO_DELETE_PHYSICAL_FAILED',
+        effectiveActorId,
+        asset.storagePath,
+        {
+          recoveryRecordId: recoveryId,
+          recoveryType: record.recoveryType,
+          status: record.status,
+          assetId: asset.id,
+          songId: asset.songId,
+          storagePath: asset.storagePath,
+          filename: asset.filename,
+          mimeType: asset.mimeType,
+          checksumSha256: asset.checksumSha256,
+          fileSizeBytes: asset.fileSizeBytes,
+          cause: causeMessage,
+          createdAt,
+        }
+      );
+      record.persistedToAuditLog = auditRes.persisted;
+      if (auditRes.auditLogId) {
+        record.auditLogId = auditRes.auditLogId;
+      }
+      this.recoveryRecords.set(recoveryId, record);
+
+      throw new PersistenceError(
+        `Fallo al eliminar el archivo físico de audio '${asset.storagePath}'. El registro en base de datos fue preservado para mantener la consistencia.`,
+        {
+          assetId: asset.id,
+          storagePath: asset.storagePath,
+          recoveryRecordId: recoveryId,
+          dbRecordPreserved: true,
+          persistedToAuditLog: record.persistedToAuditLog,
+          cause: causeMessage,
+        }
+      );
+    }
+
+    // Fase 2: Eliminar registro en base de datos
+    let dbDeleted = false;
+    let dbError: unknown = null;
+    try {
+      dbDeleted = await this.audioRepo.delete(audioId);
+    } catch (err) {
+      dbError = err;
+    }
+
+    if (dbError || !dbDeleted) {
+      const causeMessage =
+        dbError instanceof Error
+          ? dbError.message
+          : dbError !== null
+            ? String(dbError)
+            : `audioRepo.delete('${audioId}') retornó false tras la eliminación física.`;
+      const createdAt = new Date().toISOString();
+      const recoveryId = crypto.randomUUID();
+
+      const record: AudioStorageRecoveryRecord = {
+        id: recoveryId,
+        recoveryType: 'DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE',
+        status: 'PENDING_RECOVERY',
+        storagePath: asset.storagePath,
+        assetId: asset.id,
+        songId: asset.songId,
+        filename: asset.filename,
+        mimeType: asset.mimeType,
+        checksumSha256: asset.checksumSha256,
+        fileSizeBytes: asset.fileSizeBytes,
+        primaryError: causeMessage,
+        persistedToAuditLog: false,
+        createdAt,
+      };
+
+      const auditRes = await this.persistAuditEvent(
+        'AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE',
+        effectiveActorId,
+        asset.storagePath,
+        {
+          recoveryRecordId: recoveryId,
+          recoveryType: record.recoveryType,
+          status: record.status,
+          assetId: asset.id,
+          songId: asset.songId,
+          storagePath: asset.storagePath,
+          filename: asset.filename,
+          mimeType: asset.mimeType,
+          checksumSha256: asset.checksumSha256,
+          fileSizeBytes: asset.fileSizeBytes,
+          cause: causeMessage,
+          createdAt,
+        }
+      );
+      record.persistedToAuditLog = auditRes.persisted;
+      if (auditRes.auditLogId) {
+        record.auditLogId = auditRes.auditLogId;
+      }
+      this.recoveryRecords.set(recoveryId, record);
+
+      throw new PersistenceError(
+        `El archivo físico '${asset.storagePath}' fue eliminado, pero falló la eliminación del registro en base de datos para el activo '${asset.id}'. Se generó el registro de recuperación '${recoveryId}'.`,
+        {
+          assetId: asset.id,
+          storagePath: asset.storagePath,
+          recoveryRecordId: recoveryId,
+          physicalDeleted: true,
+          dbDeleted: false,
+          persistedToAuditLog: record.persistedToAuditLog,
+          cause: causeMessage,
+        }
+      );
+    }
+
+    await this.markRelatedRecoveriesCompleted(
+      { assetId: asset.id, storagePath: asset.storagePath },
+      effectiveActorId
+    );
+
+    return true;
   }
 }

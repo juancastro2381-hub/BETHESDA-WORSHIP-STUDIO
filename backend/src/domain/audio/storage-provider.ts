@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { NotFoundError, RangeNotSatisfiableError, ValidationError } from '../errors.ts';
+import { NotFoundError, PersistenceError, RangeNotSatisfiableError, ValidationError } from '../errors.ts';
 
 export interface StorageSaveResult {
   readonly storagePath: string;
@@ -41,6 +41,7 @@ export interface IAudioStorageProvider {
   getBuffer(storagePath: string): Promise<Buffer>;
   delete(storagePath: string): Promise<boolean>;
   exists(storagePath: string): Promise<boolean>;
+  stat?(storagePath: string): Promise<{ size: number; mtimeMs: number } | null>;
   resolveSafePath(storagePath: string): string;
   listKeys(): Promise<string[]>;
 }
@@ -303,18 +304,55 @@ export class LocalFileSystemAudioStorageProvider implements IAudioStorageProvide
 
   /**
    * Elimina el archivo del almacenamiento físico, restaurando permisos escribibles si es necesario.
+   * Retorna `false` de forma idempotente únicamente cuando el archivo ya no existe (`ENOENT`).
+   * Lanza `PersistenceError` si el archivo existe pero no pudo eliminarse del disco.
    */
   public async delete(storagePath: string): Promise<boolean> {
+    const fullPath = this.resolveSafePath(storagePath);
+
+    const lstat = fs.lstatSync(fullPath, { throwIfNoEntry: false });
+    if (!lstat) {
+      return false;
+    }
+
+    try {
+      await fs.promises.chmod(fullPath, 0o666).catch(() => {});
+      await fs.promises.unlink(fullPath);
+      return true;
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        return false;
+      }
+      throw new PersistenceError(
+        `No se pudo eliminar el archivo físico de audio '${storagePath}': ${err instanceof Error ? err.message : String(err)}`,
+        {
+          storagePath,
+          code: err?.code,
+          cause: err instanceof Error ? err.message : String(err),
+        }
+      );
+    }
+  }
+
+  /**
+   * Obtiene metadatos básicos del archivo en disco (tamaño y marca de modificación) o null si no existe.
+   */
+  public async stat(storagePath: string): Promise<{ size: number; mtimeMs: number } | null> {
     try {
       const fullPath = this.resolveSafePath(storagePath);
-      if (fs.existsSync(fullPath)) {
-        await fs.promises.chmod(fullPath, 0o666).catch(() => {});
-        await fs.promises.unlink(fullPath);
-        return true;
+      const fileStat = await fs.promises.stat(fullPath);
+      if (!fileStat.isFile()) {
+        return null;
       }
-      return false;
-    } catch {
-      return false;
+      return {
+        size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
+      };
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        return null;
+      }
+      throw err;
     }
   }
 

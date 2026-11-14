@@ -4,15 +4,15 @@
 
 **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`  
 **Branch:** `feature/phase-1a-core-foundation`  
-**Reviewed Baseline Commit:** `ab016a9cdfed7e71e42176a1aa2407dc957206c8`  
+**Reviewed Baseline Commit:** `a5d27392628986475e160ca1647ce6699af960fe` (superseding prior baseline `ab016a9cdfed7e71e42176a1aa2407dc957206c8`)  
 **Workstream Scope:** `WS-AUDIO-01` ONLY (WS-AUDIO-02 and WS-AUDIO-03 remain strictly gated)  
-**Remediation Status:** `CONDITIONAL PASS` (Technical remediations & automated suites verified; 10-point Manual Acceptance Checklist `PENDING` Project Owner execution)
+**Remediation Status:** `CONDITIONAL PASS` (Technical remediations, storage failure-path hardening & automated suites verified; 10-point Manual Acceptance Checklist `PENDING` Project Owner execution)
 
 ---
 
 ## 1. Executive Summary
 
-Following the independent security and architecture review of WS-AUDIO-01, five mandatory findings (**A through E**) plus a license/distribution review and documentation accuracy audit were identified against commit `ab016a9cdfed7e71e42176a1aa2407dc957206c8`. All code defects, security gaps, worker production integrations, and inaccurate documentation claims have been remediated cleanly within the strict boundaries of WS-AUDIO-01. Canonical musical notation (`songs` / `song_versions`) was left untouched.
+Following the independent security/architecture review (Findings **A through E**) and the **Final Storage Failure-Path Audit** (`uploadAudio()` compensation failure, `deleteAudio()` physical/DB split-failure consistency, and `reconcileStorageConsistency()` concurrency & safety guards), all identified code defects, error-suppression gaps, worker production integrations, and inaccurate absolute documentation claims have been remediated cleanly within the strict boundaries of WS-AUDIO-01. Canonical musical notation (`songs` / `song_versions`) was left untouched.
 
 ---
 
@@ -56,16 +56,24 @@ Following the independent security and architecture review of WS-AUDIO-01, five 
   - No storage reconciliation service existed to detect orphan files, missing physical files, or silent at-rest corruption across stored assets.
   - Previous documentation inaccurately cited `song_audio_assets` / `sha256Hash` and assumed production volume durability without infrastructure proof.
 - **Implemented Remediation:**
+  - [`backend/src/domain/audio/storage-provider.ts`](../../backend/src/domain/audio/storage-provider.ts):
+    - `delete()` restores writable bits (`chmod(0o666)`) before `unlink()`. Returns `false` idempotently **only** when the file does not exist (`ENOENT`); throws `PersistenceError` on genuine filesystem/lock failures (`EACCES`, `EPERM`, `EBUSY`, `EIO`) instead of silently swallowing cleanup errors.
+    - Added optional `stat()` for verification of physical file timestamps during safe orphan reconciliation.
   - [`backend/src/application/audio-service.ts`](../../backend/src/application/audio-service.ts):
-    - `uploadAudio()` wraps post-save worker verification and DB persistence in `try / catch`, invoking `storageProvider.delete(saveResult.storagePath)` if any downstream step fails (zero orphan files).
-    - Added `reconcileStorageConsistency(options?: { purgeOrphanFiles?: boolean })` comparing `IAudioRepository.findAll()` (`audio_assets` rows) with `IAudioStorageProvider.listKeys()`, classifying `healthyAssetIds`, `missingPhysicalFiles`, `corruptedPhysicalFiles`, `orphanFiles`, and optional `purgedOrphanFiles`.
+    - **Upload Compensation & Failure Recovery:** `uploadAudio()` tracks active `storagePath` keys in `inFlightUploadPaths` and wraps post-save worker verification and DB persistence in `try / catch / finally`. On failure, it attempts physical compensation via `storageProvider.delete(saveResult.storagePath)` and checks `!exists()`. Whether compensation succeeds or fails, the original `primaryError` is preserved unchanged with structured `compensation` telemetry (`attempted`, `succeeded`, `compensationError`, `recoveryRecordId`, `persistedToAuditLog`). If physical compensation fails, zero orphan files is **not** falsely claimed; instead, an actionable `UPLOAD_COMPENSATION_ORPHAN` (`PENDING_RECOVERY`) recovery record is created and persisted in `audit_logs` (`AUDIO_UPLOAD_COMPENSATION_FAILED`) plus `AudioService.getRecoveryRecords()`.
+    - **Delete Consistency Lifecycle (`deleteAudio(audioId, actorUserId)`):**
+      - *Scenario A (Physical deletion fails before DB deletion):* `audioRepo.delete()` is NOT invoked, preserving the `audio_assets` record attached to its intact physical file, persisting `AUDIO_DELETE_PHYSICAL_FAILED` (`ABORTED_DB_PRESERVED`) in `audit_logs`, and throwing `PersistenceError`. Retrying `deleteAudio()` once the storage fault clears completes cleanly and transitions the record to `RECOVERED`.
+      - *Scenario B (Physical deletion succeeds, then DB deletion fails):* Never silently returns success; persists `AUDIO_DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE` (`PENDING_RECOVERY`) with full asset metadata (`assetId`, `songId`, `storagePath`, `checksumSha256`, `fileSizeBytes`) in `audit_logs` + `recoveryRecords`, and throws `PersistenceError`. Subsequent retries of `deleteAudio()` or `reconcileStorageConsistency({ recoverFailedOperations: true })` verify physical absence before completing DB deletion idempotently and logging `AUDIO_RECOVERY_COMPLETED`.
+    - **Safe, Audited Reconciliation (`reconcileStorageConsistency()`):** Compares `IAudioRepository.findAll()` (`audio_assets`) with `IAudioStorageProvider.listKeys()` (plus bounded `64 KiB` SHA-256 verification). Never purges files in `inFlightUploadPaths` (`skippedInFlightFiles`) or ambiguous files with unmanaged extensions / within optional `minOrphanAgeMs` grace windows (`ambiguousFiles`). Every confirmed orphan purge logs `AUDIO_ORPHAN_FILE_PURGED` (or `AUDIO_ORPHAN_PURGE_FAILED` in `failedOrphanPurges`), and recovery runs are idempotent across repeated executions.
   - [`backend/src/repositories/audio-repository.ts`](../../backend/src/repositories/audio-repository.ts):
     - Added `findAll()` to `IAudioRepository` and `DrizzleAudioRepository`.
+  - **Residual Limitations (Failure Paths):**
+    - Because physical disk operations and PostgreSQL writes execute without distributed two-phase commit (2PC), a simultaneous DB outage + disk lock during failed upload compensation relies on process-local `recoveryRecords` telemetry (and stderr logging) until storage or DB recovers so reconciliation can purge the confirmed orphan. Similarly, cross-process crash recovery of pending `DELETE_DB_FAILED_AFTER_PHYSICAL_DELETE` metadata relies on durable `audit_logs` rows if the worker process restarts before automatic reconciliation runs.
   - **Infrastructure Durability Classification (`NOT PRODUCTION VERIFIED`):**
     - Audited [`docker-compose.yml`](../../docker-compose.yml): it provisions only local development PostgreSQL (`postgres:16-alpine` with volume `postgres_data`). No production container deployment or external persistent object/block volume manifest exists in the repository for `AUDIO_STORAGE_PATH` (`backend/storage/audio`). Local development persistence is atomic and reconcilable, while production persistent volume durability is explicitly documented as **NOT PRODUCTION VERIFIED**.
   - **Schema Truth Aligned:** Database table is `audio_assets` (`backend/src/db/schema.ts`) and SHA-256 column is `checksum_sha256` (TypeScript field `checksumSha256`).
 - **Verification Evidence:**
-  - `backend/src/__tests__/audio-preservation-and-worker.test.ts`: Test **16** validates automatic physical file rollback upon simulated DB insert error and full reconciliation across healthy, missing, corrupted, and orphan files.
+  - `backend/src/__tests__/audio-preservation-and-worker.test.ts`: Tests **16** (rollback + healthy/missing/corrupted/orphan reconciliation) and **18.1 – 18.5** (upload DB failure with rollback success, upload DB failure + failed physical rollback preserving primary error + persisting `AUDIO_UPLOAD_COMPENSATION_FAILED` + later recovery, physical delete failure aborting DB delete, DB delete failure after physical delete + idempotent reconciliation & retry recovery, and concurrent in-flight upload / ambiguous file purge protection).
 
 ---
 
@@ -110,12 +118,14 @@ Inspected [`workers/audio_worker/requirements.txt`](../../workers/audio_worker/r
 
 ---
 
-## 4. Automated Test & Compilation Results (Verified Post-Remediation)
+## 4. Automated Test & Compilation Results (Verified Post-Audit)
 
 | Verification Command | Result | Scope |
 | :--- | :--- | :--- |
-| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` | **15 passed in 7.40s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
-| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **41 passed, 0 failed** (3 suites) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E (18), Conversion API (9) |
+| `workers/audio_worker/.venv/Scripts/python.exe -m pytest workers/audio_worker/tests -v` | **15 passed in 7.24s** | Worker IPC contract, magic bytes, streaming SHA-256, FFmpeg decode, security guards |
+| `npx tsx --test "backend/src/__tests__/audio-infrastructure.test.ts" "backend/src/__tests__/audio-preservation-and-worker.test.ts" "backend/src/__tests__/conversion-api.test.ts"` | **46 passed, 0 failed** (3 suites) | Audio HTTP API (14), WS-AUDIO-01 Gate 1 + Findings A/B/C/E + Storage Failure-Path Audit 18.1–18.5 (23), Conversion API (9) |
 | `npm --prefix backend run typecheck` | **0 errors** (Exit 0) | Full backend TypeScript compilation |
 | `npm --prefix frontend run typecheck` | **0 errors** (Exit 0) | Full frontend TypeScript compilation |
-| `npm --prefix frontend test` | **610 passed, 0 failed** (86 suites) | All frontend unit, state, security, stage PWA & conversion preflight suites |
+
+*(Frontend production code and frontend test files were unmodified during the storage failure-path remediation pass.)*
+

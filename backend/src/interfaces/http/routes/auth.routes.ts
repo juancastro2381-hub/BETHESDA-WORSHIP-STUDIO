@@ -3,7 +3,7 @@
  * @description Rutas HTTP de autenticación, refresco de sesiones, restablecimiento de contraseña e invitaciones (Fase 2B).
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { env } from '../../../config/env.ts';
 import {
   LoginBodySchema,
@@ -110,8 +110,8 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  // 2. POST /api/v1/auth/refresh
-  fastify.post('/refresh', async (request, reply) => {
+  // 2. POST & GET /api/v1/auth/refresh (renovación de sesión vía cookie HttpOnly)
+  const handleRefreshSession = async (request: FastifyRequest, reply: FastifyReply) => {
     const rawRefreshToken = request.cookies.bethesda_refresh_token;
     const context = getContext(request);
 
@@ -140,7 +140,10 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
       reply.clearCookie('bethesda_refresh_token', { path: '/api/v1/auth' });
       throw err;
     }
-  });
+  };
+
+  fastify.post('/refresh', handleRefreshSession);
+  fastify.get('/refresh', handleRefreshSession);
 
   // 3. POST /api/v1/auth/logout
   fastify.post('/logout', async (request, reply) => {

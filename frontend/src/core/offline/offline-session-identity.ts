@@ -449,7 +449,11 @@ export function isServerAuthRejectionError(err: unknown): boolean {
     anyErr.code === 'UNAUTHORIZED' ||
     anyErr.code === 'FORBIDDEN' ||
     anyErr.code === 'ACCOUNT_DISABLED' ||
-    anyErr.code === 'TOKEN_REVOKED'
+    anyErr.code === 'ACCOUNT_LOCKED' ||
+    anyErr.code === 'TOKEN_REVOKED' ||
+    anyErr.code === 'TOKEN_INVALID' ||
+    anyErr.code === 'TOKEN_EXPIRED' ||
+    anyErr.code === 'INVALID_CREDENTIALS'
   ) {
     return true;
   }
@@ -462,6 +466,9 @@ export function isServerAuthRejectionError(err: unknown): boolean {
       msg.includes('no autorizado') ||
       msg.includes('cuenta suspendida') ||
       msg.includes('account disabled') ||
+      msg.includes('cookie de refresco') ||
+      msg.includes('token de refresco') ||
+      msg.includes('token reutilizado') ||
       msg.includes('revoked')
     ) {
       return true;

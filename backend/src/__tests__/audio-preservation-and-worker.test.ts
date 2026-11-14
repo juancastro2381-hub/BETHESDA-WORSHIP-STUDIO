@@ -46,6 +46,7 @@ import {
   type AudioUploadCompensationReport,
 } from '../application/audio-service.ts';
 import { JwtTokenService } from '../application/token-service.ts';
+import { Argon2PasswordHasher } from '../domain/crypto/password-hasher.ts';
 import { globalStreamTicketService } from '../application/stream-ticket-service.ts';
 import { env } from '../config/env.ts';
 import type { AudioAsset, NewAudioAsset } from '../db/schema.ts';
@@ -3164,5 +3165,505 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       payload: { purgeOrphanFiles: 'yes' },
     });
     assert.strictEqual(badBody.statusCode, 400);
+  });
+
+  // =========================================================================
+  // CRITERIO 22: REGRESIÓN INTEGRAL DE PRESERVACIÓN HTTP 400/401 (SECCIÓN 8: ESCENARIOS 1 AL 13)
+  // =========================================================================
+  it('22.1-22.6 (Preservation HTTP 400 Remediation) should cover valid MP3 preservation (JSON, multipart/form-data, chained ID3v2), invalid songId, malformed multipart/body, invalid MIME/signature, oversized upload, and RBAC', async () => {
+    const mp3ElSenor = makeValidMp3WithId3Buffer();
+    const expectedSha = crypto.createHash('sha256').update(mp3ElSenor).digest('hex');
+
+    // Escenario 1a: Preservación MP3 válida vía JSON (con Content-Type: application/json)
+    const jsonUploadRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({
+        title: 'El Señor Está en Este Lugar',
+        filename: 'El Señor Está en Este Lugar.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3ElSenor.toString('base64'),
+      }),
+    });
+    assert.strictEqual(jsonUploadRes.statusCode, 201, jsonUploadRes.body);
+    const createdJsonAsset = jsonUploadRes.json().data;
+    createdAudioStoragePaths.add(createdJsonAsset.storagePath);
+    assert.strictEqual(createdJsonAsset.songId, testSong.id);
+    assert.strictEqual(createdJsonAsset.filename, 'El Señor Está en Este Lugar.mp3');
+    assert.strictEqual(createdJsonAsset.mimeType, 'audio/mpeg');
+    assert.strictEqual(createdJsonAsset.checksumSha256, expectedSha);
+    assert.strictEqual(createdJsonAsset.fileSizeBytes, mp3ElSenor.byteLength);
+
+    // Escenario 1b: Preservación MP3 válida vía multipart/form-data binario
+    const boundary = '----BethesdaAudioMultipartBoundary22';
+    const mp3MultipartBuf = makeValidMp3WithId3Buffer();
+    const expectedMultipartSha = crypto.createHash('sha256').update(mp3MultipartBuf).digest('hex');
+    const multipartBody = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="title"\r\n\r\n` +
+          `El Señor Está en Este Lugar (Multipart)\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="filename"\r\n\r\n` +
+          `El_Senor_Multipart.mp3\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="mimeType"\r\n\r\n` +
+          `audio/mp3; codecs=mp3\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="durationSeconds"\r\n\r\n` +
+          `185\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="file"; filename="El_Senor_Multipart.mp3"\r\n` +
+          `Content-Type: audio/mpeg\r\n\r\n`,
+        'utf8'
+      ),
+      mp3MultipartBuf,
+      Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
+    ]);
+
+    const multipartRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: multipartBody,
+    });
+    assert.strictEqual(multipartRes.statusCode, 201, multipartRes.body);
+    const createdMultipartAsset = multipartRes.json().data;
+    createdAudioStoragePaths.add(createdMultipartAsset.storagePath);
+    assert.strictEqual(createdMultipartAsset.checksumSha256, expectedMultipartSha);
+    assert.strictEqual(createdMultipartAsset.mimeType, 'audio/mpeg');
+    assert.strictEqual(createdMultipartAsset.durationSeconds, 185);
+
+    // Escenario 1c: MP3 con etiquetas ID3v2 encadenadas consecutivas
+    const id3First = Buffer.from([0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+    const id3Second = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+    const chainedMp3 = Buffer.concat([
+      id3First,
+      Buffer.alloc(16, 0x00),
+      id3Second,
+      Buffer.alloc(16, 0x00),
+      makeValidMp3Buffer(5),
+    ]);
+    const chainedRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'MP3 Doble ID3v2',
+        filename: 'chained_id3.mp3',
+        mimeType: 'audio/x-mp3',
+        dataBase64: chainedMp3.toString('base64'),
+      },
+    });
+    assert.strictEqual(chainedRes.statusCode, 201, chainedRes.body);
+    createdAudioStoragePaths.add(chainedRes.json().data.storagePath);
+
+    // Escenario 2: Identificador de canción inválido (UUID malformado -> 400; UUID inexistente -> 404)
+    const malformedSongRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs/not-a-valid-uuid/audio',
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'Test',
+        filename: 'test.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3ElSenor.toString('base64'),
+      },
+    });
+    assert.strictEqual(malformedSongRes.statusCode, 400);
+    assert.strictEqual(malformedSongRes.json().error.code, 'VALIDATION_ERROR');
+
+    const missingSongRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${crypto.randomUUID()}/audio`,
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'Test',
+        filename: 'test.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3ElSenor.toString('base64'),
+      },
+    });
+    assert.strictEqual(missingSongRes.statusCode, 404);
+    assert.strictEqual(missingSongRes.json().error.code, 'NOT_FOUND');
+
+    // Escenario 3: Campo multipart ausente o malformado y cuerpo no-JSON malformado -> 400
+    const noBoundaryRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': 'multipart/form-data',
+      },
+      payload: Buffer.from('invalid-multipart-without-boundary', 'utf8'),
+    });
+    assert.strictEqual(noBoundaryRes.statusCode, 400);
+    assert.strictEqual(noBoundaryRes.json().error.code, 'VALIDATION_ERROR');
+
+    const missingFileMultipart = Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="title"\r\n\r\n` +
+        `Solo Titulo Sin Archivo\r\n` +
+        `--${boundary}--\r\n`,
+      'utf8'
+    );
+    const missingFileRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: missingFileMultipart,
+    });
+    assert.strictEqual(missingFileRes.statusCode, 400);
+    assert.strictEqual(missingFileRes.json().error.code, 'VALIDATION_ERROR');
+
+    const malformedPlainTextRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': 'text/plain;charset=UTF-8',
+      },
+      payload: 'NOT_A_JSON_OBJECT',
+    });
+    assert.strictEqual(malformedPlainTextRes.statusCode, 400);
+    assert.strictEqual(malformedPlainTextRes.json().error.code, 'VALIDATION_ERROR');
+
+    // Escenario 4: Combinación MIME/firma binaria inválida -> 400 sin archivos huérfanos
+    const wavHeaderFakeMp3 = Buffer.from([
+      0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+      0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+    ]);
+    const mismatchMimeRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'WAV disfrazado de MP3',
+        filename: 'mismatch.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: wavHeaderFakeMp3.toString('base64'),
+      },
+    });
+    assert.strictEqual(mismatchMimeRes.statusCode, 400);
+    assert.strictEqual(mismatchMimeRes.json().error.code, 'VALIDATION_ERROR');
+
+    // Escenario 5: Carga útil que excede la cuota configurada -> 400 sin archivos huérfanos
+    const quotaDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_quota_22_5_'));
+    tempDirsToClean.push(quotaDir);
+    const quotaStorage = new LocalFileSystemAudioStorageProvider(quotaDir, 1024);
+    const quotaService = new AudioService(audioRepo, quotaStorage, songRepo, 1024);
+    await assert.rejects(
+      async () => {
+        await quotaService.uploadAudio({
+          songId: testSong.id,
+          title: 'Oversized MP3',
+          filename: 'oversized.mp3',
+          mimeType: 'audio/mpeg',
+          buffer: makeValidMp3Buffer(10), // > 1024 bytes
+        });
+      },
+      (err: unknown) => err instanceof ValidationError && err.message.includes('supera el límite máximo')
+    );
+    assert.deepStrictEqual(await quotaStorage.listKeys(), []);
+
+    // Escenario 6: Usuario no autorizado (401 sin token; 403 con rol MUSICIAN sin songs:create)
+    const noTokenRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      payload: {
+        title: 'Unauth',
+        filename: 'unauth.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3ElSenor.toString('base64'),
+      },
+    });
+    assert.strictEqual(noTokenRes.statusCode, 401);
+
+    const forbiddenMusicianRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: { authorization: `Bearer ${musicianToken}` },
+      payload: {
+        title: 'Forbidden Musician',
+        filename: 'forbidden.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3ElSenor.toString('base64'),
+      },
+    });
+    assert.strictEqual(forbiddenMusicianRes.statusCode, 403);
+  });
+
+  it('22.7-22.8 (Auth Refresh 401 Lifecycle) should support GET and POST /api/v1/auth/refresh with valid HttpOnly cookie rotation and reject missing/revoked refresh cookies with 401', async () => {
+    // Escenario 8: Refresh fallido sin cookie tanto en GET como en POST -> 401 UNAUTHORIZED
+    const getRefreshNoCookie = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/refresh',
+    });
+    assert.strictEqual(getRefreshNoCookie.statusCode, 401);
+    assert.strictEqual(getRefreshNoCookie.json().error.code, 'UNAUTHORIZED');
+
+    const postRefreshNoCookie = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+    });
+    assert.strictEqual(postRefreshNoCookie.statusCode, 401);
+    assert.strictEqual(postRefreshNoCookie.json().error.code, 'UNAUTHORIZED');
+
+    // Escenario 8b: Refresh con cookie inválida -> 401 y limpieza de cookie
+    const invalidCookieRefresh = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/refresh',
+      cookies: { bethesda_refresh_token: 'invalid-or-expired-refresh-token' },
+    });
+    assert.strictEqual(invalidCookieRefresh.statusCode, 401);
+
+    // Escenario 7: Sesión expirada + renovación exitosa vía cookie HttpOnly (POST y GET) seguida de preservación de audio exitosa
+    const hasher = new Argon2PasswordHasher();
+    const rawPassword = 'ValidDirectorPassword!2026';
+    const passwordHash = await hasher.hash(rawPassword);
+    const refreshUser = await userRepo.create({
+      email: `refresh-director-${Date.now()}@bethesda.co`,
+      passwordHash,
+      firstName: 'Refresh',
+      lastName: 'Director',
+      role: 'WORSHIP_LEADER',
+      accountStatus: 'ACTIVE',
+    });
+    createdUserIds.add(refreshUser.id);
+
+    const loginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: refreshUser.email, password: rawPassword },
+    });
+    assert.strictEqual(loginRes.statusCode, 200, loginRes.body);
+    const loginCookie = loginRes.cookies.find((c) => c.name === 'bethesda_refresh_token');
+    assert.ok(loginCookie?.value, 'Debe emitir cookie HttpOnly bethesda_refresh_token en login');
+
+    // Renovar sesión mediante GET /api/v1/auth/refresh con la cookie HttpOnly
+    const getRefreshRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/refresh',
+      cookies: { bethesda_refresh_token: loginCookie!.value },
+    });
+    assert.strictEqual(getRefreshRes.statusCode, 200, getRefreshRes.body);
+    const refreshedAccessToken = getRefreshRes.json().data.accessToken as string;
+    assert.ok(refreshedAccessToken);
+
+    // Usar el nuevo accessToken renovado para preservar audio
+    const mp3Buf = makeValidMp3WithId3Buffer();
+    const preserveAfterRefresh = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${refreshedAccessToken}`,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({
+        title: 'Audio Tras Refresh Exitoso',
+        filename: 'post_refresh.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: mp3Buf.toString('base64'),
+      }),
+    });
+    assert.strictEqual(preserveAfterRefresh.statusCode, 201, preserveAfterRefresh.body);
+    createdAudioStoragePaths.add(preserveAfterRefresh.json().data.storagePath);
+  });
+
+  it('22.9-22.13 (Compensation, No-False-DB-Success, Idempotency, SHA-256 Recovery & Range Streaming) should enforce atomic invariants and idempotent retries', async () => {
+    await withIsolatedTestScope('test-22-9-to-22-13', async (scope) => {
+      const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda_22_9_'));
+      tempDirsToClean.push(isolatedDir);
+      const isolatedStorage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+      const inMemRows = new Map<string, AudioAsset>();
+      const baseRepo = createInMemoryAudioRepo(inMemRows);
+
+      // Escenario 9: Fallo de base de datos con compensación física verificada
+      const failingDbRepo: IAudioRepository = {
+        ...baseRepo,
+        async create() {
+          throw new PersistenceError('Simulated PostgreSQL insert failure in 22.9');
+        },
+      };
+      const compService = new AudioService(
+        failingDbRepo,
+        isolatedStorage,
+        songRepo,
+        env.MAX_AUDIO_FILE_SIZE_BYTES,
+        globalPythonAudioWorkerBridge,
+        scope.auditRepo
+      );
+
+      let capturedComp: AudioUploadCompensationReport | undefined;
+      await assert.rejects(async () => {
+        try {
+          await compService.uploadAudio({
+            songId: testSong.id,
+            title: 'Compensated Upload',
+            filename: 'compensated_22_9.mp3',
+            mimeType: 'audio/mpeg',
+            buffer: makeValidMp3Buffer(4),
+            uploadedByUserId: directorUser.id,
+          });
+        } catch (err) {
+          capturedComp = (err as { compensation?: AudioUploadCompensationReport })?.compensation;
+          throw err;
+        }
+      });
+      assert.ok(capturedComp);
+      assert.strictEqual(capturedComp.attempted, true);
+      assert.strictEqual(capturedComp.succeeded, true);
+      assert.deepStrictEqual(await isolatedStorage.listKeys(), []);
+      assert.strictEqual(inMemRows.size, 0);
+
+      // Escenario 10: Fallo de almacenamiento físico sin falso éxito en base de datos
+      let dbCreateCalled = false;
+      const spyDbRepo: IAudioRepository = {
+        ...baseRepo,
+        async create(data) {
+          dbCreateCalled = true;
+          return await baseRepo.create(data);
+        },
+      };
+      const failingStorage: IAudioStorageProvider = {
+        save: async () => {
+          throw new PersistenceError('Simulated disk write EIO failure in 22.10');
+        },
+        getStream: (p, s, e, o) => isolatedStorage.getStream(p, s, e, o),
+        getBuffer: (p) => isolatedStorage.getBuffer(p),
+        delete: (p) => isolatedStorage.delete(p),
+        exists: (p) => isolatedStorage.exists(p),
+        resolveSafePath: (p) => isolatedStorage.resolveSafePath(p),
+        listKeys: () => isolatedStorage.listKeys(),
+      };
+      const storageFailService = new AudioService(
+        spyDbRepo,
+        failingStorage,
+        songRepo,
+        env.MAX_AUDIO_FILE_SIZE_BYTES,
+        globalPythonAudioWorkerBridge,
+        scope.auditRepo
+      );
+      await assert.rejects(
+        async () => {
+          await storageFailService.uploadAudio({
+            songId: testSong.id,
+            title: 'Disk Fail Upload',
+            filename: 'disk_fail_22_10.mp3',
+            mimeType: 'audio/mpeg',
+            buffer: makeValidMp3Buffer(4),
+          });
+        },
+        (err: unknown) => err instanceof PersistenceError && err.message.includes('EIO')
+      );
+      assert.strictEqual(dbCreateCalled, false, 'Nunca debe insertar en PostgreSQL si falla la escritura física');
+      assert.strictEqual(inMemRows.size, 0);
+
+      // Escenario 11: Idempotencia ante reintentos secuenciales y concurrentes (single-flight)
+      const idempotentService = new AudioService(
+        baseRepo,
+        isolatedStorage,
+        songRepo,
+        env.MAX_AUDIO_FILE_SIZE_BYTES,
+        globalPythonAudioWorkerBridge,
+        scope.auditRepo
+      );
+      const idempotentMp3 = makeValidMp3WithId3Buffer();
+      const [concurrentA, concurrentB] = await Promise.all([
+        idempotentService.uploadAudio({
+          songId: testSong.id,
+          title: 'El Señor Está en Este Lugar - Idempotente',
+          filename: 'idempotent_worship.mp3',
+          mimeType: 'audio/mpeg',
+          buffer: idempotentMp3,
+          uploadedByUserId: directorUser.id,
+        }),
+        idempotentService.uploadAudio({
+          songId: testSong.id,
+          title: 'El Señor Está en Este Lugar - Idempotente',
+          filename: 'idempotent_worship.mp3',
+          mimeType: 'audio/mpeg',
+          buffer: idempotentMp3,
+          uploadedByUserId: directorUser.id,
+        }),
+      ]);
+      const sequentialRetry = await idempotentService.uploadAudio({
+        songId: testSong.id,
+        title: 'El Señor Está en Este Lugar - Idempotente',
+        filename: 'idempotent_worship.mp3',
+        mimeType: 'audio/mpeg',
+        buffer: idempotentMp3,
+        uploadedByUserId: directorUser.id,
+      });
+
+      assert.strictEqual(concurrentA.id, concurrentB.id);
+      assert.strictEqual(concurrentA.id, sequentialRetry.id);
+      assert.strictEqual(concurrentA.storagePath, sequentialRetry.storagePath);
+      assert.strictEqual(inMemRows.size, 1, 'No debe crear filas duplicadas en reintentos');
+      assert.strictEqual((await isolatedStorage.listKeys()).length, 1, 'No debe crear archivos físicos duplicados');
+
+      // Escenario 12: Verificación SHA-256 y reconciliación durable
+      const downloaded = await idempotentService.downloadAudio(concurrentA.id);
+      assert.strictEqual(
+        crypto.createHash('sha256').update(downloaded.buffer).digest('hex'),
+        concurrentA.checksumSha256
+      );
+      const reconcileOk = await idempotentService.reconcileStorageConsistency({
+        purgeOrphanFiles: false,
+        recoverFailedOperations: true,
+      });
+      assert.deepStrictEqual(reconcileOk.healthyAssetIds, [concurrentA.id]);
+      assert.strictEqual(reconcileOk.corruptedPhysicalFiles.length, 0);
+
+      // Escenario 13: Streaming HTTP Range (200 y 206 Partial Content) tras preservación exitosa en la aplicación real
+      const streamMp3 = makeValidMp3WithId3Buffer();
+      const streamUploadRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/songs/${testSong.id}/audio`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          title: 'El Señor Está en Este Lugar - Streaming Atril',
+          filename: 'streaming_atril_22_13.mp3',
+          mimeType: 'audio/mpeg',
+          dataBase64: streamMp3.toString('base64'),
+        }),
+      });
+      assert.strictEqual(streamUploadRes.statusCode, 201, streamUploadRes.body);
+      const streamAsset = streamUploadRes.json().data;
+      createdAudioStoragePaths.add(streamAsset.storagePath);
+
+      const ticketRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${streamAsset.id}/ticket`,
+        headers: { authorization: `Bearer ${musicianToken}` },
+      });
+      assert.strictEqual(ticketRes.statusCode, 200);
+      const streamTicket = ticketRes.json().data.ticket as string;
+
+      const rangeRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/audio/${streamAsset.id}/stream?ticket=${encodeURIComponent(streamTicket)}`,
+        headers: { range: 'bytes=0-127' },
+      });
+      assert.strictEqual(rangeRes.statusCode, 206);
+      assert.strictEqual(rangeRes.headers['content-range'], `bytes 0-127/${streamMp3.byteLength}`);
+      assert.strictEqual(rangeRes.headers['accept-ranges'], 'bytes');
+      assert.strictEqual(rangeRes.headers['x-checksum-sha256'], streamAsset.checksumSha256);
+      assert.strictEqual(rangeRes.rawPayload.byteLength, 128);
+      assert.strictEqual(Buffer.compare(rangeRes.rawPayload, streamMp3.subarray(0, 128)), 0);
+    });
   });
 });

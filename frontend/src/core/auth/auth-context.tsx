@@ -191,11 +191,30 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
     });
 
+    const unregisterAuthFailure = apiClient.registerAuthFailureListener((err) => {
+      if (!isMountedRef.current) return;
+      if (isServerAuthRejectionError(err)) {
+        const storedUserId = peekStoredOfflineIdentityUserId();
+        authEpochRef.current += 1;
+        tokenManager.cancelSilentRefresh();
+        tokenManager.clearToken();
+        clearOfflineSessionIdentity();
+        offlineManager.setOfflineReadOnlySessionActive(false);
+        if (storedUserId) {
+          void offlineManager.purgeSessionData(storedUserId).catch(() => {});
+        }
+        setIsOfflineSession(false);
+        setUser(null);
+        setAuthStatus('UNAUTHENTICATED');
+      }
+    });
+
     return () => {
       isMountedRef.current = false;
+      unregisterAuthFailure();
       tokenManager.cancelSilentRefresh();
     };
-  }, [performSilentRefresh]);
+  }, [apiClient, performSilentRefresh]);
 
   // 2. Salvaguarda C & Finding B: Transición atómica a modo offline y reconciliación al reconectar (`online`)
   useEffect(() => {

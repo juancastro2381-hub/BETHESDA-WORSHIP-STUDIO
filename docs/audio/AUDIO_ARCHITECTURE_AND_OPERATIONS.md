@@ -79,9 +79,12 @@ Mandatory Scope 1C Invariants:
 ## 3. Ingestion, Verification, Failure Compensation & Reconciliation Lifecycle
 
 1. **Client Preflight** (`frontend/src/core/conversion/audio-signature.ts`): Inspects file container headers in-browser without fabricating notation.
-2. **Upload API & Compensation Failure Handling** (`POST /api/v1/songs/:songId/audio` -> `AudioService.uploadAudio()`):
+2. **Upload API, Contract Normalization, Idempotency & Compensation Failure Handling** (`POST /api/v1/songs/:songId/audio` -> `AudioService.uploadAudio()`):
    - `authGuard.requirePermission('songs:create', true)` validates active DB status, role, and lockout.
-   - `AudioService.uploadAudio()` checks song existence, MIME allowlist, size quota (`<= 50 MiB`), and binary magic bytes via `validateAudioMagicBytes()`.
+   - Route `bodyLimit` is configured to `80 MiB` (`AUDIO_UPLOAD_HTTP_BODY_LIMIT`) to accommodate `50 MiB` audio files in either binary `multipart/form-data` (`file` or `audio` part + metadata fields) or `application/json` Base64 format (`uploadSongAudio()` explicitly sets `Content-Type: application/json`).
+   - `AudioService.uploadAudio()` checks song existence, normalizes browser MIME aliases and strips `; codecs=...` parameters, validates size quota (`<= 50 MiB`), and inspects binary magic bytes via `validateAudioMagicBytes()` (including up to 4 chained `ID3v2` headers and a `128 KiB` post-ID3 MPEG frame scan window).
+   - **Idempotency & Single-Flight Coalescing:** Concurrent identical uploads coalesce via `inFlightUploadsByKey`, and sequential retries matching `(songId, checksumSha256, fileSizeBytes, filename, title)` (or `idempotencyKey`) return the existing `AudioAsset` after verifying physical disk existence, byte length, and SHA-256 integrity.
+   - **Auth Refresh Lifecycle Parity:** `POST /api/v1/auth/refresh` and `GET /api/v1/auth/refresh` validate and rotate the `bethesda_refresh_token` HttpOnly cookie; on `401/403` rejection, `BethesdaApiClient.refreshSession()` throws a structured `ApiError` recognized by `isServerAuthRejectionError()` and notifies `AuthProvider` via `registerAuthFailureListener()` to purge stale local session state immediately.
    - `LocalFileSystemAudioStorageProvider.save()` writes `${targetPath}.tmp.${uuid}`, calls `datasync()`, renames atomically to `${uuid}${ext}`, and sets `chmod(0o444)`.
    - The key is registered in `inFlightUploadPaths` immediately after disk creation and cleared in `finally` to shield concurrent uploads from reconciliation purges.
    - If `verifyWithPythonWorker: true`, `PythonAudioWorkerBridge` runs container + FFmpeg PCM verification before inserting into PostgreSQL.

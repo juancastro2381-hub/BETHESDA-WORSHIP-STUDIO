@@ -87,6 +87,7 @@ export class BethesdaApiClient {
   private static instance: BethesdaApiClient | null = null;
   public readonly baseUrl: string;
   private refreshPromise: Promise<AuthResponseData> | null = null;
+  private authFailureListeners: Set<(error: unknown) => void> = new Set();
 
   public constructor(config?: ApiClientConfig) {
     this.baseUrl = config?.baseUrl ?? (import.meta as any).env?.VITE_API_URL ?? '/api/v1';
@@ -97,6 +98,28 @@ export class BethesdaApiClient {
       BethesdaApiClient.instance = new BethesdaApiClient(config);
     }
     return BethesdaApiClient.instance;
+  }
+
+  /**
+   * Registra un listener notificado cuando una renovación automática de sesión (`refreshSession`)
+   * falla con un rechazo explícito del servidor (401/403) durante `fetchWithAuth`.
+   * Permite que `AuthProvider` invalide de inmediato el estado local obsoleto y redirija a login.
+   */
+  public registerAuthFailureListener(listener: (error: unknown) => void): () => void {
+    this.authFailureListeners.add(listener);
+    return () => {
+      this.authFailureListeners.delete(listener);
+    };
+  }
+
+  private notifyAuthFailure(error: unknown): void {
+    for (const listener of this.authFailureListeners) {
+      try {
+        listener(error);
+      } catch {
+        // Ignorar errores en listeners de UI
+      }
+    }
   }
 
   /**
@@ -143,8 +166,9 @@ export class BethesdaApiClient {
         // Reintentar la solicitud original con el nuevo token
         headers.set('Authorization', `Bearer ${refreshData.accessToken}`);
         response = await fetch(url, { ...requestInit, headers });
-      } catch {
+      } catch (refreshErr) {
         tokenManager.clearToken();
+        this.notifyAuthFailure(refreshErr);
       }
     }
 
@@ -199,8 +223,7 @@ export class BethesdaApiClient {
         });
 
         if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err?.error?.message ?? `Sesión expirada o no iniciada: HTTP ${res.status}`);
+          throw await ApiError.fromResponse(res);
         }
 
         const json = await res.json();
@@ -737,16 +760,29 @@ export class BethesdaApiClient {
     mimeType: string;
     dataBase64: string;
     durationSeconds?: number;
+    verifyWithWorker?: boolean;
+    idempotencyKey?: string;
   }): Promise<AudioAssetDTO> {
-    const res = await this.fetchWithAuth(`/songs/${params.songId}/audio`, {
+    const payload: Record<string, unknown> = {
+      title: params.title,
+      filename: params.filename,
+      mimeType: params.mimeType,
+      dataBase64: params.dataBase64,
+    };
+    if (typeof params.durationSeconds === 'number' && Number.isFinite(params.durationSeconds) && params.durationSeconds > 0) {
+      payload.durationSeconds = params.durationSeconds;
+    }
+    if (typeof params.verifyWithWorker === 'boolean') {
+      payload.verifyWithWorker = params.verifyWithWorker;
+    }
+    if (typeof params.idempotencyKey === 'string' && params.idempotencyKey.trim().length > 0) {
+      payload.idempotencyKey = params.idempotencyKey.trim();
+    }
+
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(params.songId)}/audio`, {
       method: 'POST',
-      body: JSON.stringify({
-        title: params.title,
-        filename: params.filename,
-        mimeType: params.mimeType,
-        dataBase64: params.dataBase64,
-        durationSeconds: params.durationSeconds,
-      }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       throw await ApiError.fromResponse(res);

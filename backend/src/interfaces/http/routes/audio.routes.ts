@@ -3,7 +3,8 @@
  * @description Endpoints RESTful para la gestión, streaming y descarga de activos de audio (Workstream A).
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import crypto from 'node:crypto';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { env } from '../../../config/env.ts';
 import { DrizzleAudioRepository } from '../../../repositories/audio-repository.ts';
@@ -13,19 +14,274 @@ import { AudioService } from '../../../application/audio-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
-import { UnauthorizedError, ForbiddenError } from '../../../domain/errors.ts';
+import { UnauthorizedError, ForbiddenError, ValidationError } from '../../../domain/errors.ts';
 import { ROLE_PERMISSIONS, type Permission, type UserRole } from '../../../domain/auth-types.ts';
 import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 import { globalPythonAudioWorkerBridge } from '../../../infrastructure/python-worker/python-audio-worker-bridge.ts';
 
+const AUDIO_UPLOAD_HTTP_BODY_LIMIT = 80 * 1024 * 1024; // 80 MiB (cubre 50 MiB binarios o ~67 MiB Base64)
+
 const UploadAudioBodySchema = z.object({
   title: z.string().min(1).max(255),
   filename: z.string().min(1).max(255),
-  mimeType: z.string().min(1).max(64),
+  mimeType: z.string().min(1).max(128),
   dataBase64: z.string().min(1, 'El contenido de audio en base64 no puede estar vacío'),
   durationSeconds: z.number().int().positive().optional(),
   verifyWithWorker: z.boolean().optional(),
+  idempotencyKey: z.string().min(1).max(128).optional(),
 });
+
+interface NormalizedAudioUploadInput {
+  readonly title: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly buffer: Buffer;
+  readonly durationSeconds?: number | undefined;
+  readonly verifyWithWorker?: boolean | undefined;
+  readonly idempotencyKey?: string | undefined;
+}
+
+function parseMultipartFormDataUpload(rawBuffer: Buffer, contentTypeHeader: string): NormalizedAudioUploadInput {
+  if (!Buffer.isBuffer(rawBuffer) || rawBuffer.length === 0) {
+    throw new ValidationError('El cuerpo multipart/form-data está vacío.', [
+      { field: 'body', message: 'El cuerpo multipart no puede estar vacío.' },
+    ]);
+  }
+
+  const boundaryMatch = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentTypeHeader);
+  const boundary = (boundaryMatch?.[1] ?? boundaryMatch?.[2] ?? '').trim();
+  if (!boundary) {
+    throw new ValidationError('Cabecera Content-Type multipart/form-data inválida: falta parámetro boundary.', [
+      { field: 'content-type', message: 'Falta parámetro boundary en multipart/form-data.' },
+    ]);
+  }
+
+  const delimiter = Buffer.from(`--${boundary}`, 'utf8');
+  const closeDelimiter = Buffer.from(`--${boundary}--`, 'utf8');
+  const headerSeparator = Buffer.from('\r\n\r\n', 'utf8');
+
+  if (rawBuffer.indexOf(delimiter) === -1 || rawBuffer.indexOf(closeDelimiter) === -1) {
+    throw new ValidationError('Cuerpo multipart/form-data malformado o incompleto (delimitadores ausentes).', [
+      { field: 'body', message: 'Delimitadores boundary de apertura o cierre no encontrados.' },
+    ]);
+  }
+
+  const fields: Record<string, string> = {};
+  let fileBuffer: Buffer | null = null;
+  let filePartFilename: string | undefined;
+  let filePartContentType: string | undefined;
+
+  let cursor = rawBuffer.indexOf(delimiter);
+  while (cursor !== -1) {
+    const partStart = cursor + delimiter.length;
+    if (rawBuffer.subarray(partStart, partStart + 2).equals(Buffer.from('--', 'utf8'))) {
+      break;
+    }
+
+    let contentOffset = partStart;
+    if (rawBuffer.subarray(contentOffset, contentOffset + 2).equals(Buffer.from('\r\n', 'utf8'))) {
+      contentOffset += 2;
+    } else if (rawBuffer[contentOffset] === 0x0a) {
+      contentOffset += 1;
+    }
+
+    const nextBoundaryIdx = rawBuffer.indexOf(delimiter, contentOffset);
+    if (nextBoundaryIdx === -1) {
+      throw new ValidationError('Cuerpo multipart/form-data truncado antes del delimitador de cierre.', [
+        { field: 'body', message: 'Parte multipart sin cierre de boundary.' },
+      ]);
+    }
+
+    const headerEndIdx = rawBuffer.indexOf(headerSeparator, contentOffset);
+    if (headerEndIdx === -1 || headerEndIdx >= nextBoundaryIdx) {
+      throw new ValidationError('Parte multipart/form-data malformada: faltan cabeceras de sección.', [
+        { field: 'body', message: 'Cabeceras de parte multipart ausentes o malformadas.' },
+      ]);
+    }
+
+    const rawHeaders = rawBuffer.subarray(contentOffset, headerEndIdx).toString('utf8');
+    let bodyEndIdx = nextBoundaryIdx;
+    if (
+      bodyEndIdx >= 2 &&
+      rawBuffer[bodyEndIdx - 2] === 0x0d &&
+      rawBuffer[bodyEndIdx - 1] === 0x0a
+    ) {
+      bodyEndIdx -= 2;
+    } else if (bodyEndIdx >= 1 && rawBuffer[bodyEndIdx - 1] === 0x0a) {
+      bodyEndIdx -= 1;
+    }
+
+    const partBody = rawBuffer.subarray(headerEndIdx + headerSeparator.length, bodyEndIdx);
+    const dispositionMatch = /content-disposition:\s*form-data;([^\r\n]+)/i.exec(rawHeaders);
+    if (!dispositionMatch) {
+      throw new ValidationError('Parte multipart/form-data sin cabecera Content-Disposition válida.', [
+        { field: 'body', message: 'Falta Content-Disposition: form-data.' },
+      ]);
+    }
+
+    const dispositionParams = dispositionMatch[1] ?? '';
+    const nameMatch = /\bname="([^"]+)"/i.exec(dispositionParams);
+    const fieldName = nameMatch?.[1]?.trim();
+    if (!fieldName) {
+      throw new ValidationError('Parte multipart/form-data sin atributo name.', [
+        { field: 'body', message: 'Atributo name requerido en Content-Disposition.' },
+      ]);
+    }
+
+    const filenameMatch = /\bfilename="([^"]*)"/i.exec(dispositionParams);
+    const partMimeMatch = /content-type:\s*([^\r\n;]+)/i.exec(rawHeaders);
+
+    if (filenameMatch !== null || fieldName === 'file' || fieldName === 'audio') {
+      if (fieldName !== 'file' && fieldName !== 'audio') {
+        throw new ValidationError(
+          `Campo de archivo multipart no reconocido: "${fieldName}". Use "file" o "audio".`,
+          [{ field: fieldName, message: 'El archivo binario debe enviarse en el campo "file" o "audio".' }]
+        );
+      }
+      fileBuffer = Buffer.from(partBody);
+      if (filenameMatch?.[1]?.trim()) {
+        filePartFilename = filenameMatch[1].trim();
+      }
+      if (partMimeMatch?.[1]?.trim()) {
+        filePartContentType = partMimeMatch[1].trim();
+      }
+    } else {
+      fields[fieldName] = partBody.toString('utf8').trim();
+    }
+
+    cursor = nextBoundaryIdx;
+  }
+
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new ValidationError('Formulario multipart/form-data inválido: falta el archivo binario ("file" o "audio").', [
+      { field: 'file', message: 'Se requiere un archivo de audio binario no vacío.' },
+    ]);
+  }
+
+  const resolvedFilename = (fields['filename'] || filePartFilename || '').trim();
+  if (!resolvedFilename || resolvedFilename.length > 255) {
+    throw new ValidationError('Falta el nombre de archivo ("filename") en la solicitud multipart.', [
+      { field: 'filename', message: 'El nombre de archivo es obligatorio (1-255 caracteres).' },
+    ]);
+  }
+
+  const resolvedTitle = (fields['title'] || resolvedFilename.replace(/\.[^/.]+$/, '') || resolvedFilename).trim();
+  if (!resolvedTitle || resolvedTitle.length > 255) {
+    throw new ValidationError('El título del activo de audio ("title") es inválido.', [
+      { field: 'title', message: 'El título es obligatorio (1-255 caracteres).' },
+    ]);
+  }
+
+  const resolvedMimeType = (fields['mimeType'] || filePartContentType || '').trim();
+  if (!resolvedMimeType || resolvedMimeType.length > 128) {
+    throw new ValidationError('Falta el tipo MIME ("mimeType") del archivo de audio.', [
+      { field: 'mimeType', message: 'El tipo MIME es obligatorio.' },
+    ]);
+  }
+
+  let durationSeconds: number | undefined;
+  if (fields['durationSeconds'] !== undefined && fields['durationSeconds'] !== '') {
+    const parsedDuration = Number(fields['durationSeconds']);
+    if (!Number.isInteger(parsedDuration) || parsedDuration <= 0) {
+      throw new ValidationError('El campo "durationSeconds" debe ser un entero positivo.', [
+        { field: 'durationSeconds', message: 'Debe ser un entero positivo.' },
+      ]);
+    }
+    durationSeconds = parsedDuration;
+  }
+
+  let verifyWithWorker: boolean | undefined;
+  if (fields['verifyWithWorker'] !== undefined && fields['verifyWithWorker'] !== '') {
+    if (fields['verifyWithWorker'] === 'true' || fields['verifyWithWorker'] === '1') {
+      verifyWithWorker = true;
+    } else if (fields['verifyWithWorker'] === 'false' || fields['verifyWithWorker'] === '0') {
+      verifyWithWorker = false;
+    } else {
+      throw new ValidationError('El campo "verifyWithWorker" debe ser booleano ("true" o "false").', [
+        { field: 'verifyWithWorker', message: 'Valor booleano inválido.' },
+      ]);
+    }
+  }
+
+  const idempotencyKey = fields['idempotencyKey']?.trim() || undefined;
+
+  return {
+    title: resolvedTitle,
+    filename: resolvedFilename,
+    mimeType: resolvedMimeType,
+    buffer: fileBuffer,
+    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+    ...(verifyWithWorker !== undefined ? { verifyWithWorker } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  };
+}
+
+function normalizeAudioUploadPayload(request: FastifyRequest): NormalizedAudioUploadInput {
+  const contentType = String(request.headers['content-type'] ?? '').toLowerCase().trim();
+
+  if (contentType.startsWith('multipart/form-data')) {
+    if (!Buffer.isBuffer(request.body)) {
+      throw new ValidationError('Cuerpo multipart/form-data inválido o ilegible.', [
+        { field: 'body', message: 'No se pudo procesar el flujo binario multipart.' },
+      ]);
+    }
+    return parseMultipartFormDataUpload(request.body, String(request.headers['content-type'] ?? ''));
+  }
+
+  let rawCandidate: unknown = request.body;
+  if (typeof rawCandidate === 'string') {
+    const trimmed = rawCandidate.trim();
+    if (!trimmed.startsWith('{')) {
+      throw new ValidationError(
+        'Los datos enviados en la solicitud no cumplen con el esquema requerido (se esperaba un objeto JSON o multipart/form-data).',
+        [{ field: 'body', message: 'Expected object, received string' }]
+      );
+    }
+    try {
+      rawCandidate = JSON.parse(trimmed);
+    } catch {
+      throw new ValidationError(
+        'El cuerpo de la solicitud contiene JSON malformado.',
+        [{ field: 'body', message: 'Invalid JSON payload' }]
+      );
+    }
+  }
+
+  const body = UploadAudioBodySchema.parse(rawCandidate);
+  const rawBase64 = body.dataBase64.includes(',')
+    ? body.dataBase64.slice(body.dataBase64.indexOf(',') + 1).trim()
+    : body.dataBase64.trim();
+
+  if (!rawBase64 || !/^[A-Za-z0-9+/=\s]+$/.test(rawBase64)) {
+    throw new ValidationError('El campo "dataBase64" contiene caracteres fuera del alfabeto Base64 estándar.', [
+      { field: 'dataBase64', message: 'Codificación Base64 inválida.' },
+    ]);
+  }
+
+  const buffer = Buffer.from(rawBase64, 'base64');
+  if (buffer.length === 0) {
+    throw new ValidationError('El contenido de audio decodificado está vacío.', [
+      { field: 'dataBase64', message: 'El buffer decodificado tiene 0 bytes.' },
+    ]);
+  }
+
+  const idempotencyHeader =
+    typeof request.headers['x-idempotency-key'] === 'string'
+      ? request.headers['x-idempotency-key'].trim()
+      : undefined;
+
+  return {
+    title: body.title,
+    filename: body.filename,
+    mimeType: body.mimeType,
+    buffer,
+    ...(body.durationSeconds !== undefined ? { durationSeconds: body.durationSeconds } : {}),
+    ...(body.verifyWithWorker !== undefined ? { verifyWithWorker: body.verifyWithWorker } : {}),
+    ...((body.idempotencyKey ?? idempotencyHeader)
+      ? { idempotencyKey: body.idempotencyKey ?? idempotencyHeader }
+      : {}),
+  };
+}
 
 const SongIdParamSchema = z.object({
   songId: z.string().uuid(),
@@ -61,6 +317,14 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   const authGuard = new AuthGuard(tokenService, userRepo);
 
   const audioService = globalAudioService;
+
+  fastify.addContentTypeParser(
+    'multipart/form-data',
+    { parseAs: 'buffer', bodyLimit: AUDIO_UPLOAD_HTTP_BODY_LIMIT },
+    (_req, body, done) => {
+      done(null, body);
+    }
+  );
 
   /**
    * Valida en tiempo real contra PostgreSQL que el usuario dueño del ticket o Bearer token
@@ -101,29 +365,79 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/songs/:songId/audio',
     {
+      bodyLimit: AUDIO_UPLOAD_HTTP_BODY_LIMIT,
       preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
+      const operationId = crypto.randomUUID();
       const { songId } = SongIdParamSchema.parse(request.params);
-      const body = UploadAudioBodySchema.parse(request.body);
-
-      const buffer = Buffer.from(body.dataBase64, 'base64');
+      const normalized = normalizeAudioUploadPayload(request);
       const userId = request.user?.sub;
 
-      const created = await audioService.uploadAudio({
-        songId,
-        title: body.title,
-        filename: body.filename,
-        mimeType: body.mimeType,
-        buffer,
-        durationSeconds: body.durationSeconds,
-        uploadedByUserId: userId,
-        verifyWithPythonWorker: body.verifyWithWorker,
-      });
+      request.log.info(
+        {
+          event: 'AUDIO_PRESERVATION_STARTED',
+          operationId,
+          requestId: request.id,
+          songId,
+          userId: userId ?? null,
+          filename: normalized.filename,
+          mimeType: normalized.mimeType,
+          declaredSizeBytes: normalized.buffer.length,
+        },
+        'Iniciando preservación de activo de audio (WS-AUDIO-01).'
+      );
 
-      return reply.status(201).send({
-        data: created,
-      });
+      try {
+        const created = await audioService.uploadAudio({
+          songId,
+          title: normalized.title,
+          filename: normalized.filename,
+          mimeType: normalized.mimeType,
+          buffer: normalized.buffer,
+          durationSeconds: normalized.durationSeconds,
+          uploadedByUserId: userId,
+          verifyWithPythonWorker: normalized.verifyWithWorker,
+          idempotencyKey: normalized.idempotencyKey,
+        });
+
+        request.log.info(
+          {
+            event: 'AUDIO_PRESERVATION_COMPLETED',
+            operationId,
+            requestId: request.id,
+            songId,
+            audioId: created.id,
+            userId: userId ?? null,
+            filename: created.filename,
+            mimeType: created.mimeType,
+            fileSizeBytes: created.fileSizeBytes,
+            checksumSha256: created.checksumSha256,
+          },
+          'Activo de audio preservado exitosamente.'
+        );
+
+        return reply.status(201).send({
+          data: created,
+        });
+      } catch (err) {
+        request.log.warn(
+          {
+            event: 'AUDIO_PRESERVATION_REJECTED',
+            operationId,
+            requestId: request.id,
+            songId,
+            userId: userId ?? null,
+            filename: normalized.filename,
+            mimeType: normalized.mimeType,
+            declaredSizeBytes: normalized.buffer.length,
+            errorCode: (err as { code?: string })?.code ?? 'UNKNOWN_ERROR',
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+          'Solicitud de preservación de audio rechazada o fallida.'
+        );
+        throw err;
+      }
     }
   );
 

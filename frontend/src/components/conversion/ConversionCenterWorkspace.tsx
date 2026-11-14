@@ -219,33 +219,63 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   }, []);
 
   const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
-    let binary = '';
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]!);
+    const chunkSize = 0x8000;
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength));
+      chunks.push(String.fromCharCode(...slice));
     }
-    return window.btoa(binary);
+    return window.btoa(chunks.join(''));
+  };
+
+  const inferAudioMimeTypeFromFilename = (filename: string, rawType?: string): string => {
+    const cleaned = (rawType ?? '').toLowerCase().split(';')[0]!.trim();
+    if (cleaned && cleaned !== 'application/octet-stream' && cleaned !== 'binary/octet-stream') {
+      return cleaned;
+    }
+    const lower = filename.toLowerCase().trim();
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.flac')) return 'audio/flac';
+    if (lower.endsWith('.ogg') || lower.endsWith('.opus')) return 'audio/ogg';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.aac')) return 'audio/aac';
+    return 'audio/mpeg';
   };
 
   const handlePreserveAudio = async () => {
-    if (!selectedFile || !fileRawBytes || !selectedSongId) return;
+    if (!selectedFile || !fileRawBytes) {
+      setErrorMessage('Seleccione un archivo de audio válido antes de preservar.');
+      return;
+    }
+    if (!user) {
+      setErrorMessage('Su sesión ha expirado o no ha iniciado sesión. Inicie sesión nuevamente para preservar audio.');
+      return;
+    }
+    const targetSong = songList.find((s) => s.id === selectedSongId);
+    if (!selectedSongId || !targetSong) {
+      setErrorMessage('Seleccione una canción válida del catálogo antes de preservar el audio.');
+      return;
+    }
     setIsPreservingAudio(true);
     setErrorMessage(null);
+    setAudioPreservationSuccess(null);
     try {
       const b64 = uint8ArrayToBase64(fileRawBytes);
+      const normalizedTitle = selectedFile.name.replace(/\.[^/.]+$/, '').trim() || selectedFile.name;
+      const resolvedMimeType = inferAudioMimeTypeFromFilename(selectedFile.name, selectedFile.type);
       const res = await client.uploadSongAudio({
         songId: selectedSongId,
-        title: selectedFile.name.replace(/\.[^/.]+$/, ''),
+        title: normalizedTitle,
         filename: selectedFile.name,
-        mimeType: selectedFile.type || 'audio/mpeg',
+        mimeType: resolvedMimeType,
         dataBase64: b64,
       });
-      const songTitle = songList.find((s) => s.id === selectedSongId)?.title;
       setAudioPreservationSuccess({
         audioId: res.id,
         checksumSha256: res.checksumSha256,
         filename: res.filename,
-        songTitle,
+        songTitle: targetSong.title,
       });
     } catch (err: any) {
       setErrorMessage(err?.message || 'Error al preservar el activo de audio.');
@@ -1100,6 +1130,24 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           </option>
                         ))}
                       </select>
+                    </div>
+                  )}
+
+                  {errorMessage && conversionStatus === 'IDLE' && (
+                    <div
+                      role="alert"
+                      style={{
+                        padding: '12px',
+                        background: 'rgba(239,68,68,0.15)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(239,68,68,0.4)',
+                        marginBottom: '12px',
+                        fontSize: '0.85rem',
+                        color: '#fca5a5',
+                      }}
+                    >
+                      <div>⚠️ <strong>No se pudo preservar el archivo de audio</strong></div>
+                      <div style={{ marginTop: '4px' }}>{errorMessage}</div>
                     </div>
                   )}
 

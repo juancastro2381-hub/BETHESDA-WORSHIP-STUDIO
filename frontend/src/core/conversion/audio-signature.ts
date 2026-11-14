@@ -126,16 +126,16 @@ export function parseMpegFrameHeader(bytes: Uint8Array, offset: number): MpegFra
   return { offset, versionId, layerId, bitrateKbps, sampleRateHz, channels, frameLength };
 }
 
-/** Retorna el tamaño total de la etiqueta ID3v2 (cabecera + cuerpo + pie opcional) o null si el encabezado es inválido. */
-export function parseId3v2TotalSize(bytes: Uint8Array): number | null {
-  if (bytes.length < 10) return null;
-  if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
-  if (bytes[3] === 0xff || bytes[4] === 0xff) return null; // versión/revisión inválidas
-  const flags = bytes[5]!;
-  const s0 = bytes[6]!;
-  const s1 = bytes[7]!;
-  const s2 = bytes[8]!;
-  const s3 = bytes[9]!;
+/** Retorna el tamaño total de la etiqueta ID3v2 en `offset` (cabecera + cuerpo + pie opcional) o null si el encabezado es inválido. */
+export function parseId3v2TotalSize(bytes: Uint8Array, offset = 0): number | null {
+  if (offset < 0 || offset + 10 > bytes.length) return null;
+  if (bytes[offset] !== 0x49 || bytes[offset + 1] !== 0x44 || bytes[offset + 2] !== 0x33) return null;
+  if (bytes[offset + 3] === 0xff || bytes[offset + 4] === 0xff) return null; // versión/revisión inválidas
+  const flags = bytes[offset + 5]!;
+  const s0 = bytes[offset + 6]!;
+  const s1 = bytes[offset + 7]!;
+  const s2 = bytes[offset + 8]!;
+  const s3 = bytes[offset + 9]!;
   if (((s0 | s1 | s2 | s3) & 0x80) !== 0) return null; // tamaño synchsafe: bit 7 siempre en 0
   const body = ((s0 & 0x7f) << 21) | ((s1 & 0x7f) << 14) | ((s2 & 0x7f) << 7) | (s3 & 0x7f);
   const footer = flags & 0x10 ? 10 : 0;
@@ -263,14 +263,25 @@ export function inspectAudioSignature(bytes: Uint8Array): AudioSignatureResult {
     );
   }
 
-  // 5. MP3 con etiqueta ID3v2
-  const id3Total = parseId3v2TotalSize(bytes);
-  if (id3Total !== null) {
-    const frame = findFirstMpegFrame(bytes, id3Total, 8192);
+  // 5. MP3 con etiqueta(s) ID3v2 (soporta hasta 4 etiquetas ID3v2 consecutivas y relleno posterior)
+  const firstId3 = parseId3v2TotalSize(bytes, 0);
+  if (firstId3 !== null) {
+    let totalId3 = firstId3;
+    for (let chain = 0; chain < 3 && totalId3 + 10 <= bytes.length; chain++) {
+      let zeroSkip = totalId3;
+      while (zeroSkip < bytes.length && zeroSkip - totalId3 < 256 && bytes[zeroSkip] === 0x00) {
+        zeroSkip++;
+      }
+      const nextId3 = parseId3v2TotalSize(bytes, zeroSkip);
+      if (nextId3 === null) break;
+      totalId3 = zeroSkip + nextId3;
+    }
+
+    const frame = findFirstMpegFrame(bytes, totalId3, 131072);
     if (frame) {
       return success('MP3', 'audio/mpeg', {
         hasId3v2: true,
-        id3TagSizeBytes: id3Total,
+        id3TagSizeBytes: totalId3,
         mpegFrameOffset: frame.offset,
         sampleRateHz: frame.sampleRateHz,
         channels: frame.channels,
@@ -280,7 +291,7 @@ export function inspectAudioSignature(bytes: Uint8Array): AudioSignatureResult {
     return failure(
       'Se detectó una cabecera ID3v2, pero no se encontró ninguna trama de audio MPEG válida después de la etiqueta. ' +
         'El archivo no es un MP3 reproducible (una cabecera ID3 por sí sola no constituye audio).',
-      { hasId3v2: true, id3TagSizeBytes: id3Total }
+      { hasId3v2: true, id3TagSizeBytes: totalId3 }
     );
   }
 
@@ -300,8 +311,8 @@ export function inspectAudioSignature(bytes: Uint8Array): AudioSignatureResult {
 
   // 7. MP3 sin ID3 (sincronización de trama MPEG cruda; se tolera relleno inicial de ceros)
   let skip = 0;
-  while (skip < 1024 && skip < bytes.length && bytes[skip] === 0x00) skip++;
-  const rawFrame = findFirstMpegFrame(bytes, skip, 64);
+  while (skip < 4096 && skip < bytes.length && bytes[skip] === 0x00) skip++;
+  const rawFrame = findFirstMpegFrame(bytes, skip, 4096);
   if (rawFrame) {
     return success('MP3', 'audio/mpeg', {
       mpegFrameOffset: rawFrame.offset,
@@ -329,11 +340,20 @@ export function hasAudioExtension(filename: string): boolean {
 export function audioFormatFamilyFromMime(mime: string | undefined | null): AudioFormat | 'GENERIC' | 'UNKNOWN' {
   const m = (mime ?? '').toLowerCase().split(';')[0]!.trim();
   if (!m || m === 'application/octet-stream' || m === 'binary/octet-stream') return 'GENERIC';
-  if (m === 'audio/mpeg' || m === 'audio/mp3' || m === 'audio/x-mpeg' || m === 'audio/mpeg3') return 'MP3';
+  if (
+    m === 'audio/mpeg' ||
+    m === 'audio/mp3' ||
+    m === 'audio/x-mp3' ||
+    m === 'audio/x-mpeg' ||
+    m === 'audio/mpeg3' ||
+    m === 'audio/x-mpeg-3'
+  ) {
+    return 'MP3';
+  }
   if (m === 'audio/wav' || m === 'audio/wave' || m === 'audio/x-wav' || m === 'audio/vnd.wave') return 'WAV';
   if (m === 'audio/flac' || m === 'audio/x-flac') return 'FLAC';
   if (m === 'audio/ogg' || m === 'audio/opus' || m === 'application/ogg' || m === 'audio/vorbis') return 'OGG';
-  if (m === 'audio/mp4' || m === 'audio/x-m4a' || m === 'audio/m4a') return 'M4A';
+  if (m === 'audio/mp4' || m === 'audio/x-m4a' || m === 'audio/m4a' || m === 'audio/mp4a-latm') return 'M4A';
   if (m === 'audio/aac' || m === 'audio/aacp') return 'AAC';
   return 'UNKNOWN';
 }

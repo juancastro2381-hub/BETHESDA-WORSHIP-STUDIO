@@ -33,6 +33,7 @@ export interface UploadAudioParams {
   readonly durationSeconds?: number | undefined;
   readonly uploadedByUserId?: string | undefined;
   readonly verifyWithPythonWorker?: boolean | undefined;
+  readonly idempotencyKey?: string | undefined;
 }
 
 export interface AudioUploadCompensationReport {
@@ -195,17 +196,47 @@ export interface AudioDownloadResponse {
 const ALLOWED_MIME_TYPES = new Set([
   'audio/mpeg',
   'audio/mp3',
+  'audio/x-mp3',
+  'audio/x-mpeg',
+  'audio/mpeg3',
+  'audio/x-mpeg-3',
   'audio/wav',
   'audio/wave',
   'audio/x-wav',
+  'audio/vnd.wave',
   'audio/ogg',
+  'audio/opus',
+  'audio/vorbis',
+  'application/ogg',
   'audio/mp4',
+  'audio/mp4a-latm',
   'audio/aac',
+  'audio/aacp',
   'audio/x-m4a',
   'audio/m4a',
   'audio/webm',
   'audio/flac',
+  'audio/x-flac',
 ]);
+
+const CANONICAL_MIME_MAP: Readonly<Record<string, string>> = {
+  'audio/mp3': 'audio/mpeg',
+  'audio/x-mp3': 'audio/mpeg',
+  'audio/x-mpeg': 'audio/mpeg',
+  'audio/mpeg3': 'audio/mpeg',
+  'audio/x-mpeg-3': 'audio/mpeg',
+  'audio/wave': 'audio/wav',
+  'audio/x-wav': 'audio/wav',
+  'audio/vnd.wave': 'audio/wav',
+  'audio/x-flac': 'audio/flac',
+  'application/ogg': 'audio/ogg',
+  'audio/vorbis': 'audio/ogg',
+  'audio/opus': 'audio/ogg',
+  'audio/x-m4a': 'audio/mp4',
+  'audio/m4a': 'audio/mp4',
+  'audio/mp4a-latm': 'audio/mp4',
+  'audio/aacp': 'audio/aac',
+};
 
 const ALLOWED_AUDIO_EXTENSIONS = new Set([
   '.mp3',
@@ -227,7 +258,7 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
     throw new ValidationError('El archivo es demasiado pequeño para contener una cabecera de audio válida.');
   }
 
-  const normalized = mimeType.toLowerCase().trim();
+  const normalized = mimeType.toLowerCase().split(';')[0]!.trim();
 
   // Caso especial: WebM (EBML container)
   if (normalized === 'audio/webm') {
@@ -247,6 +278,7 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
 
 export class AudioService {
   private readonly inFlightUploadPaths = new Set<string>();
+  private readonly inFlightUploadsByKey = new Map<string, Promise<AudioAsset>>();
   private readonly recoveryRecords = new Map<string, AudioStorageRecoveryRecord>();
   private readonly aliasToCanonicalId = new Map<string, string>();
   private readonly malformedAuditEntries = new Map<string, AudioMalformedRecoveryAuditEntry>();
@@ -881,7 +913,7 @@ export class AudioService {
    * también falla, preserva el error primario, adjunta telemetría y persiste un registro accionable de recuperación.
    */
   public async uploadAudio(params: UploadAudioParams): Promise<AudioAsset> {
-    const { songId, title, filename, mimeType, buffer, durationSeconds, uploadedByUserId } = params;
+    const { songId, title, filename, mimeType, buffer, durationSeconds, uploadedByUserId, idempotencyKey } = params;
 
     // 1. Validar existencia de la canción
     const song = await this.songRepo.findById(songId);
@@ -889,11 +921,12 @@ export class AudioService {
       throw new NotFoundError(`Canción con ID ${songId} no encontrada.`);
     }
 
-    // 2. Validar tipo MIME permitido
-    const normalizedMime = mimeType.toLowerCase().trim();
-    if (!ALLOWED_MIME_TYPES.has(normalizedMime)) {
+    // 2. Validar tipo MIME permitido (tolerando parámetros como "; codecs=...")
+    const strippedMime = mimeType.toLowerCase().split(';')[0]!.trim();
+    if (!ALLOWED_MIME_TYPES.has(strippedMime)) {
       throw new ValidationError(`Formato de audio no permitido o inválido: "${mimeType}".`);
     }
+    const normalizedMime = CANONICAL_MIME_MAP[strippedMime] ?? strippedMime;
 
     // 3. Validar tamaño del buffer
     if (!buffer || buffer.length === 0) {
@@ -907,146 +940,206 @@ export class AudioService {
     }
 
     // 4. Validar firma binaria (magic bytes) para prevenir falsificación MIME
-    validateAudioMagicBytes(buffer, normalizedMime);
+    validateAudioMagicBytes(buffer, strippedMime);
 
-    // 5. Guardar archivo físico de forma atómica e inmutable en el storage provider seguro
-    const saveResult = await this.storageProvider.save(filename, buffer);
-    this.inFlightUploadPaths.add(saveResult.storagePath);
+    const normalizedFilename = filename.trim();
+    const normalizedTitle = title.trim() || normalizedFilename;
+    const precomputedSha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const dedupeKey = idempotencyKey?.trim()
+      ? `idem::${songId}::${idempotencyKey.trim()}`
+      : `content::${songId}::${precomputedSha256}::${buffer.length}::${normalizedFilename}::${normalizedTitle}`;
 
-    try {
-      // 6. Verificación profunda opcional mediante worker local en Python
-      if (params.verifyWithPythonWorker) {
-        const fullPath = this.storageProvider.resolveSafePath(saveResult.storagePath);
-        await this.executeWorkerInspect(
-          `upload-${crypto.randomUUID()}`,
-          fullPath,
-          saveResult.checksumSha256
-        );
-      }
+    // 4b. Coalescencia single-flight ante reintentos o doble clic concurrente idéntico
+    const existingInFlight = this.inFlightUploadsByKey.get(dedupeKey);
+    if (existingInFlight) {
+      return await existingInFlight;
+    }
 
-      // 7. Persistir metadatos en la base de datos
-      const created = await this.audioRepo.create({
-        songId,
-        title: title.trim() || filename,
-        filename: filename.trim(),
-        storagePath: saveResult.storagePath,
-        mimeType: normalizedMime,
-        fileSizeBytes: saveResult.fileSizeBytes,
-        checksumSha256: saveResult.checksumSha256,
-        durationSeconds: durationSeconds && durationSeconds > 0 ? Math.floor(durationSeconds) : null,
-        uploadedByUserId: uploadedByUserId ?? null,
-      });
-
-      return created;
-    } catch (primaryError) {
-      const recordedAt = new Date().toISOString();
-      const primaryMessage =
-        primaryError instanceof Error ? primaryError.message : String(primaryError);
-
-      let cleanupError: unknown = null;
+    const executeUpload = async (): Promise<AudioAsset> => {
+      // 4c. Idempotencia ante reintento de una subida ya completada cuyo archivo físico sigue íntegro
       try {
-        await this.storageProvider.delete(saveResult.storagePath);
-      } catch (err) {
-        cleanupError = err;
+        const existingAssets = await this.audioRepo.findBySongId(songId);
+        const matchingAsset = existingAssets.find(
+          (asset) =>
+            asset.checksumSha256.toLowerCase() === precomputedSha256 &&
+            asset.fileSizeBytes === buffer.length &&
+            asset.filename.trim() === normalizedFilename &&
+            asset.title.trim() === normalizedTitle
+        );
+        if (matchingAsset) {
+          const existsOnDisk = await this.storageProvider
+            .exists(matchingAsset.storagePath)
+            .catch(() => false);
+          if (existsOnDisk) {
+            let integrityOk = true;
+            try {
+              const storedBuf = await this.storageProvider.getBuffer(matchingAsset.storagePath);
+              const storedHash = crypto.createHash('sha256').update(storedBuf).digest('hex');
+              if (
+                storedBuf.length !== matchingAsset.fileSizeBytes ||
+                storedHash.toLowerCase() !== matchingAsset.checksumSha256.toLowerCase()
+              ) {
+                integrityOk = false;
+              }
+            } catch {
+              integrityOk = false;
+            }
+            if (integrityOk) {
+              return matchingAsset;
+            }
+          }
+        }
+      } catch {
+        // Si el repositorio de prueba no implementa findBySongId o falla la consulta previa, continuar con el flujo normal
       }
 
-      const stillExists = await this.storageProvider
-        .exists(saveResult.storagePath)
-        .catch(() => true);
+      // 5. Guardar archivo físico de forma atómica e inmutable en el storage provider seguro
+      const saveResult = await this.storageProvider.save(filename, buffer);
+      this.inFlightUploadPaths.add(saveResult.storagePath);
 
-      const compensationSucceeded = !cleanupError && !stillExists;
-      let compensationErrorMsg: string | undefined;
-      let recoveryRecordId: string | undefined;
-      let persistedToAuditLog = false;
-      let durablyRecorded = false;
+      try {
+        // 6. Verificación profunda opcional mediante worker local en Python
+        if (params.verifyWithPythonWorker) {
+          const fullPath = this.storageProvider.resolveSafePath(saveResult.storagePath);
+          await this.executeWorkerInspect(
+            `upload-${crypto.randomUUID()}`,
+            fullPath,
+            saveResult.checksumSha256
+          );
+        }
 
-      if (!compensationSucceeded) {
-        compensationErrorMsg =
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : cleanupError !== null
-              ? String(cleanupError)
-              : 'El archivo físico permanece en disco tras intentar la limpieza compensatoria.';
-
-        const recoveryId = crypto.randomUUID();
-        recoveryRecordId = recoveryId;
-
-        const recoveryRecord: AudioStorageRecoveryRecord = {
-          id: recoveryId,
-          recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
-          status: 'PENDING_RECOVERY',
-          lifecycleState: 'RECOVERY_PENDING',
-          storagePath: saveResult.storagePath,
+        // 7. Persistir metadatos en la base de datos
+        const created = await this.audioRepo.create({
           songId,
-          filename: filename.trim(),
+          title: normalizedTitle,
+          filename: normalizedFilename,
+          storagePath: saveResult.storagePath,
           mimeType: normalizedMime,
-          checksumSha256: saveResult.checksumSha256,
           fileSizeBytes: saveResult.fileSizeBytes,
-          primaryError: primaryMessage,
-          secondaryError: compensationErrorMsg,
-          persistedToAuditLog: false,
-          durablyRecorded: false,
-          createdAt: recordedAt,
-        };
+          checksumSha256: saveResult.checksumSha256,
+          durationSeconds: durationSeconds && durationSeconds > 0 ? Math.floor(durationSeconds) : null,
+          uploadedByUserId: uploadedByUserId ?? null,
+        });
 
-        const auditResult = await this.persistAuditEvent(
-          'AUDIO_UPLOAD_COMPENSATION_FAILED',
-          uploadedByUserId ?? null,
-          saveResult.storagePath,
-          {
-            recoveryRecordId: recoveryId,
-            recoveryType: recoveryRecord.recoveryType,
-            status: recoveryRecord.status,
+        return created;
+      } catch (primaryError) {
+        const recordedAt = new Date().toISOString();
+        const primaryMessage =
+          primaryError instanceof Error ? primaryError.message : String(primaryError);
+
+        let cleanupError: unknown = null;
+        try {
+          await this.storageProvider.delete(saveResult.storagePath);
+        } catch (err) {
+          cleanupError = err;
+        }
+
+        const stillExists = await this.storageProvider
+          .exists(saveResult.storagePath)
+          .catch(() => true);
+
+        const compensationSucceeded = !cleanupError && !stillExists;
+        let compensationErrorMsg: string | undefined;
+        let recoveryRecordId: string | undefined;
+        let persistedToAuditLog = false;
+        let durablyRecorded = false;
+
+        if (!compensationSucceeded) {
+          compensationErrorMsg =
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : cleanupError !== null
+                ? String(cleanupError)
+                : 'El archivo físico permanece en disco tras intentar la limpieza compensatoria.';
+
+          const recoveryId = crypto.randomUUID();
+          recoveryRecordId = recoveryId;
+
+          const recoveryRecord: AudioStorageRecoveryRecord = {
+            id: recoveryId,
+            recoveryType: 'UPLOAD_COMPENSATION_ORPHAN',
+            status: 'PENDING_RECOVERY',
+            lifecycleState: 'RECOVERY_PENDING',
             storagePath: saveResult.storagePath,
             songId,
-            filename: recoveryRecord.filename,
+            filename: normalizedFilename,
             mimeType: normalizedMime,
             checksumSha256: saveResult.checksumSha256,
             fileSizeBytes: saveResult.fileSizeBytes,
             primaryError: primaryMessage,
-            compensationError: compensationErrorMsg,
-            recordedAt,
+            secondaryError: compensationErrorMsg,
+            persistedToAuditLog: false,
+            durablyRecorded: false,
+            createdAt: recordedAt,
+          };
+
+          const auditResult = await this.persistAuditEvent(
+            'AUDIO_UPLOAD_COMPENSATION_FAILED',
+            uploadedByUserId ?? null,
+            saveResult.storagePath,
+            {
+              recoveryRecordId: recoveryId,
+              recoveryType: recoveryRecord.recoveryType,
+              status: recoveryRecord.status,
+              storagePath: saveResult.storagePath,
+              songId,
+              filename: recoveryRecord.filename,
+              mimeType: normalizedMime,
+              checksumSha256: saveResult.checksumSha256,
+              fileSizeBytes: saveResult.fileSizeBytes,
+              primaryError: primaryMessage,
+              compensationError: compensationErrorMsg,
+              recordedAt,
+            }
+          );
+
+          persistedToAuditLog = auditResult.persisted;
+          durablyRecorded = auditResult.persisted;
+          recoveryRecord.persistedToAuditLog = auditResult.persisted;
+          recoveryRecord.durablyRecorded = auditResult.persisted;
+          if (auditResult.auditLogId) {
+            recoveryRecord.auditLogId = auditResult.auditLogId;
           }
-        );
-
-        persistedToAuditLog = auditResult.persisted;
-        durablyRecorded = auditResult.persisted;
-        recoveryRecord.persistedToAuditLog = auditResult.persisted;
-        recoveryRecord.durablyRecorded = auditResult.persisted;
-        if (auditResult.auditLogId) {
-          recoveryRecord.auditLogId = auditResult.auditLogId;
+          if (!auditResult.persisted) {
+            recoveryRecord.status = 'MANUAL_INTERVENTION_REQUIRED';
+            recoveryRecord.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
+            recoveryRecord.secondaryError = `${compensationErrorMsg} | AUDITORÍA NO DURABLE EN POSTGRESQL: ${
+              auditResult.error ?? 'Error desconocido al escribir audit_logs'
+            }`;
+          }
+          this.recoveryRecords.set(recoveryId, recoveryRecord);
         }
-        if (!auditResult.persisted) {
-          recoveryRecord.status = 'MANUAL_INTERVENTION_REQUIRED';
-          recoveryRecord.lifecycleState = 'MANUAL_INTERVENTION_REQUIRED';
-          recoveryRecord.secondaryError = `${compensationErrorMsg} | AUDITORÍA NO DURABLE EN POSTGRESQL: ${
-            auditResult.error ?? 'Error desconocido al escribir audit_logs'
-          }`;
+
+        const compensationReport: AudioUploadCompensationReport = {
+          attempted: true,
+          succeeded: compensationSucceeded,
+          storagePath: saveResult.storagePath,
+          checksumSha256: saveResult.checksumSha256,
+          fileSizeBytes: saveResult.fileSizeBytes,
+          ...(compensationErrorMsg ? { compensationError: compensationErrorMsg } : {}),
+          ...(recoveryRecordId ? { recoveryRecordId } : {}),
+          persistedToAuditLog,
+          durablyRecorded,
+          recordedAt,
+        };
+
+        if (primaryError && typeof primaryError === 'object') {
+          (primaryError as Error & { compensation?: AudioUploadCompensationReport }).compensation =
+            compensationReport;
         }
-        this.recoveryRecords.set(recoveryId, recoveryRecord);
+
+        throw primaryError;
+      } finally {
+        this.inFlightUploadPaths.delete(saveResult.storagePath);
       }
+    };
 
-      const compensationReport: AudioUploadCompensationReport = {
-        attempted: true,
-        succeeded: compensationSucceeded,
-        storagePath: saveResult.storagePath,
-        checksumSha256: saveResult.checksumSha256,
-        fileSizeBytes: saveResult.fileSizeBytes,
-        ...(compensationErrorMsg ? { compensationError: compensationErrorMsg } : {}),
-        ...(recoveryRecordId ? { recoveryRecordId } : {}),
-        persistedToAuditLog,
-        durablyRecorded,
-        recordedAt,
-      };
-
-      if (primaryError && typeof primaryError === 'object') {
-        (primaryError as Error & { compensation?: AudioUploadCompensationReport }).compensation =
-          compensationReport;
-      }
-
-      throw primaryError;
+    const uploadPromise = executeUpload();
+    this.inFlightUploadsByKey.set(dedupeKey, uploadPromise);
+    try {
+      return await uploadPromise;
     } finally {
-      this.inFlightUploadPaths.delete(saveResult.storagePath);
+      this.inFlightUploadsByKey.delete(dedupeKey);
     }
   }
 

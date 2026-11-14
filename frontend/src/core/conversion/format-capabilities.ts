@@ -14,6 +14,7 @@ import {
   type FormatCapabilityInfo,
   type SourceCapabilitySummary,
 } from './types.ts';
+import { hasAudioExtension, inspectAudioSignature } from './audio-signature.ts';
 
 export class FormatCapabilitiesEvaluator {
   /**
@@ -77,7 +78,7 @@ export class FormatCapabilitiesEvaluator {
         return 'IMAGE_SCORE';
       }
 
-      // 1.6 RIFF Container: WAV ('WAVE') o WebP ('WEBP')
+      // 1.6 RIFF Container: WebP (el audio WAV se valida en 1.7 mediante inspección estructural)
       if (
         content.length >= 12 &&
         content[0] === 0x52 &&
@@ -86,28 +87,12 @@ export class FormatCapabilitiesEvaluator {
         content[3] === 0x46
       ) {
         const subType = String.fromCharCode(content[8]!, content[9]!, content[10]!, content[11]!);
-        if (subType === 'WAVE') return 'AUDIO_RECORDING';
         if (subType === 'WEBP') return 'IMAGE_SCORE';
       }
 
-      // 1.7 Audio OGG ('OggS') o FLAC ('fLaC') o ID3 (MP3)
-      if (
-        content[0] === 0x4f &&
-        content[1] === 0x67 &&
-        content[2] === 0x67 &&
-        content[3] === 0x53
-      ) {
-        return 'AUDIO_RECORDING';
-      }
-      if (
-        content[0] === 0x66 &&
-        content[1] === 0x4c &&
-        content[2] === 0x61 &&
-        content[3] === 0x43
-      ) {
-        return 'AUDIO_RECORDING';
-      }
-      if (content[0] === 0x49 && content[1] === 0x44 && content[2] === 0x33) {
+      // 1.7 Audio (WS-AUDIO-01): inspección estructural de firmas binarias (MP3 con/sin ID3, WAV, FLAC, OGG, M4A/AAC).
+      // Una cabecera "ID3" aislada o una extensión .mp3 NO bastan para clasificar como audio.
+      if (inspectAudioSignature(content).valid) {
         return 'AUDIO_RECORDING';
       }
 
@@ -116,6 +101,7 @@ export class FormatCapabilitiesEvaluator {
         return 'UNKNOWN_UNSUPPORTED';
       }
     }
+
 
     // 2. Verificación por estructura de texto
     const textContent =
@@ -316,10 +302,11 @@ export class FormatCapabilitiesEvaluator {
           category: 'AUDIO_RECORDING',
           label: 'Grabación de Audio (MP3, WAV, M4A, FLAC, OGG)',
           state: 'PARTIALLY_SUPPORTED',
-          description: 'Archivo sonoro preservado con verificación criptográfica SHA-256.',
+          description: 'Archivo sonoro validado por su firma binaria y preservable con verificación criptográfica SHA-256.',
           canConvert: false,
+          canPreserve: true,
           advisoryNotice:
-            'Archivo de audio reconocido y preservado de forma duradera. Puede reproducir el archivo en el atril digital. La transcripción automática polifónica a partitura (Demucs / Basic Pitch / Whisper) está planificada para la Fase 2B sin servicios comerciales de terceros.',
+            'Audio reconocido por su firma binaria. Puede preservar el original de forma duradera en el servidor (verificado con SHA-256) y reproducirlo en el atril digital. La conversión automática de audio a partituras está planificada para la Fase 2B (WS-AUDIO): acordes/ChordPro (WS-AUDIO-02) y MIDI/MusicXML/Tablatura (WS-AUDIO-03) están autorizados en principio y se habilitarán solo tras aprobar su puerta de aceptación; todo resultado será un borrador con revisión humana obligatoria.',
         };
       case 'VIDEO_REFERENCE':
         return {
@@ -473,18 +460,25 @@ export class FormatCapabilitiesEvaluator {
       return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
     }
 
-    // 1. Fuentes de Audio o Video (Planificado Fase 2B)
+    // 1. Fuentes de Audio o Video: la conversión audio→notación NO está implementada (WS-AUDIO-02/03 pendientes de compuerta).
     if (isAudioOrVideo) {
-      const audioReason =
-        'La transcripción automática de audio a partitura (Basic Pitch / Demucs / Whisper.cpp) está planificada formalmente para Fase 2B con modelos locales sin servicios comerciales pagos.';
+      const isAudio = sourceCategory === 'AUDIO_RECORDING';
+      const audioReason = isAudio
+        ? 'La transcripción automática de audio a partituras está planificada para la Fase 2B (WS-AUDIO): acordes/ChordPro (WS-AUDIO-02) y MIDI/MusicXML/Tablatura (WS-AUDIO-03) están autorizados en principio y se habilitarán solo tras aprobar su puerta de aceptación. Todo resultado será un borrador con revisión humana obligatoria. Use «Preservar audio» para guardar y reproducir el original en el atril.'
+        : 'La extracción de audio y transcripción desde video está diferida para la Fase 2B.';
+      const plannedState = 'PLANNED_PHASE_2B';
       musicXmlCap.blockingReason = audioReason;
-      musicXmlCap.capabilityState = 'PLANNED_PHASE_2B';
+      musicXmlCap.capabilityState = plannedState;
       midiCap.blockingReason = audioReason;
-      midiCap.capabilityState = 'PLANNED_PHASE_2B';
+      midiCap.capabilityState = plannedState;
       chordProCap.blockingReason = audioReason;
-      chordProCap.capabilityState = 'PLANNED_PHASE_2B';
+      chordProCap.capabilityState = plannedState;
       lyricsCap.blockingReason = audioReason;
-      lyricsCap.capabilityState = 'PLANNED_PHASE_2B';
+      lyricsCap.capabilityState = plannedState;
+      if (isAudio) {
+        tabCap.blockingReason = audioReason;
+        tabCap.capabilityState = plannedState;
+      }
       return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
     }
 

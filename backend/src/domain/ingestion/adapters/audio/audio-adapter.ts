@@ -16,6 +16,10 @@ import { ValidationError } from '../../../errors.ts';
 import type { AuthenticatedUser } from '../../../auth-types.ts';
 import type { ISourceStorageProvider } from '../../source-storage-provider.ts';
 import { LocalFileSystemSourceStorageProvider } from '../../source-storage-provider.ts';
+import {
+  detectAudioFormatFromBytes as validatorDetectAudioFormat,
+  validateAudioBuffer,
+} from '../../../audio/audio-signature-validator.ts';
 import type {
   IIngestionAdapter,
   IngestionDiagnostic,
@@ -26,7 +30,7 @@ import type {
 export class AudioIngestionAdapter implements IIngestionAdapter {
   public readonly sourceType = 'AUDIO' as const;
   public readonly name = 'Bethesda Universal Audio Asset Importer';
-  public readonly version = '1.1.0';
+  public readonly version = '1.2.0';
 
   private readonly storageProvider: ISourceStorageProvider;
 
@@ -38,7 +42,7 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
     if (input.sourceType === 'AUDIO') return true;
     if (input.filename) {
       const ext = path.extname(input.filename).toLowerCase();
-      if (['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg'].includes(ext)) return true;
+      if (['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.opus'].includes(ext)) return true;
     }
     if (input.mimeType && input.mimeType.startsWith('audio/')) return true;
     return false;
@@ -46,66 +50,19 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
 
   public detectMimeType(buffer: Buffer): string {
     const info = AudioIngestionAdapter.detectAudioFormatFromBytes(buffer);
-    if (info.format === 'WAV') return 'audio/wav';
-    if (info.format === 'MP3') return 'audio/mpeg';
-    if (info.format === 'FLAC') return 'audio/flac';
-    if (info.format === 'M4A') return 'audio/mp4';
-    return 'audio/octet-stream';
+    return info.mimeType;
   }
 
   /**
    * Detecta y valida rigurosamente las firmas binarias de archivos de audio.
    * Rechaza categoricamente la suplantación MIME.
    */
-  public static detectAudioFormatFromBytes(buffer: Buffer): { format: string; durationEstimateSeconds?: number } {
-    if (!buffer || buffer.length < 12) {
-      throw new ValidationError('El buffer de audio es demasiado pequeño o está corrupto (< 12 bytes).');
-    }
-
-    // 1. WAV: 'RIFF' .... 'WAVE'
-    if (
-      buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && // RIFF
-      buffer[8] === 0x57 && buffer[9] === 0x41 && buffer[10] === 0x56 && buffer[11] === 0x45 // WAVE
-    ) {
-      let durationEstimate: number | undefined;
-      try {
-        const byteRate = buffer.readUInt32LE(28);
-        if (byteRate > 0) {
-          durationEstimate = Math.round((buffer.length - 44) / byteRate);
-        }
-      } catch {
-        // Ignorar fallo de estimación
-      }
-      return { format: 'WAV', durationEstimateSeconds: durationEstimate };
-    }
-
-    // 2. MP3: ID3v2 ('ID3') o sync word (0xFF 0xFB / 0xFF 0xF3 / 0xFF 0xF2 / 0xFF 0xFA)
-    if (
-      (buffer[0] === 0x49 && buffer[1] === 0x44 && buffer[2] === 0x33) ||
-      (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)
-    ) {
-      return { format: 'MP3' };
-    }
-
-    // 3. FLAC: 'fLaC' (0x66 0x4C 0x61 0x43)
-    if (
-      buffer[0] === 0x66 && buffer[1] === 0x4c && buffer[2] === 0x61 && buffer[3] === 0x43
-    ) {
-      return { format: 'FLAC' };
-    }
-
-    // 4. M4A/AAC: 'ftyp' en offset 4
-    if (
-      buffer.length >= 8 &&
-      buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70
-    ) {
-      return { format: 'M4A' };
-    }
-
-    // Si los bytes no coinciden con ninguna firma válida, RECHAZAR aunque el MIME declarado diga audio/
-    throw new ValidationError(
-      'Firma binaria de archivo de audio no reconocida o corrupta. El contenido del archivo no coincide con ningún formato de audio admitido (WAV, MP3, FLAC, M4A).'
-    );
+  public static detectAudioFormatFromBytes(buffer: Buffer): {
+    format: string;
+    mimeType: string;
+    durationEstimateSeconds?: number;
+  } {
+    return validatorDetectAudioFormat(buffer);
   }
 
   public async ingest(input: IngestionInput, _user: AuthenticatedUser): Promise<IngestionOutput> {
@@ -115,19 +72,8 @@ export class AudioIngestionAdapter implements IIngestionAdapter {
 
     const filename = input.filename || 'pista_audio.wav';
 
-    // 1. Validar firmas binarias reales (NO confiar solo en el MIME del cliente)
-    const audioInfo = AudioIngestionAdapter.detectAudioFormatFromBytes(input.buffer);
-
-    // 2. Si el cliente declaró un MIME explícito, verificar coherencia
-    if (input.mimeType && input.mimeType.startsWith('audio/')) {
-      const declared = input.mimeType.toLowerCase();
-      if (audioInfo.format === 'WAV' && !declared.includes('wav')) {
-        throw new ValidationError(`Inconsistencia MIME: el archivo contiene datos WAV pero se declaró como '${input.mimeType}'.`);
-      }
-      if (audioInfo.format === 'MP3' && !declared.includes('mpeg') && !declared.includes('mp3')) {
-        throw new ValidationError(`Inconsistencia MIME: el archivo contiene datos MP3 pero se declaró como '${input.mimeType}'.`);
-      }
-    }
+    // 1. Validar firmas binarias reales y coherencia con el MIME declarado (NO confiar solo en el MIME del cliente)
+    const audioInfo = validateAudioBuffer(input.buffer, input.mimeType);
 
     // 3. Preservar físicamente el archivo
     const saveResult = await this.storageProvider.save(filename, input.buffer);

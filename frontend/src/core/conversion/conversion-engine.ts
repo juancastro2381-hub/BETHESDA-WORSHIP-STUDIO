@@ -32,10 +32,12 @@ export class ConversionEngine {
   }
 
   /**
-   * Convierte un archivo musical en crudo (texto o buffer) hacia el formato objetivo solicitado.
+   * Convierte un archivo musical en crudo (texto o bytes) hacia el formato objetivo solicitado.
+   * WS-AUDIO-01: las fuentes binarias se reciben como `Uint8Array` y JAMÁS se reinterpretan como texto UTF-8;
+   * solo las categorías textuales (MusicXML, ChordPro, TXT, Tablatura, JSON) se decodifican.
    */
   public convertSource(
-    source: string,
+    source: string | Uint8Array,
     filename: string,
     options: ConversionOptions
   ): ConversionExportResult {
@@ -59,13 +61,14 @@ export class ConversionEngine {
       };
     }
 
-    // 2. Verificar si la fuente corresponde a categorías diferidas para fases posteriores
+    // 2. Fuentes diferidas / no convertibles todavía
     if (
       sourceCategory === 'AUDIO_RECORDING' ||
       sourceCategory === 'VIDEO_REFERENCE' ||
       sourceCategory === 'PDF_SCORE' ||
       sourceCategory === 'IMAGE_SCORE'
     ) {
+      const isAudio = sourceCategory === 'AUDIO_RECORDING';
       return {
         success: false,
         targetFormat: options.targetFormat,
@@ -76,14 +79,39 @@ export class ConversionEngine {
           {
             code: 'SOURCE_CATEGORY_DEFERRED_PHASE',
             severity: 'ERROR',
-            message: `La fuente de tipo "${sourceCategory}" requiere transcripción de audio (Demucs/Basic Pitch) u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
+            message: isAudio
+              ? 'La conversión de audio a notación aún no está disponible (WS-AUDIO-02/03 pendientes de su puerta de aceptación). El audio original puede preservarse y reproducirse sin conversión.'
+              : `La fuente de tipo "${sourceCategory}" requiere transcripción u OMR (Audiveris) diferidos formalmente para Fase 2B.`,
           },
         ],
       };
     }
 
-    // 2. Ingesta hacia CanonicalMusicPayload
-    const ingestionResult = this._importer.import(source, filename);
+    // 2b. Las fuentes binarias sin importador simbólico no pueden pasar por el importador de texto.
+    let textSource: string;
+    if (typeof source === 'string') {
+      textSource = source;
+    } else if (sourceCategory === 'STRUCTURED_MIDI') {
+      return {
+        success: false,
+        targetFormat: options.targetFormat,
+        filename: this.buildOutputFilename(filename, options.targetFormat),
+        mimeType: 'text/plain',
+        content: '',
+        diagnostics: [
+          {
+            code: 'UNSUPPORTED_FORMAT',
+            severity: 'ERROR',
+            message: `Formato no soportado para el archivo "${filename}": la importación binaria MIDI se realiza mediante el adaptador de ingesta del servidor, no por el motor de conversión de texto.`,
+          },
+        ],
+      };
+    } else {
+      textSource = new TextDecoder('utf-8', { fatal: false }).decode(source);
+    }
+
+    // 3. Ingesta hacia CanonicalMusicPayload
+    const ingestionResult = this._importer.import(textSource, filename);
 
     if (ingestionResult.status === 'FAILED' || !ingestionResult.payload) {
       return {

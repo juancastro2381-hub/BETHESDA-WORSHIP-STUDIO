@@ -34,4 +34,21 @@ backend/storage/outputs/*
 !backend/storage/outputs/.gitkeep
 /storage/
 
+# Python Virtual Environments & Worker Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+workers/**/.venv/
+workers/**/venv/
+workers/**/__pycache__/
+workers/**/models/
+workers/**/cache/
+workers/**/temp/
+
+
 

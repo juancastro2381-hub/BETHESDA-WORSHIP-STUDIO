@@ -176,7 +176,7 @@ export class ConversionJobService {
           viable: false,
           detectedCategory,
           errorCode: 'SOURCE_CATEGORY_DEFERRED_PHASE',
-          reason: `Conversión no disponible en Fase 2A: ${requestedCap?.blockingReason ?? 'Esta capacidad está planificada para la Fase 2B.'}`,
+          reason: `Conversión no disponible: ${requestedCap?.blockingReason ?? 'Esta capacidad aún no está implementada.'}`,
         };
       }
       return {
@@ -218,10 +218,9 @@ export class ConversionJobService {
       };
     }
 
-    const contentString =
-      typeof rawContent === 'string'
-        ? rawContent
-        : new TextDecoder('utf-8', { fatal: false }).decode(rawContent);
+    // WS-AUDIO-01: no se reinterpretan bytes como texto aquí; el motor decodifica solo categorías textuales.
+    const sourceForEngine: string | Uint8Array =
+      typeof rawContent === 'string' ? rawContent : new Uint8Array(rawContent);
 
     const conversionOpts: ConversionOptions = {
       targetFormat: input.targetFormat,
@@ -231,7 +230,7 @@ export class ConversionJobService {
       timeSignatureOverride: input.options?.timeSignatureOverride,
     };
 
-    const result = this.engine.convertSource(contentString, input.filename, conversionOpts);
+    const result = this.engine.convertSource(sourceForEngine, input.filename, conversionOpts);
 
     const isBinary = result.content instanceof Uint8Array;
     let data = '';

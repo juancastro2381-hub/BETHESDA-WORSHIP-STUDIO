@@ -728,6 +728,34 @@ export class BethesdaApiClient {
   // ============================================================================
 
   /**
+   * Sube un activo de audio asociado a una canción (WS-AUDIO-01).
+   */
+  public async uploadSongAudio(params: {
+    songId: string;
+    title: string;
+    filename: string;
+    mimeType: string;
+    dataBase64: string;
+    durationSeconds?: number;
+  }): Promise<AudioAssetDTO> {
+    const res = await this.fetchWithAuth(`/songs/${params.songId}/audio`, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: params.title,
+        filename: params.filename,
+        mimeType: params.mimeType,
+        dataBase64: params.dataBase64,
+        durationSeconds: params.durationSeconds,
+      }),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
    * Obtiene la lista de pistas de audio asociadas a una canción (Workstream A).
    */
   public async getSongAudioAssets(songId: string): Promise<AudioAssetDTO[]> {

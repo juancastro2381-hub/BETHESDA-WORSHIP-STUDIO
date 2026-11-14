@@ -1365,7 +1365,7 @@ export class ConversionWorker {
         };
       }
 
-      const contentString = new TextDecoder('utf-8', { fatal: false }).decode(sourceBuffer);
+      // WS-AUDIO-01: el buffer permanece binario; el motor solo decodifica categorías textuales.
       await this.updateProgressFenced(jobId, executionToken, 70);
 
       // -----------------------------------------------------------------------
@@ -1379,7 +1379,7 @@ export class ConversionWorker {
         await this.onStageReached('STAGE_C', jobId);
       }
 
-      const exportResult = this.engine.convertSource(contentString, filename, {
+      const exportResult = this.engine.convertSource(new Uint8Array(sourceBuffer), filename, {
         targetFormat,
         transposeSemitones: options?.transposeSemitones,
         keyOverride: options?.keyOverride,

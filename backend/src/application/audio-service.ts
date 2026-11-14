@@ -5,11 +5,13 @@
  * persistencia en BD y streaming conforme con soporte estricto de HTTP Range (RFC 7233 / 9110).
  */
 
+import crypto from 'node:crypto';
 import { type IAudioRepository } from '../repositories/audio-repository.ts';
 import { type IAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { type ISongRepository } from '../repositories/song-repository.ts';
 import { type AudioAsset } from '../db/schema.ts';
 import { ValidationError, NotFoundError, RangeNotSatisfiableError } from '../domain/errors.ts';
+import { validateAudioBuffer } from '../domain/audio/audio-signature-validator.ts';
 
 export interface UploadAudioParams {
   readonly songId: string;
@@ -60,74 +62,7 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
 
   const normalized = mimeType.toLowerCase().trim();
 
-  // 1. WAV: Comienza con 'RIFF' o 'RIFX' y contiene 'WAVE' en los primeros bytes
-  if (normalized === 'audio/wav' || normalized === 'audio/wave' || normalized === 'audio/x-wav') {
-    const isRiff =
-      buffer.subarray(0, 4).toString('ascii') === 'RIFF' ||
-      buffer.subarray(0, 4).toString('ascii') === 'RIFX';
-    const hasWave = buffer.subarray(0, 32).includes(Buffer.from('WAVE'));
-    if (!isRiff || !hasWave) {
-      throw new ValidationError(
-        'El archivo no posee una firma válida de audio WAV (falta encabezado RIFF/WAVE). Posible falsificación MIME.'
-      );
-    }
-    return;
-  }
-
-  // 2. MP3 / MPEG: ID3v2 ('ID3') o Frame Sync (0xFF seguido de bits 111xxxxx)
-  if (normalized === 'audio/mpeg' || normalized === 'audio/mp3') {
-    const isId3 = buffer.subarray(0, 3).toString('ascii') === 'ID3';
-    const isSync = buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xe0) === 0xe0;
-    if (!isId3 && !isSync) {
-      throw new ValidationError(
-        'El archivo no posee una firma válida de audio MP3 (falta cabecera ID3 o sincronización de tramas MPEG). Posible falsificación MIME.'
-      );
-    }
-    return;
-  }
-
-  // 3. OGG: 'OggS'
-  if (normalized === 'audio/ogg') {
-    const isOgg = buffer.subarray(0, 4).toString('ascii') === 'OggS';
-    if (!isOgg) {
-      throw new ValidationError(
-        'El archivo no posee una firma válida de audio OGG (falta encabezado OggS). Posible falsificación MIME.'
-      );
-    }
-    return;
-  }
-
-  // 4. FLAC: 'fLaC'
-  if (normalized === 'audio/flac') {
-    const isFlac = buffer.subarray(0, 4).toString('ascii') === 'fLaC';
-    if (!isFlac) {
-      throw new ValidationError(
-        'El archivo no posee una firma válida de audio FLAC (falta encabezado fLaC). Posible falsificación MIME.'
-      );
-    }
-    return;
-  }
-
-  // 5. MP4 / M4A / AAC: caja 'ftyp' o sync ADTS (0xFFF)
-  if (
-    normalized === 'audio/mp4' ||
-    normalized === 'audio/m4a' ||
-    normalized === 'audio/x-m4a' ||
-    normalized === 'audio/aac'
-  ) {
-    const hasFtyp =
-      (buffer.length >= 8 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') ||
-      buffer.subarray(0, 4).toString('ascii') === 'ftyp';
-    const isAdts = buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xf6) === 0xf0;
-    if (!hasFtyp && !isAdts) {
-      throw new ValidationError(
-        'El archivo no posee una firma válida de audio MP4/M4A/AAC (falta contenedor ftyp o tramas ADTS). Posible falsificación MIME.'
-      );
-    }
-    return;
-  }
-
-  // 6. WebM: EBML header (0x1A 0x45 0xDF 0xA3)
+  // Caso especial: WebM (EBML container)
   if (normalized === 'audio/webm') {
     const isEbml =
       buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3;
@@ -139,7 +74,8 @@ export function validateAudioMagicBytes(buffer: Buffer, mimeType: string): void 
     return;
   }
 
-  throw new ValidationError(`Tipo MIME de audio no reconocido para validación de firma: ${mimeType}`);
+  // Validación binaria profunda universal (MP3 con/sin ID3, WAV, FLAC, OGG, M4A, AAC)
+  validateAudioBuffer(buffer, normalized);
 }
 
 export class AudioService {
@@ -348,11 +284,19 @@ export class AudioService {
   }
 
   /**
-   * Obtiene la descarga binaria completa de un audio.
+   * Obtiene la descarga binaria completa de un audio con verificación criptográfica SHA-256.
    */
   public async downloadAudio(audioId: string): Promise<AudioDownloadResponse> {
     const asset = await this.getAudioById(audioId);
     const buffer = await this.storageProvider.getBuffer(asset.storagePath);
+
+    // Re-verificación de integridad física SHA-256
+    const calculatedHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    if (calculatedHash !== asset.checksumSha256) {
+      throw new ValidationError(
+        `Integridad física comprometida: el hash SHA-256 verificado (${calculatedHash}) no coincide con el registro original (${asset.checksumSha256}).`
+      );
+    }
 
     return {
       buffer,

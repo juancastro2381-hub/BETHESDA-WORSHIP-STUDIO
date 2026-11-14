@@ -75,7 +75,36 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const [savedToCatalog, setSavedToCatalog] = useState<boolean>(false);
   const [savingCatalog, setSavingCatalog] = useState<boolean>(false);
 
+  // Estado de Preservación de Audio para el Atril Digital (WS-AUDIO-01)
+  const [songList, setSongList] = useState<Array<{ id: string; title: string }>>([]);
+  const [selectedSongId, setSelectedSongId] = useState<string>('');
+  const [isPreservingAudio, setIsPreservingAudio] = useState<boolean>(false);
+  const [audioPreservationSuccess, setAudioPreservationSuccess] = useState<{
+    audioId: string;
+    checksumSha256: string;
+    filename: string;
+    songTitle?: string | undefined;
+  } | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Cargar lista de canciones para vincular audio si el usuario está autenticado
+  useEffect(() => {
+    if (sourceCategory === 'AUDIO_RECORDING' && user) {
+      client
+        .listSongs({ limit: 50 })
+        .then((res) => {
+          if (res && res.items) {
+            const mapped = res.items.map((s) => ({ id: s.id, title: s.title }));
+            setSongList(mapped);
+            if (mapped.length > 0 && !selectedSongId) {
+              setSelectedSongId(mapped[0]!.id);
+            }
+          }
+        })
+        .catch((e) => console.warn('No se pudo cargar la lista de canciones para preservación de audio:', e));
+    }
+  }, [sourceCategory, user, client, selectedSongId]);
 
   // Evaluar capacidades ante cambio de archivo
   useEffect(() => {
@@ -183,6 +212,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setActiveJobId(null);
     setProgress(0);
     setErrorMessage(null);
+    setAudioPreservationSuccess(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -195,6 +225,33 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       binary += String.fromCharCode(bytes[i]!);
     }
     return window.btoa(binary);
+  };
+
+  const handlePreserveAudio = async () => {
+    if (!selectedFile || !fileRawBytes || !selectedSongId) return;
+    setIsPreservingAudio(true);
+    setErrorMessage(null);
+    try {
+      const b64 = uint8ArrayToBase64(fileRawBytes);
+      const res = await client.uploadSongAudio({
+        songId: selectedSongId,
+        title: selectedFile.name.replace(/\.[^/.]+$/, ''),
+        filename: selectedFile.name,
+        mimeType: selectedFile.type || 'audio/mpeg',
+        dataBase64: b64,
+      });
+      const songTitle = songList.find((s) => s.id === selectedSongId)?.title;
+      setAudioPreservationSuccess({
+        audioId: res.id,
+        checksumSha256: res.checksumSha256,
+        filename: res.filename,
+        songTitle,
+      });
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Error al preservar el activo de audio.');
+    } finally {
+      setIsPreservingAudio(false);
+    }
   };
 
   // Polling autoritativo del progreso del trabajo en el backend (CR-01)
@@ -721,6 +778,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
               ? `⚠️ Soporte Parcial (${sourceSummary.label})`
               : sourceSummary?.state === 'NOT_SUPPORTED'
               ? `❌ No Soportado (${sourceSummary.label})`
+              : sourceSummary?.state === 'PLANNED_AUDIO_WORKSTREAM'
+              ? `🎙️ Preservación de Audio Disponible (WS-AUDIO-01)`
               : `⏱️ Planificado Fase 2B (${sourceSummary?.label})`}
           </span>
         </div>
@@ -754,14 +813,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   Arrastre su archivo musical aquí o <span className="highlight-browse">examine</span>
                 </div>
                 <div className="dropzone-secondary-text">
-                  Formatos soportados: MusicXML (.musicxml, .xml), MIDI (.mid), ChordPro (.cho, .crd), PDF, Imagen, Audio
+                  Formatos soportados: MusicXML (.musicxml, .xml), MIDI (.mid), ChordPro (.cho, .crd), PDF, Imagen, Audio (MP3, WAV, FLAC, OGG, M4A)
                 </div>
                 <input
                   type="file"
                   ref={fileInputRef}
                   style={{ display: 'none' }}
                   onChange={handleFileInputChange}
-                  accept=".musicxml,.xml,.mxl,.mid,.midi,.cho,.chordpro,.crd,.pro,.pdf,.png,.jpg,.jpeg,.mp3,.wav,.m4a"
+                  accept=".musicxml,.xml,.mxl,.mid,.midi,.cho,.chordpro,.crd,.pro,.pdf,.png,.jpg,.jpeg,.mp3,.wav,.m4a,.flac,.ogg,.aac"
                 />
               </div>
             ) : (
@@ -1004,37 +1063,127 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </div>
               </div>
 
-              {!canConvert && (
-                <div className="conversion-disabled-notice">
-                  🚫 <strong>Conversión no disponible para este tipo de archivo:</strong>{' '}
-                  {sourceSummary?.advisoryNotice ||
-                    'Este formato está reservado para preservación o planificado para la Fase 2B.'}
-                </div>
-              )}
+              {sourceCategory === 'AUDIO_RECORDING' ? (
+                <div
+                  className="audio-preservation-panel"
+                  style={{
+                    marginTop: '16px',
+                    padding: '16px',
+                    background: 'rgba(255,255,255,0.04)',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                  }}
+                >
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '1rem', color: '#60a5fa' }}>
+                    🎙️ Preservación y Streaming en Atril Digital (WS-AUDIO-01)
+                  </h4>
+                  <p style={{ margin: '0 0 12px 0', fontSize: '0.875rem', color: '#94a3b8' }}>
+                    El archivo de audio se almacenará de manera inmutable con verificación criptográfica SHA-256
+                    para su reproducción directa en el Atril Digital mediante streaming autenticado con soporte HTTP Range.
+                  </p>
 
-              {canConvert && !isTargetAvailable && (
-                <div className="conversion-disabled-notice">
-                  ⚠️ <strong>Formato objetivo no disponible:</strong>{' '}
-                  {currentTargetCap?.blockingReason ||
-                    'El formato seleccionado no es viable para la fuente actual.'}
-                </div>
-              )}
+                  {songList.length > 0 && (
+                    <div className="option-field" style={{ marginBottom: '12px' }}>
+                      <label htmlFor="audio-target-song" className="option-label">
+                        Asociar a Canción del Catálogo:
+                      </label>
+                      <select
+                        id="audio-target-song"
+                        className="option-input"
+                        value={selectedSongId}
+                        onChange={(e) => setSelectedSongId(e.target.value)}
+                        disabled={isPreservingAudio}
+                      >
+                        {songList.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.title}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
 
-              {/* Botón de Iniciar Conversión */}
-              <button
-                type="button"
-                className="btn-execute-conversion"
-                onClick={handleStartConversion}
-                disabled={conversionStatus === 'PROCESSING' || !canConvert || !isTargetAvailable}
-              >
-                {conversionStatus === 'PROCESSING'
-                  ? '⚙️ Procesando...'
-                  : !canConvert
-                  ? '🚫 Conversión no disponible (Planificado Fase 2B)'
-                  : !isTargetAvailable
-                  ? '🚫 Formato Objetivo No Disponible'
-                  : '🚀 Convertir Archivo'}
-              </button>
+                  {audioPreservationSuccess && (
+                    <div
+                      style={{
+                        padding: '12px',
+                        background: 'rgba(34,197,94,0.15)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(34,197,94,0.4)',
+                        marginBottom: '12px',
+                        fontSize: '0.85rem',
+                      }}
+                    >
+                      <div>✅ <strong>Audio preservado con éxito en el servidor</strong></div>
+                      <div>SHA-256: <code style={{ fontSize: '0.75rem' }}>{audioPreservationSuccess.checksumSha256}</code></div>
+                      <div>Canción destino: <strong>{audioPreservationSuccess.songTitle || 'Catálogo'}</strong></div>
+                      {onClose && (
+                        <button
+                          type="button"
+                          className="btn-action-primary"
+                          style={{ marginTop: '8px', padding: '6px 12px', background: '#16a34a', border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer' }}
+                          onClick={onClose}
+                        >
+                          🎵 Abrir Canción en el Atril Digital
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="btn-execute-conversion"
+                    onClick={handlePreserveAudio}
+                    disabled={isPreservingAudio || !user || songList.length === 0}
+                    style={{
+                      background: '#2563eb',
+                      cursor: isPreservingAudio || !user || songList.length === 0 ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {isPreservingAudio
+                      ? '💾 Preservando en Servidor...'
+                      : !user
+                      ? '🔒 Inicie sesión para preservar'
+                      : songList.length === 0
+                      ? '⚠️ Sin canciones disponibles en el catálogo'
+                      : '💾 Preservar Audio para el Atril Digital'}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {!canConvert && (
+                    <div className="conversion-disabled-notice">
+                      🚫 <strong>Conversión no disponible para este tipo de archivo:</strong>{' '}
+                      {sourceSummary?.advisoryNotice ||
+                        'Este formato está reservado para preservación o planificado para la Fase 2B.'}
+                    </div>
+                  )}
+
+                  {canConvert && !isTargetAvailable && (
+                    <div className="conversion-disabled-notice">
+                      ⚠️ <strong>Formato objetivo no disponible:</strong>{' '}
+                      {currentTargetCap?.blockingReason ||
+                        'El formato seleccionado no es viable para la fuente actual.'}
+                    </div>
+                  )}
+
+                  {/* Botón de Iniciar Conversión */}
+                  <button
+                    type="button"
+                    className="btn-execute-conversion"
+                    onClick={handleStartConversion}
+                    disabled={conversionStatus === 'PROCESSING' || !canConvert || !isTargetAvailable}
+                  >
+                    {conversionStatus === 'PROCESSING'
+                      ? '⚙️ Procesando...'
+                      : !canConvert
+                      ? '🚫 Conversión no disponible (Planificado Fase 2B)'
+                      : !isTargetAvailable
+                      ? '🚫 Formato Objetivo No Disponible'
+                      : '🚀 Convertir Archivo'}
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

@@ -13,7 +13,7 @@ import { AudioService } from '../../../application/audio-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
-import { UnauthorizedError } from '../../../domain/errors.ts';
+import { UnauthorizedError, ForbiddenError } from '../../../domain/errors.ts';
 import { ROLE_PERMISSIONS, type UserRole } from '../../../domain/auth-types.ts';
 import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 
@@ -50,7 +50,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/songs/:songId/audio',
     {
-      preHandler: [authGuard.requirePermission('songs:create')],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const { songId } = SongIdParamSchema.parse(request.params);
@@ -79,7 +79,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/songs/:songId/audio',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { songId } = SongIdParamSchema.parse(request.params);
@@ -95,7 +95,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/audio/:id/download',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
@@ -118,7 +118,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/audio/:id',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
@@ -134,7 +134,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/audio/:id/ticket',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
@@ -206,14 +206,27 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // 5. DELETE /api/v1/audio/:id - Eliminar activo de audio físico y en BD
+  // 5. DELETE /api/v1/audio/:id - Eliminar activo de audio físico y en BD (Control Anti-IDOR)
   fastify.delete(
     '/audio/:id',
     {
-      preHandler: [authGuard.requirePermission('songs:update_draft')],
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
     },
     async (request, reply) => {
       const { id } = AudioIdParamSchema.parse(request.params);
+      const user = request.user!;
+
+      // Anti-IDOR: verificar propiedad o privilegios de administración
+      const asset = await audioService.getAudioById(id);
+      const isPrivileged = user.role === 'SUPER_ADMIN' || user.role === 'WORSHIP_LEADER';
+      const isOwner = asset.uploadedByUserId === user.sub;
+
+      if (!isPrivileged && !isOwner) {
+        throw new ForbiddenError(
+          'No tiene autorización para eliminar un recurso de audio registrado por otro usuario.'
+        );
+      }
+
       const deleted = await audioService.deleteAudio(id);
 
       if (!deleted) {

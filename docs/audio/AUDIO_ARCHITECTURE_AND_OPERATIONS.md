@@ -276,3 +276,4 @@ backend/
 | `ValidationError: File content does not match audio signature` | User attempted to upload a file with an audio extension but non-audio magic bytes. | Reject file; advise user to verify file validity. |
 | `ForbiddenError: You can only delete audio assets that you uploaded` | Non-admin user attempted to delete an asset uploaded by another user. | Normal security behavior (Anti-IDOR). Request worship leader or admin to remove. |
 | `Subprocess timed out after 30000ms` | Extremely large audio file or slow disk I/O during PCM decode test. | Worker was killed safely. Check disk performance or adjust timeout setting if processing massive multi-hour multitracks. |
+

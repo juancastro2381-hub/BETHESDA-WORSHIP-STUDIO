@@ -124,3 +124,4 @@ The Python worker runs as an isolated helper subprocess:
 - **Security Logging**: All integrity check failures and Anti-IDOR rejections are logged at `WARN`/`ERROR` level with request IP, user ID, asset ID, and timestamp.
 - **Corrupted Asset Quarantine**: If an `IntegrityError` is triggered, an administrative alert is generated to notify the system administrator to investigate disk health or restore from backup.
 - **Revocation Propagation**: When a user account is deactivated in the administrative console, the real-time active check terminates their audio streaming capability on the very next HTTP request.
+

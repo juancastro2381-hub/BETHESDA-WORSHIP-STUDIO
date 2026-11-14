@@ -16,9 +16,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { ValidationError } from '../../domain/errors.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const DISALLOWED_PROTOCOL_PREFIX_RE = /^(?:https?|ftps?|sftp|rtmps?|rtsp|tcp|udp|tls|file|pipe|concat|subfile|data|crypto):/i;
+const SHA256_HEX_RE = /^[0-9a-fA-F]{64}$/;
 
 export interface PythonWorkerPingResult {
   readonly status: string;
@@ -57,6 +61,7 @@ export interface InspectAudioOptions {
   readonly derivativeWavPath?: string;
   readonly timeoutMs?: number;
   readonly onProgress?: WorkerProgressCallback;
+  readonly signal?: AbortSignal;
 }
 
 export class PythonWorkerError extends Error {
@@ -139,6 +144,46 @@ export class PythonAudioWorkerBridge {
     expectedSha256: string,
     options: InspectAudioOptions = {}
   ): Promise<PythonWorkerInspectResult> {
+    if (!sourcePath || typeof sourcePath !== 'string' || sourcePath.includes('\0')) {
+      throw new ValidationError('Ruta de audio fuente inválida (vacía o contiene byte nulo).');
+    }
+
+    if (DISALLOWED_PROTOCOL_PREFIX_RE.test(sourcePath.trim())) {
+      throw new ValidationError(
+        `Ruta de audio fuente rechazada: no se permiten URIs o protocolos externos (${sourcePath}).`
+      );
+    }
+
+    if (!SHA256_HEX_RE.test(expectedSha256)) {
+      throw new ValidationError(
+        'Checksum SHA-256 esperado inválido: debe ser una cadena hexadecimal de 64 caracteres.'
+      );
+    }
+
+    const resolvedSource = path.resolve(sourcePath);
+
+    let resolvedDerivative: string | undefined;
+    if (options.derivativeWavPath !== undefined) {
+      if (!options.derivativeWavPath || options.derivativeWavPath.includes('\0')) {
+        throw new ValidationError('Ruta de archivo derivado WAV inválida (vacía o contiene byte nulo).');
+      }
+      if (DISALLOWED_PROTOCOL_PREFIX_RE.test(options.derivativeWavPath.trim())) {
+        throw new ValidationError(
+          'Ruta de archivo derivado WAV rechazada: no se permiten URIs o protocolos externos.'
+        );
+      }
+      resolvedDerivative = path.resolve(options.derivativeWavPath);
+      if (resolvedDerivative === resolvedSource) {
+        throw new ValidationError(
+          'Violación de inmutabilidad: derivativeWavPath no puede coincidir con el archivo fuente original.'
+        );
+      }
+    }
+
+    if (options.signal?.aborted) {
+      throw new ValidationError('Ejecución del worker de audio cancelada por AbortSignal.');
+    }
+
     const pythonExe = this.resolvePythonExecutable();
     const timeoutMs = options.timeoutMs ?? 30000;
 
@@ -146,16 +191,17 @@ export class PythonAudioWorkerBridge {
       contractVersion: '1.0',
       jobId,
       command: 'INSPECT_AND_VERIFY_AUDIO',
-      sourcePath: path.resolve(sourcePath),
+      sourcePath: resolvedSource,
       expectedSha256,
-      ...(options.derivativeWavPath ? { derivativeWavPath: path.resolve(options.derivativeWavPath) } : {}),
+      ...(resolvedDerivative ? { derivativeWavPath: resolvedDerivative } : {}),
     };
 
     const data = await this.executeSubprocess(
       pythonExe,
       requestPayload,
       timeoutMs,
-      options.onProgress
+      options.onProgress,
+      options.signal
     );
 
     return data as unknown as PythonWorkerInspectResult;
@@ -165,18 +211,47 @@ export class PythonAudioWorkerBridge {
     pythonExe: string,
     requestPayload: Record<string, unknown>,
     timeoutMs: number,
-    onProgress?: WorkerProgressCallback
+    onProgress?: WorkerProgressCallback,
+    signal?: AbortSignal
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let isSettled = false;
       let timer: NodeJS.Timeout | null = null;
       let childStdout = '';
       let childStderr = '';
+      let proc: ReturnType<typeof spawn> | null = null;
+
+      const terminateProcess = () => {
+        if (!proc) return;
+        try {
+          proc.kill('SIGTERM');
+          const killTimer = setTimeout(() => {
+            if (proc && !proc.killed) {
+              try {
+                proc.kill('SIGKILL');
+              } catch {
+                // ignore kill error
+              }
+            }
+          }, 2000);
+          killTimer.unref?.();
+        } catch {
+          // ignore kill errors
+        }
+      };
+
+      const onAbort = () => {
+        terminateProcess();
+        settle(new ValidationError('Ejecución del worker de audio cancelada por AbortSignal.'));
+      };
 
       const settle = (err?: Error, result?: Record<string, unknown>) => {
         if (isSettled) return;
         isSettled = true;
         if (timer) clearTimeout(timer);
+        if (signal) {
+          signal.removeEventListener('abort', onAbort);
+        }
         if (err) {
           reject(err);
         } else {
@@ -184,27 +259,31 @@ export class PythonAudioWorkerBridge {
         }
       };
 
-      const proc = spawn(pythonExe, [this.workerScriptPath], {
+      if (signal?.aborted) {
+        return settle(new ValidationError('Ejecución del worker de audio cancelada por AbortSignal.'));
+      }
+
+      proc = spawn(pythonExe, [this.workerScriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
 
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
       timer = setTimeout(() => {
-        try {
-          proc.kill('SIGTERM');
-          setTimeout(() => {
-            if (!proc.killed) {
-              proc.kill('SIGKILL');
-            }
-          }, 2000);
-        } catch {
-          // ignore kill errors
-        }
-        settle(new PythonWorkerError(`Tiempo de espera agotado (${timeoutMs}ms) en el worker de audio Python.`, 'WORKER_TIMEOUT'));
+        terminateProcess();
+        settle(
+          new PythonWorkerError(
+            `Tiempo de espera agotado (${timeoutMs}ms) en el worker de audio Python.`,
+            'WORKER_TIMEOUT'
+          )
+        );
       }, timeoutMs);
 
       const rl = readline.createInterface({
-        input: proc.stdout,
+        input: proc.stdout!,
         crlfDelay: Infinity,
       });
 
@@ -231,12 +310,17 @@ export class PythonAudioWorkerBridge {
         }
       });
 
-      proc.stderr.on('data', (chunk) => {
+      proc.stderr!.on('data', (chunk) => {
         childStderr += chunk.toString();
       });
 
       proc.on('error', (err) => {
-        settle(new PythonWorkerError(`Fallo al iniciar el worker de audio Python (${pythonExe}): ${err.message}`, 'SPAWN_ERROR'));
+        settle(
+          new PythonWorkerError(
+            `Fallo al iniciar el worker de audio Python (${pythonExe}): ${err.message}`,
+            'SPAWN_ERROR'
+          )
+        );
       });
 
       proc.on('close', (code) => {
@@ -268,8 +352,8 @@ export class PythonAudioWorkerBridge {
       });
 
       // Escribir el payload JSON y cerrar stdin
-      proc.stdin.write(JSON.stringify(requestPayload) + '\n');
-      proc.stdin.end();
+      proc.stdin!.write(JSON.stringify(requestPayload) + '\n');
+      proc.stdin!.end();
     });
   }
 }

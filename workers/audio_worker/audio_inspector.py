@@ -19,7 +19,9 @@ import numpy as np
 from signature_inspector import inspect_audio_signature, parse_mpeg_frame_header
 
 MAX_AUDIO_BYTES = 50 * 1024 * 1024  # 50 MiB
-MAX_DURATION_SECONDS = 900  # 15 min decompression-bomb cap
+MAX_DURATION_SECONDS = 900  # 15 min decompression-bomb cap for derivative WAV
+MAX_PROBE_DURATION_SECONDS = 60  # 60s bounded in-memory probe cap when derivativeWavPath is omitted
+HEADER_INSPECT_WINDOW_BYTES = 1024 * 1024  # 1 MiB bounded header inspection window
 
 
 @dataclass
@@ -63,35 +65,77 @@ def compute_sha256_streaming(file_path: Path) -> tuple[str, int]:
     return hasher.hexdigest(), total
 
 
-def _count_mp3_frames_and_duration(data: bytes, start_offset: int) -> tuple[int, Optional[int], Optional[int]]:
-    """Walk MPEG audio frames cleanly to measure frame count and exact duration."""
-    offset = start_offset
+def _read_bounded_header_window(file_path: Path, max_bytes: int = HEADER_INSPECT_WINDOW_BYTES) -> bytes:
+    """Read only a bounded prefix window for container/signature checks (never buffers huge audio)."""
+    with file_path.open("rb") as fh:
+        data = fh.read(max_bytes)
+        # If an ID3v2 tag extends beyond max_bytes, inspect its header and append up to 16 KiB post-tag frames
+        if len(data) >= 10 and data[0:3] == b"ID3" and not ((data[5] | data[6] | data[7] | data[8] | data[9]) & 0x80):
+            s0, s1, s2, s3 = data[6], data[7], data[8], data[9]
+            tag_size = ((s0 & 0x7F) << 21) | ((s1 & 0x7F) << 14) | ((s2 & 0x7F) << 7) | (s3 & 0x7F)
+            footer = 10 if (data[5] & 0x10) else 0
+            total_id3 = 10 + tag_size + footer
+            if total_id3 + 8192 > len(data) and total_id3 < MAX_AUDIO_BYTES:
+                # Re-anchor a compact synthetic ID3v2 header (0 bytes payload) + actual frames at offset total_id3
+                # so inspect_audio_signature checks post-ID3 frames with O(1) memory.
+                fh.seek(total_id3)
+                frame_slice = fh.read(16384)
+                compact_id3 = bytes([0x49, 0x44, 0x33, data[3], data[4], data[5] & ~0x10, 0, 0, 0, 0])
+                return compact_id3 + frame_slice
+        return data
+
+
+def _count_mp3_frames_streaming(file_path: Path, start_offset: int) -> tuple[int, Optional[int], Optional[int]]:
+    """Walk MPEG audio frames cleanly in 64 KiB chunks to measure frame count and exact duration."""
     frame_count = 0
     total_samples = 0
     total_bits = 0
     last_sr = None
 
-    while offset + 4 <= len(data):
-        parsed = parse_mpeg_frame_header(data, offset)
-        if parsed is None:
-            break
-        frame_len = parsed["frame_length"]
-        if offset + frame_len > len(data):
-            break
-        sr = parsed["sample_rate_hz"]
-        last_sr = sr
-        version_id = parsed["version_id"]
-        layer_id = parsed["layer_id"]
-        if layer_id == 3:
-            samples_per_frame = 384
-        elif layer_id == 2 or version_id == 3:
-            samples_per_frame = 1152
-        else:
-            samples_per_frame = 576
-        total_samples += samples_per_frame
-        total_bits += frame_len * 8
-        frame_count += 1
-        offset += frame_len
+    buf = bytearray()
+    with file_path.open("rb") as fh:
+        fh.seek(max(0, start_offset))
+        eof = False
+        while True:
+            if not eof and len(buf) < 65536:
+                chunk = fh.read(65536)
+                if not chunk:
+                    eof = True
+                else:
+                    buf.extend(chunk)
+
+            offset = 0
+            stopped = False
+            while offset + 4 <= len(buf):
+                parsed = parse_mpeg_frame_header(buf, offset)
+                if parsed is None:
+                    stopped = True
+                    break
+                frame_len = parsed["frame_length"]
+                if offset + frame_len > len(buf):
+                    break
+                sr = parsed["sample_rate_hz"]
+                last_sr = sr
+                version_id = parsed["version_id"]
+                layer_id = parsed["layer_id"]
+                if layer_id == 3:
+                    samples_per_frame = 384
+                elif layer_id == 2 or version_id == 3:
+                    samples_per_frame = 1152
+                else:
+                    samples_per_frame = 576
+                total_samples += samples_per_frame
+                total_bits += frame_len * 8
+                frame_count += 1
+                offset += frame_len
+
+            if offset > 0:
+                del buf[:offset]
+
+            if stopped or (eof and len(buf) < 4) or (eof and offset == 0):
+                break
+            if eof and parse_mpeg_frame_header(buf, 0) is not None and parse_mpeg_frame_header(buf, 0)["frame_length"] > len(buf):
+                break
 
     if frame_count == 0 or not last_sr:
         return 0, None, None
@@ -120,12 +164,15 @@ def _decode_pcm_with_local_ffmpeg(
         warnings.append("Local FFmpeg executable path missing.")
         return False, "native-header-only", None, None, None, warnings
 
-    # Bounded execution: max duration cap prevents decompression bombs
+    # Bounded execution: single-thread and max duration cap prevents decompression bombs
     if derivative_wav_path is not None:
+        if derivative_wav_path.resolve() == source_path.resolve():
+            raise ValueError("derivative_wav_path must never resolve to source_path.")
         derivative_wav_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             ffmpeg_exe,
             "-nostdin",
+            "-threads", "1",
             "-v", "error",
             "-y",
             "-i", str(source_path),
@@ -143,28 +190,41 @@ def _decode_pcm_with_local_ffmpeg(
             warnings.append(f"FFmpeg derivative verification returned non-zero status ({proc.returncode}): {stderr_clean}")
             return False, "imageio-ffmpeg-failed", None, None, None, warnings
 
-        wav_bytes = derivative_wav_path.read_bytes()
-        if len(wav_bytes) < 44:
+        wav_size = derivative_wav_path.stat().st_size
+        if wav_size < 44:
             warnings.append("Decoded derivative WAV was smaller than canonical 44-byte RIFF header.")
             return False, "imageio-ffmpeg-empty", None, None, None, warnings
 
-        # Parse exact sample count from 16-bit mono PCM bytes after header
-        pcm_payload = wav_bytes[44:]
-        sample_count = len(pcm_payload) // 2
-        if sample_count > 0:
-            samples = np.frombuffer(pcm_payload[: sample_count * 2], dtype=np.int16)
-            _ = float(np.sqrt(np.mean((samples.astype(np.float32) / 32768.0) ** 2)))
+        # Stream PCM frames after 44-byte header in bounded chunks without reading whole WAV into memory
+        sample_count = 0
+        with derivative_wav_path.open("rb") as wf:
+            wf.seek(44)
+            rem = b""
+            while True:
+                chunk = wf.read(65536)
+                if not chunk:
+                    break
+                buf = rem + chunk
+                aligned_len = (len(buf) // 2) * 2
+                rem = buf[aligned_len:]
+                if aligned_len > 0:
+                    samples = np.frombuffer(buf[:aligned_len], dtype=np.int16)
+                    _ = float(np.sqrt(np.mean((samples.astype(np.float32) / 32768.0) ** 2)))
+                    sample_count += aligned_len // 2
+
         duration_ms = round((sample_count / target_sample_rate) * 1000) if sample_count > 0 else 0
         sha, byte_len = compute_sha256_streaming(derivative_wav_path)
         return True, "imageio-ffmpeg", duration_ms, byte_len, sha, warnings
 
-    # Probe decode in-memory without writing derivative file
+    # Bounded probe decode without writing derivative file (capped at MAX_PROBE_DURATION_SECONDS)
+    probe_duration = min(max_duration_sec, MAX_PROBE_DURATION_SECONDS)
     cmd = [
         ffmpeg_exe,
         "-nostdin",
+        "-threads", "1",
         "-v", "error",
         "-i", str(source_path),
-        "-t", str(max_duration_sec),
+        "-t", str(probe_duration),
         "-vn",
         "-ac", "1",
         "-ar", str(target_sample_rate),
@@ -189,6 +249,9 @@ def inspect_and_verify_audio_file(
     emit_progress: Optional[Callable[[int, str], None]] = None,
 ) -> InspectionOutcome:
     """Verify binary integrity, container signatures, and optional derivative decode cleanly."""
+    if derivative_wav_path is not None and derivative_wav_path.resolve() == source_path.resolve():
+        raise ValueError("derivative_wav_path must not resolve to the immutable source_path.")
+
     if not source_path.exists() or not source_path.is_file():
         raise FileNotFoundError(f"Source audio file not found: {source_path.name}")
 
@@ -208,10 +271,21 @@ def inspect_and_verify_audio_file(
     if emit_progress:
         emit_progress(40, "Validating binary magic bytes and audio frame signatures")
 
-    raw_bytes = source_path.read_bytes()
-    sig = inspect_audio_signature(raw_bytes)
+    header_bytes = _read_bounded_header_window(source_path)
+    sig = inspect_audio_signature(header_bytes)
     if not sig.valid or not sig.detected_format or not sig.mime_type:
         raise ValueError(sig.reason or "Invalid binary audio signature.")
+
+    # Recover true ID3 size from file header if compact synthetic ID3 prefix was used for >1 MiB ID3 tag
+    true_id3_size = sig.id3_tag_size_bytes
+    if sig.has_id3v2 and true_id3_size == 10:
+        with source_path.open("rb") as fh:
+            prefix10 = fh.read(10)
+        if len(prefix10) == 10 and prefix10[0:3] == b"ID3":
+            s0, s1, s2, s3 = prefix10[6], prefix10[7], prefix10[8], prefix10[9]
+            tag_sz = ((s0 & 0x7F) << 21) | ((s1 & 0x7F) << 14) | ((s2 & 0x7F) << 7) | (s3 & 0x7F)
+            footer = 10 if (prefix10[5] & 0x10) else 0
+            true_id3_size = 10 + tag_sz + footer
 
     duration_ms: Optional[int] = None
     frame_count: Optional[int] = None
@@ -221,7 +295,10 @@ def inspect_and_verify_audio_file(
     warnings: list[str] = []
 
     if sig.detected_format == "MP3" and sig.mpeg_frame_offset is not None:
-        fc, dur_ms, avg_br = _count_mp3_frames_and_duration(raw_bytes, sig.mpeg_frame_offset)
+        stream_start_offset = sig.mpeg_frame_offset
+        if true_id3_size > HEADER_INSPECT_WINDOW_BYTES:
+            stream_start_offset = (true_id3_size - 10) + sig.mpeg_frame_offset
+        fc, dur_ms, avg_br = _count_mp3_frames_streaming(source_path, stream_start_offset)
         if fc > 0:
             frame_count = fc
             duration_ms = dur_ms
@@ -230,11 +307,11 @@ def inspect_and_verify_audio_file(
 
     if sig.detected_format == "WAV" and sample_rate_hz and channels:
         # Compute deterministic WAV payload duration from byte size after header
-        data_idx = raw_bytes.find(b"data", 12, min(len(raw_bytes), 4096))
-        if data_idx != -1 and data_idx + 8 <= len(raw_bytes):
-            data_size = int.from_bytes(raw_bytes[data_idx + 4 : data_idx + 8], "little")
-            effective_size = min(data_size, len(raw_bytes) - (data_idx + 8))
-            bits_per_sample = int.from_bytes(raw_bytes[34:36], "little") if len(raw_bytes) >= 36 else 16
+        data_idx = header_bytes.find(b"data", 12, min(len(header_bytes), 4096))
+        if data_idx != -1 and data_idx + 8 <= len(header_bytes):
+            data_size = int.from_bytes(header_bytes[data_idx + 4 : data_idx + 8], "little")
+            effective_size = min(data_size, file_size_bytes - (data_idx + 8))
+            bits_per_sample = int.from_bytes(header_bytes[34:36], "little") if len(header_bytes) >= 36 else 16
             bytes_per_sec = sample_rate_hz * channels * max(1, bits_per_sample // 8)
             if bytes_per_sec > 0 and effective_size > 0:
                 duration_ms = round((effective_size / bytes_per_sec) * 1000)
@@ -261,7 +338,7 @@ def inspect_and_verify_audio_file(
         detected_format=sig.detected_format,
         mime_type=sig.mime_type,
         has_id3v2=sig.has_id3v2,
-        id3_tag_size_bytes=sig.id3_tag_size_bytes,
+        id3_tag_size_bytes=true_id3_size,
         sample_rate_hz=sample_rate_hz,
         channels=channels,
         bitrate_kbps=bitrate_kbps,

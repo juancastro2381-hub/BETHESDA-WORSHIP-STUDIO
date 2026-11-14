@@ -12,6 +12,13 @@ import { type ISongRepository } from '../repositories/song-repository.ts';
 import { type AudioAsset } from '../db/schema.ts';
 import { ValidationError, NotFoundError, RangeNotSatisfiableError } from '../domain/errors.ts';
 import { validateAudioBuffer } from '../domain/audio/audio-signature-validator.ts';
+import {
+  PythonAudioWorkerBridge,
+  PythonWorkerError,
+  globalPythonAudioWorkerBridge,
+  type InspectAudioOptions,
+  type PythonWorkerInspectResult,
+} from '../infrastructure/python-worker/python-audio-worker-bridge.ts';
 
 export interface UploadAudioParams {
   readonly songId: string;
@@ -21,6 +28,16 @@ export interface UploadAudioParams {
   readonly buffer: Buffer;
   readonly durationSeconds?: number | undefined;
   readonly uploadedByUserId?: string | undefined;
+  readonly verifyWithPythonWorker?: boolean | undefined;
+}
+
+export interface AudioStorageReconciliationReport {
+  readonly checkedAssets: number;
+  readonly healthyAssetIds: string[];
+  readonly missingPhysicalFiles: Array<{ assetId: string; storagePath: string }>;
+  readonly corruptedPhysicalFiles: Array<{ assetId: string; storagePath: string; reason: string }>;
+  readonly orphanFiles: string[];
+  readonly purgedOrphanFiles: string[];
 }
 
 export interface AudioStreamResponse {
@@ -83,12 +100,46 @@ export class AudioService {
     private readonly audioRepo: IAudioRepository,
     private readonly storageProvider: IAudioStorageProvider,
     private readonly songRepo: ISongRepository,
-    private readonly maxFileSizeBytes: number = 50 * 1024 * 1024 // 50MB
+    private readonly maxFileSizeBytes: number = 50 * 1024 * 1024, // 50MB
+    private readonly pythonWorkerBridge: PythonAudioWorkerBridge = globalPythonAudioWorkerBridge
   ) {}
+
+  private async executeWorkerInspect(
+    jobId: string,
+    fullPath: string,
+    expectedSha256: string,
+    options: InspectAudioOptions = {}
+  ): Promise<PythonWorkerInspectResult> {
+    try {
+      return await this.pythonWorkerBridge.inspectAndVerifyAudio(
+        jobId,
+        fullPath,
+        expectedSha256,
+        options
+      );
+    } catch (err) {
+      if (err instanceof PythonWorkerError) {
+        if (err.errorCode === 'SOURCE_FILE_NOT_FOUND') {
+          throw new NotFoundError('Archivo físico de audio', fullPath);
+        }
+        if (
+          err.errorCode === 'AUDIO_VALIDATION_FAILED' ||
+          err.errorCode === 'AUDIO_DECODE_FAILED' ||
+          err.errorCode === 'INVALID_ARGUMENT' ||
+          err.errorCode === 'INVALID_WORKER_REQUEST' ||
+          err.errorCode === 'MISSING_REQUIRED_FIELDS'
+        ) {
+          throw new ValidationError(err.message, { workerErrorCode: err.errorCode });
+        }
+      }
+      throw err;
+    }
+  }
 
   /**
    * Sube y registra un nuevo activo de audio asociado a una canción.
    * Valida existencia de la canción, cuota de tamaño, tipo MIME y magic bytes binarios.
+   * Garantiza reversión física automática si falla la verificación del worker o la inserción en BD.
    */
   public async uploadAudio(params: UploadAudioParams): Promise<AudioAsset> {
     const { songId, title, filename, mimeType, buffer, durationSeconds, uploadedByUserId } = params;
@@ -119,23 +170,39 @@ export class AudioService {
     // 4. Validar firma binaria (magic bytes) para prevenir falsificación MIME
     validateAudioMagicBytes(buffer, normalizedMime);
 
-    // 5. Guardar archivo físico en el storage provider seguro
+    // 5. Guardar archivo físico de forma atómica e inmutable en el storage provider seguro
     const saveResult = await this.storageProvider.save(filename, buffer);
 
-    // 6. Persistir metadatos en la base de datos
-    const created = await this.audioRepo.create({
-      songId,
-      title: title.trim() || filename,
-      filename: filename.trim(),
-      storagePath: saveResult.storagePath,
-      mimeType: normalizedMime,
-      fileSizeBytes: saveResult.fileSizeBytes,
-      checksumSha256: saveResult.checksumSha256,
-      durationSeconds: durationSeconds && durationSeconds > 0 ? Math.floor(durationSeconds) : null,
-      uploadedByUserId: uploadedByUserId ?? null,
-    });
+    try {
+      // 6. Verificación profunda opcional mediante worker local en Python
+      if (params.verifyWithPythonWorker) {
+        const fullPath = this.storageProvider.resolveSafePath(saveResult.storagePath);
+        await this.executeWorkerInspect(
+          `upload-${crypto.randomUUID()}`,
+          fullPath,
+          saveResult.checksumSha256
+        );
+      }
 
-    return created;
+      // 7. Persistir metadatos en la base de datos
+      const created = await this.audioRepo.create({
+        songId,
+        title: title.trim() || filename,
+        filename: filename.trim(),
+        storagePath: saveResult.storagePath,
+        mimeType: normalizedMime,
+        fileSizeBytes: saveResult.fileSizeBytes,
+        checksumSha256: saveResult.checksumSha256,
+        durationSeconds: durationSeconds && durationSeconds > 0 ? Math.floor(durationSeconds) : null,
+        uploadedByUserId: uploadedByUserId ?? null,
+      });
+
+      return created;
+    } catch (err) {
+      // Limpieza transaccional compensatoria para impedir archivos huérfanos en disco
+      await this.storageProvider.delete(saveResult.storagePath).catch(() => {});
+      throw err;
+    }
   }
 
   /**
@@ -255,7 +322,15 @@ export class AudioService {
       isRangeRequest = true;
     }
 
-    const { stream, chunkSize } = await this.storageProvider.getStream(asset.storagePath, start, end);
+    const { stream, chunkSize } = await this.storageProvider.getStream(
+      asset.storagePath,
+      start,
+      end,
+      {
+        expectedChecksumSha256: asset.checksumSha256,
+        expectedSizeBytes: asset.fileSizeBytes,
+      }
+    );
 
     if (isRangeRequest) {
       return {
@@ -267,6 +342,8 @@ export class AudioService {
           'Content-Range': `bytes ${start}-${end}/${totalSize}`,
           'Accept-Ranges': 'bytes',
           'Cache-Control': 'private, no-cache',
+          'X-Checksum-Sha256': asset.checksumSha256,
+          ETag: `"${asset.checksumSha256}"`,
         },
       };
     }
@@ -279,7 +356,98 @@ export class AudioService {
         'Content-Length': totalSize,
         'Accept-Ranges': 'bytes',
         'Cache-Control': 'private, no-cache',
+        'X-Checksum-Sha256': asset.checksumSha256,
+        ETag: `"${asset.checksumSha256}"`,
       },
+    };
+  }
+
+  /**
+   * Ejecuta inspección binaria profunda y verificación PCM mediante el worker local de Python
+   * sobre un activo de audio ya preservado en disco.
+   */
+  public async inspectAndVerifyStoredAudio(
+    audioId: string,
+    options: InspectAudioOptions = {}
+  ): Promise<PythonWorkerInspectResult> {
+    const asset = await this.getAudioById(audioId);
+    const exists = await this.storageProvider.exists(asset.storagePath);
+    if (!exists) {
+      throw new NotFoundError('Archivo físico de audio', asset.storagePath);
+    }
+
+    const fullPath = this.storageProvider.resolveSafePath(asset.storagePath);
+    return await this.executeWorkerInspect(
+      `verify-${asset.id}-${Date.now()}`,
+      fullPath,
+      asset.checksumSha256,
+      options
+    );
+  }
+
+  /**
+   * Reconcilia la consistencia entre los registros de `audio_assets` en PostgreSQL y los archivos físicos en disco.
+   * Detecta archivos huérfanos en disco, registros sin archivo físico y archivos físicamente alterados (SHA-256).
+   */
+  public async reconcileStorageConsistency(
+    options: { purgeOrphanFiles?: boolean } = {}
+  ): Promise<AudioStorageReconciliationReport> {
+    const [assets, physicalKeys] = await Promise.all([
+      this.audioRepo.findAll(),
+      this.storageProvider.listKeys(),
+    ]);
+
+    const referencedPaths = new Set(assets.map((a) => a.storagePath));
+    const healthyAssetIds: string[] = [];
+    const missingPhysicalFiles: Array<{ assetId: string; storagePath: string }> = [];
+    const corruptedPhysicalFiles: Array<{ assetId: string; storagePath: string; reason: string }> = [];
+
+    for (const asset of assets) {
+      try {
+        const probe = await this.storageProvider.getStream(asset.storagePath, undefined, undefined, {
+          expectedChecksumSha256: asset.checksumSha256,
+          expectedSizeBytes: asset.fileSizeBytes,
+        });
+        (probe.stream as any).on?.('error', () => {});
+        if (typeof (probe.stream as any).destroy === 'function') {
+          (probe.stream as any).destroy();
+        }
+        healthyAssetIds.push(asset.id);
+      } catch (err: any) {
+        if (err instanceof NotFoundError) {
+          missingPhysicalFiles.push({
+            assetId: asset.id,
+            storagePath: asset.storagePath,
+          });
+        } else {
+          corruptedPhysicalFiles.push({
+            assetId: asset.id,
+            storagePath: asset.storagePath,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    const orphanFiles = physicalKeys.filter((key) => !referencedPaths.has(key));
+    const purgedOrphanFiles: string[] = [];
+
+    if (options.purgeOrphanFiles) {
+      for (const orphanKey of orphanFiles) {
+        const deleted = await this.storageProvider.delete(orphanKey);
+        if (deleted) {
+          purgedOrphanFiles.push(orphanKey);
+        }
+      }
+    }
+
+    return {
+      checkedAssets: assets.length,
+      healthyAssetIds,
+      missingPhysicalFiles,
+      corruptedPhysicalFiles,
+      orphanFiles,
+      purgedOrphanFiles,
     };
   }
 

@@ -11,6 +11,7 @@ export interface IAudioRepository {
   create(data: NewAudioAsset): Promise<AudioAsset>;
   findById(id: string): Promise<AudioAsset | null>;
   findBySongId(songId: string): Promise<AudioAsset[]>;
+  findAll(): Promise<AudioAsset[]>;
   delete(id: string): Promise<boolean>;
 }
 
@@ -40,6 +41,13 @@ export class DrizzleAudioRepository implements IAudioRepository {
       .select()
       .from(audioAssets)
       .where(eq(audioAssets.songId, songId))
+      .orderBy(desc(audioAssets.createdAt));
+  }
+
+  public async findAll(): Promise<AudioAsset[]> {
+    return await this.db
+      .select()
+      .from(audioAssets)
       .orderBy(desc(audioAssets.createdAt));
   }
 

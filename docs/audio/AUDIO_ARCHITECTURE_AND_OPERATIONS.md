@@ -1,279 +1,145 @@
 # BETHESDA WORSHIP STUDIO
 # AUDIO SUBSYSTEM ARCHITECTURE & OPERATIONS MANUAL
-## Scope 1C — Local Audio Processing Pipeline & Worker Lifecycle
+## Scope 1C — Local Audio Processing Pipeline, Storage Governance & Worker Lifecycle
 
-**Document Version:** 1.0.0  
-**Phase:** Scope 1C — Audio Conversion & Preservation Foundation  
-**Date:** November 2026  
-**Status:** ACTIVE  
+**Document Version:** 2.0.0  
+**Phase:** Scope 1C — WS-AUDIO-01 Audio Foundation  
+**Status:** ACTIVE (Revalidated)  
 **Repository Branch:** `feature/phase-1a-core-foundation`
 
 ---
 
 ## 1. System Overview
 
-The Bethesda Worship Studio Audio Subsystem provides end-to-end ingestion, cryptographic validation, durable storage, local offline analysis, and low-latency stage playback for worship team recordings.
+The Bethesda Worship Studio Audio Subsystem provides local-only ingestion, fail-closed container inspection, cryptographic SHA-256 verification, atomic disk preservation, HTTP 206 streaming with ticket revocation checks, and isolated Python/FFmpeg verification.
 
-In accordance with Project Owner directives for Scope 1C:
-1. **Local-Only Processing**: All audio decoding, telemetry extraction, and signal processing run strictly on the local host machine. No audio bytes or metadata are ever transmitted to external commercial clouds, third-party APIs, or remote AI platforms.
-2. **Zero Fabrication**: Raw audio is never converted into fabricated or hallucinated chord charts or musical scores without verified processing and mandatory human review.
-3. **Canonical Song Protection**: Audio files exist as satellite assets/attachments to songs; active canonical song notation is never overwritten automatically.
+Mandatory Scope 1C Invariants:
+1. **Local-Only Execution**: Zero external commercial transcription APIs or cloud audio transfers.
+2. **Zero Fabrication**: Un-transcribed audio produces `null` musical fields (`defaultKey`, `defaultBpm`, `timeSignature`, `canonicalPayload`).
+3. **Canonical Protection**: Audio records live in `audio_assets` and never overwrite human-authored canonical songs.
 
 ---
 
-## 2. High-Level Architectural Diagram
+## 2. Architectural Blueprint
 
 ```
 +-----------------------------------------------------------------------------------+
-| FRONTEND CLIENT (React 18 / TypeScript / Vite)                                    |
+| FRONTEND CLIENT (React / TypeScript / Vite)                                       |
 |                                                                                   |
-|  +--------------------------------+       +------------------------------------+  |
-|  | ConversionCenterWorkspace.tsx  |       | AudioPlayerBar.tsx                 |  |
-|  | - Section D: Audio Preservation|       | - Stage Music Stand Playback       |  |
-|  | - audio-signature.ts (Preflight)|       | - Range Streaming & Scrubber       |  |
-|  +----------------+---------------+       +-----------------+------------------+  |
-+-------------------|-----------------------------------------|---------------------+
-                    | Multipart Form Upload                   | HTTP 206 Range Stream
-                    v                                         v
+|  +----------------------------------+      +-----------------------------------+  |
+|  | ConversionCenterWorkspace.tsx    |      | AudioPlayerBar.tsx                |  |
+|  | - Section D: Audio Preservation  |      | - Music Stand Stage Playback      |  |
+|  | - audio-signature.ts (Preflight) |      | - HTTP 206 Range Seeking          |  |
+|  +----------------+-----------------+      +-----------------+-----------------+  |
++-------------------|------------------------------------------|--------------------+
+                    | JSON Base64 Upload / /ticket             | /stream?ticket=...
+                    v                                          v
 +-----------------------------------------------------------------------------------+
-| BACKEND API GATEWAY (Node.js / Fastify / TypeScript)                              |
+| BACKEND API GATEWAY (Fastify / TypeScript)                                        |
 |                                                                                   |
 |  +-----------------------------------------------------------------------------+  |
 |  | audio.routes.ts                                                             |  |
-|  | - AuthGuard: Permission validation (songs:create, songs:read)               |  |
-|  | - Active User Check: Real-time DB lookup (revoked session protection)       |  |
-|  | - Anti-IDOR Authorization: Ownership isolation on DELETE                    |  |
+|  | - AuthGuard real-time DB permission checks on upload/download/verify/delete |  |
+|  | - verifyActiveAuthorizedStreamUser() on BOTH ?ticket= and Bearer streams    |  |
+|  | - Anti-IDOR ownership enforcement on DELETE /api/v1/audio/:id               |  |
 |  +--------------------------------------+--------------------------------------+  |
 |                                         |                                         |
 |                                         v                                         |
 |  +-----------------------------------------------------------------------------+  |
-|  | AudioService.ts                                                             |  |
-|  | - Deep binary signature inspection: audio-signature-validator.ts           |  |
-|  | - Cryptographic SHA-256 calculation & re-verification on download           |  |
-|  | - MIME normalization & metadata extraction                                  |  |
+|  | AudioService (audio-service.ts)                                             |  |
+|  | - validateAudioMagicBytes() -> audio-signature-validator.ts                 |  |
+|  | - uploadAudio() with worker option & transactional disk rollback            |  |
+|  | - streamAudio() enforcing pre-stream descriptor-bound SHA-256               |  |
+|  | - reconcileStorageConsistency() (healthy/orphan/missing/corrupted audit)    |  |
 |  +------------------+------------------------------------+---------------------+  |
 +---------------------|------------------------------------|------------------------+
                       |                                    |
                       v                                    v
-+------------------------------------+   +------------------------------------------+
-| PERSISTENCE & STORAGE              |   | LOCAL WORKER SUBPROCESS BRIDGE           |
-|                                    |   |                                          |
-| 1. PostgreSQL (Drizzle ORM):       |   | PythonAudioWorkerBridge.ts               |
-|    Table: song_audio_assets        |   | - Dynamic .venv discovery                |
-|    - id, songId, filename, mime    |   | - Stdin/stdout JSON IPC protocol v1      |
-|    - sha256Hash, fileSize, duration|   | - Bounded timeout (default 30s)          |
-|    - uploadedByUserId, createdAt   |   +---------------------+--------------------+
-|                                    |                         | JSON Lines IPC
-| 2. Local Disk Storage:             |                         v
-|    backend/storage/audio/          |   +------------------------------------------+
-|    File: <assetId>.<ext>           |   | PYTHON WORKER (workers/audio_worker/)    |
-|    Permissions: Private / Non-pub  |   |                                          |
-+------------------------------------+   | - main.py (Single-line JSON dispatcher)  |
-                                         | - signature_inspector.py (Magic bytes)   |
-                                         | - audio_inspector.py (PCM validation)    |
-                                         | - imageio-ffmpeg (Static binary FFmpeg)  |
-                                         | - Zero Cloud / Zero Network Sockets      |
-                                         +------------------------------------------+
++--------------------------------------+   +----------------------------------------+
+| PERSISTENCE & ATOMIC DISK STORAGE    |   | LOCAL WORKER SUBPROCESS BRIDGE         |
+|                                      |   |                                        |
+| 1. PostgreSQL (Drizzle ORM):         |   | PythonAudioWorkerBridge                |
+|    Table: audio_assets               |   | (python-audio-worker-bridge.ts)        |
+|    - id, song_id, title, filename    |   | - Discovers workers/audio_worker/.venv |
+|    - storage_path, mime_type         |   | - stdin/stdout JSON Lines IPC (v1)     |
+|    - file_size_bytes, checksum_sha256|   | - 30s default timeout + AbortSignal    |
+|    - duration_seconds, uploaded_by.. |   +--------------------+-------------------+
+|                                      |                        |
+| 2. LocalFileSystemAudioStorageProvider                        v
+|    Path: AUDIO_STORAGE_PATH (<uuid>.ext)   PYTHON WORKER (workers/audio_worker/)  |
+|    - Atomic .tmp + datasync + rename |     - main.py (v1 validator & dispatcher)  |
+|    - Read-only mode (chmod 0o444)    |     - signature_inspector.py               |
+|    - Single FileHandle + 64KiB SHA   |     - audio_inspector.py (bounded streaming|
+|    - NOT PRODUCTION VERIFIED volume  |       + static imageio-ffmpeg -threads 1)|
++--------------------------------------+   +----------------------------------------+
 ```
 
 ---
 
-## 3. Ingestion & Preservation Pipeline
+## 3. Ingestion, Verification & Reconciliation Lifecycle
 
-The ingestion lifecycle executes the following stages:
-
-```
-[Uploaded File]
-      |
-      v
-[1. Client-Side Pre-validation] (frontend/src/core/conversion/audio-signature.ts)
-      - Inspects initial bytes in browser.
-      - Confirms basic container match before spending bandwidth.
-      |
-      v
-[2. Multipart Upload to Fastify] (POST /api/v1/songs/:songId/audio)
-      - Real-time active user verification (`authGuard.requirePermission('songs:create', true)`).
-      - Song existence verification via `SongRepository`.
-      |
-      v
-[3. Deep Magic-Byte Validation] (backend/src/domain/audio/audio-signature-validator.ts)
-      - Validates minimum header size (8 KB sample window).
-      - Checks container magic bytes:
-          * MP3: ID3v2 header (`49 44 33`) or raw MPEG frame sync (`0xFFE0` mask).
-          * WAV: `RIFF` + `WAVE`.
-          * FLAC: `fLaC`.
-          * OGG: `OggS`.
-          * M4A: `ftyp` with brand `'M4A '`, `'M4B '`, `'M4P '`, `'aac '`.
-          * AAC: ADTS frame sync (`0xFFF1` / `0xFFF9`).
-      - Fails closed immediately if bytes do not match declared extension or audio structure.
-      |
-      v
-[4. Cryptographic Hashing]
-      - SHA-256 computed across the entire uploaded binary buffer.
-      |
-      v
-[5. Local Disk Storage]
-      - Target path: `backend/storage/audio/<assetId>.<extension>`.
-      - Written securely using `FileStorageService.save()`.
-      |
-      v
-[6. Database Persistence]
-      - Record inserted into `song_audio_assets`:
-          * `id`: UUID v4
-          * `songId`: Reference to target song
-          * `fileName`: Original filename sanitized
-          * `mimeType`: Verified MIME type
-          * `fileSize`: Exact byte length
-          * `sha256Hash`: Cryptographic checksum
-          * `uploadedByUserId`: Uploader ID for Anti-IDOR enforcement
-          * `createdAt`: UTC timestamp
-      |
-      v
-[7. Python Worker Deep Inspection (Optional/Deferred)]
-      - Worker executes `INSPECT_AND_VERIFY_AUDIO` to compute exact duration and confirm PCM decode.
-```
+1. **Client Preflight** (`frontend/src/core/conversion/audio-signature.ts`): Inspects file container headers in-browser without fabricating notation.
+2. **Upload API** (`POST /api/v1/songs/:songId/audio`):
+   - `authGuard.requirePermission('songs:create', true)` validates active DB status, role, and lockout.
+   - `AudioService.uploadAudio()` checks song existence, MIME allowlist, size quota (`<= 50 MiB`), and binary magic bytes via `validateAudioMagicBytes()`.
+   - `LocalFileSystemAudioStorageProvider.save()` writes `${targetPath}.tmp.${uuid}`, calls `datasync()`, renames atomically to `${uuid}${ext}`, and sets `chmod(0o444)`.
+   - If `verifyWithPythonWorker: true`, `PythonAudioWorkerBridge` runs container + FFmpeg PCM verification before inserting into PostgreSQL.
+   - Any failure during worker verification or `DrizzleAudioRepository.create()` triggers `storageProvider.delete()` in `catch`, preventing orphan files on disk.
+3. **On-Demand Deep Verification** (`POST /api/v1/audio/:id/verify`): Runs `AudioService.inspectAndVerifyStoredAudio()` on any stored asset, mapping missing physical files to `404 NOT_FOUND` and invalid/undecodable payloads to `400 VALIDATION_ERROR`.
+4. **Consistency Reconciliation** (`AudioService.reconcileStorageConsistency({ purgeOrphanFiles })`): Compares `audio_assets` rows (`audioRepo.findAll()`) with physical files (`storageProvider.listKeys()`), verifying size and SHA-256 via bounded 64 KiB streaming reads to report `healthyAssetIds`, `missingPhysicalFiles`, `corruptedPhysicalFiles`, and `orphanFiles`.
 
 ---
 
-## 4. Local Python Worker Architecture & IPC Protocol
+## 4. Local Python Worker IPC Protocol (Contract v1)
 
-### 4.1 Virtual Environment & Isolation
-- Located at: `workers/audio_worker/`.
-- Isolated `.venv` virtual environment configured with Python 3.10+.
-- Dependencies defined in `requirements.txt`:
-  - `numpy`: Numerical processing for future audio DSP.
-  - `pydantic`: Strict schema validation for IPC messages.
-  - `imageio-ffmpeg`: Packages a statically linked FFmpeg binary, eliminating system-wide PATH dependencies.
-  - `pytest`: Comprehensive unit and regression test suite.
-- Security boundary:
-  - The Python worker has **zero network access**. It does not open HTTP sockets, make DNS queries, or contact external servers.
-  - It only reads and writes over `stdin` and `stdout` as a subprocess spawned by Node.js.
+Implemented verbatim in `workers/audio_worker/main.py` and `backend/src/infrastructure/python-worker/python-audio-worker-bridge.ts`:
 
-### 4.2 Single-Line JSON IPC Protocol (v1)
-Communication between Node.js and Python uses newline-delimited JSON (`\n` separated):
-
-#### Command: `PING`
-- **Request (Node.js -> Python):**
+### Command: `PING`
+- **Request:**
   ```json
-  {"version": "1.0", "command": "PING", "payload": {}}
+  {"contractVersion": "1.0", "jobId": "ping-1731558000", "command": "PING"}
   ```
-- **Response (Python -> Node.js):**
+- **Result:**
   ```json
-  {"version": "1.0", "status": "SUCCESS", "data": {"message": "PONG", "timestamp": 1731558000.0}}
+  {"type": "RESULT", "contractVersion": "1.0", "jobId": "ping-1731558000", "data": {"status": "READY", "workerVersion": "0.1.0", "pythonVersion": "3.14.2"}}
   ```
 
-#### Command: `INSPECT_AND_VERIFY_AUDIO`
-- **Request (Node.js -> Python):**
+### Command: `INSPECT_AND_VERIFY_AUDIO`
+- **Request:**
   ```json
   {
-    "version": "1.0",
+    "contractVersion": "1.0",
+    "jobId": "verify-asset-123",
     "command": "INSPECT_AND_VERIFY_AUDIO",
-    "payload": {
-      "filePath": "C:/path/to/backend/storage/audio/asset.mp3",
-      "expectedFormat": "MP3"
-    }
+    "sourcePath": "C:/.../storage/audio/<uuid>.mp3",
+    "expectedSha256": "<64-hex-sha256>",
+    "derivativeWavPath": "C:/.../tmp/normalized.wav"
   }
   ```
-- **Progress Event (Python -> Node.js):**
+  - `expectedSha256` must match `^[0-9a-fA-F]{64}$`.
+  - Null bytes, network/FFmpeg protocol schemes (`http:`, `https:`, `file:`, `tcp:`, `udp:`, etc.), and `derivativeWavPath` resolving to `sourcePath` are rejected with `errorCode: "INVALID_ARGUMENT"`.
+- **Progress Events:**
   ```json
-  {"type": "PROGRESS", "stage": "VALIDATING_CONTAINER", "percent": 25.0}
+  {"type": "PROGRESS", "contractVersion": "1.0", "jobId": "verify-asset-123", "progress": 40, "stage": "Validating binary magic bytes and audio frame signatures"}
   ```
-- **Response (Python -> Node.js):**
-  ```json
-  {
-    "version": "1.0",
-    "status": "SUCCESS",
-    "data": {
-      "valid": true,
-      "detectedFormat": "MP3",
-      "fileSizeBytes": 5242880,
-      "verifiedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "durationSeconds": 245.5,
-      "containerDetails": {
-        "codec": "mp3",
-        "sampleRate": 44100,
-        "channels": 2,
-        "bitRate": 192000
-      },
-      "decodeTested": true
-    }
-  }
-  ```
+- **Result (`RESULT`):**
+  Returns `contractVersion`, `workerVersion`, `verifiedSha256`, `fileSizeBytes`, `detectedFormat`, `mimeType`, `hasId3v2`, `id3TagSizeBytes`, `sampleRateHz`, `channels`, `bitrateKbps`, `durationMs`, `mpegFrameCount`, `pcmDecodeVerified`, `decoderUsed`, `derivativePcmPath`, `derivativePcmSha256`, `derivativePcmBytes`, `warnings`, `pythonVersion`.
+- **Errors (`ERROR`):**
+  Structured `errorCode` (`INVALID_WORKER_REQUEST`, `MISSING_REQUIRED_FIELDS`, `INVALID_ARGUMENT`, `SOURCE_FILE_NOT_FOUND`, `AUDIO_VALIDATION_FAILED`, `AUDIO_DECODE_FAILED`, `DECODER_UNAVAILABLE`, `WORKER_INTERNAL_ERROR`).
 
-#### Error Handling
-If an unrecoverable error occurs, the worker returns:
-```json
-{
-  "version": "1.0",
-  "status": "ERROR",
-  "error": {
-    "code": "INVALID_CONTAINER",
-    "message": "File does not match declared format signature."
-  }
-}
-```
-
-### 4.3 Subprocess Lifecycle Management (`PythonAudioWorkerBridge.ts`)
-- **Auto-Discovery**: Locates `.venv/Scripts/python.exe` (Windows) or `.venv/bin/python` (Unix) relative to the workspace root.
-- **Process Spawning**: Uses `child_process.spawn()` with pipes for `stdin`, `stdout`, and `stderr`.
-- **Bounded Timeout**: Every command is wrapped in a `Promise.race` with an execution timeout (default 30 seconds). If a timeout occurs, the subprocess is terminated with `SIGKILL` to prevent orphan processes.
-- **Buffer Safety**: Uses line buffering via `readline` to avoid pipe deadlocks on Windows and Unix handles.
+### Resource & License Profile (`workers/audio_worker/`)
+- **Dependencies & Licenses (`requirements.txt`):** `numpy` (BSD-3-Clause), `pydantic` (MIT), `pytest` (MIT), `imageio-ffmpeg` (BSD-2-Clause wrapper).
+- **Bundled FFmpeg Binary:** `imageio-ffmpeg` ships `ffmpeg-win-x86_64-v9.0.2.exe` (`9.0.2-essentials_build-www.gyan.dev`), built with `--enable-gpl --enable-version3 --enable-static` (**GPLv3**). Invoked strictly as a child CLI process (`-nostdin -threads 1`) via local `.venv` (not committed to git). Redistributing binary installers containing `.venv`/FFmpeg requires GPLv3 compliance (source offer + license notices + no DRM).
+- **Memory Bounds:** Worker hashes in `64 KiB` chunks, inspects a bounded `1 MiB` header window (`_read_bounded_header_window`), counts MPEG frames incrementally in `64 KiB` buffers (`_count_mp3_frames_streaming`), streams derivative WAVs in `64 KiB` chunks, and caps headless PCM probes to `MAX_PROBE_DURATION_SECONDS = 60`.
 
 ---
 
-## 5. Stage Music Stand Streaming & Range Requests
+## 5. Stage Streaming & Storage Durability Status
 
-To support responsive playback in the stage music stand without downloading multi-megabyte audio files upfront, the backend implements **HTTP 206 Partial Content**:
-
-- **Endpoint**: `GET /api/v1/audio/:id/stream`
-- **Request Headers**:
-  - `Authorization: Bearer <token>`
-  - `Range: bytes=0-1048575` (requests the first 1 MB)
-- **Response Headers**:
-  - `HTTP/1.1 206 Partial Content`
-  - `Content-Range: bytes 0-1048575/5242880`
-  - `Accept-Ranges: bytes`
-  - `Content-Length: 1048576`
-  - `Content-Type: audio/mpeg`
-- **Playback Component**:
-  - `AudioPlayerBar.tsx` connects to the streaming endpoint.
-  - Supports instant seeking across long rehearsal recordings without latency.
-
----
-
-## 6. Storage Layout & Maintenance Operations
-
-### Directory Layout
-```
-backend/
-└── storage/
-    └── audio/
-        ├── .gitkeep
-        ├── 018fa2b3-1111-7000-8000-000000000001.mp3
-        ├── 018fa2b3-2222-7000-8000-000000000002.wav
-        └── 018fa2b3-3333-7000-8000-000000000003.flac
-```
-
-### Backup and Restore
-1. **Metadata**: Backed up with standard PostgreSQL pg_dump:
-   ```bash
-   pg_dump -t song_audio_assets bethesda_worship_studio > backup_audio_metadata.sql
-   ```
-2. **Audio Binaries**: Backed up via filesystem rsync / copy:
-   ```bash
-   tar -czvf audio_storage_backup.tar.gz backend/storage/audio/
-   ```
-3. **Restoration Verification**: After restoring both database and storage directory, running the regression test suite or downloading assets will automatically verify all SHA-256 hashes against stored records.
-
----
-
-## 7. Operational Troubleshooting
-
-| Symptom | Root Cause | Remediation |
-| :--- | :--- | :--- |
-| `PythonAudioWorkerBridge: Python executable not found` | Virtual environment has not been initialized. | Run `python -m venv workers/audio_worker/.venv` and install `requirements.txt`. |
-| `IntegrityError: Audio file integrity check failed` | File on disk was modified, corrupted, or replaced out-of-band. | Restore original audio file matching the persisted SHA-256 hash or re-upload. |
-| `ValidationError: File content does not match audio signature` | User attempted to upload a file with an audio extension but non-audio magic bytes. | Reject file; advise user to verify file validity. |
-| `ForbiddenError: You can only delete audio assets that you uploaded` | Non-admin user attempted to delete an asset uploaded by another user. | Normal security behavior (Anti-IDOR). Request worship leader or admin to remove. |
-| `Subprocess timed out after 30000ms` | Extremely large audio file or slow disk I/O during PCM decode test. | Worker was killed safely. Check disk performance or adjust timeout setting if processing massive multi-hour multitracks. |
-
+- **Range Streaming (`GET /api/v1/audio/:id/stream`):**
+  - Validates `?ticket=` (or Bearer JWT) **and** runs `verifyActiveAuthorizedStreamUser(userId, 'songs:read')` against PostgreSQL before opening the file.
+  - `LocalFileSystemAudioStorageProvider.getStream()` opens a single `FileHandle`, validates `stat.size === asset.fileSizeBytes` and full-file streaming SHA-256 before delivering HTTP `200`/`206` ranges, setting `X-Checksum-Sha256` and `ETag`.
+  - Corrupted physical files return HTTP `400 VALIDATION_ERROR`; missing physical files return HTTP `404 NOT_FOUND`.
+- **Backup & Durability Classification:**
+  - Development `docker-compose.yml` configures only `postgres:16-alpine` (`postgres_data` local volume). No production persistent volume manifest or redundant object-store configuration exists in the repository for `backend/storage/audio/`.
+  - **Production Persistent Volume Durability:** **`NOT PRODUCTION VERIFIED`**. Production deployments must mount persistent, snapshotted storage at `AUDIO_STORAGE_PATH`, back up PostgreSQL `audio_assets` alongside audio binaries, and run `AudioService.reconcileStorageConsistency()` after restores.

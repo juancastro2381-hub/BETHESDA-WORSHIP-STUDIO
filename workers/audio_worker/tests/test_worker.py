@@ -128,3 +128,69 @@ def test_missing_source_file(tmp_path: Path):
     })
     assert out[-1]["errorCode"] == "SOURCE_FILE_NOT_FOUND"
 
+
+def test_derivative_path_cannot_overwrite_source(tmp_path: Path):
+    mp3 = tmp_path / "immutable.mp3"
+    data = real_mp3_via_ffmpeg(mp3, 1.0, with_id3=True)
+    sha = hashlib.sha256(data).hexdigest()
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j7",
+        "command": "INSPECT_AND_VERIFY_AUDIO",
+        "sourcePath": str(mp3),
+        "expectedSha256": sha,
+        "derivativeWavPath": str(mp3),
+    })
+    assert out[-1]["type"] == "ERROR"
+    assert out[-1]["errorCode"] == "INVALID_ARGUMENT"
+    assert hashlib.sha256(mp3.read_bytes()).hexdigest() == sha
+
+
+def test_network_protocol_source_rejected():
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j8",
+        "command": "INSPECT_AND_VERIFY_AUDIO",
+        "sourcePath": "https://evil.example/payload.mp3",
+        "expectedSha256": "a" * 64,
+    })
+    assert out[-1]["type"] == "ERROR"
+    assert out[-1]["errorCode"] == "INVALID_ARGUMENT"
+
+
+def test_malformed_sha256_rejected(tmp_path: Path):
+    wav = tmp_path / "sample.wav"
+    wav.write_bytes(synth_wav(0.2))
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j9",
+        "command": "INSPECT_AND_VERIFY_AUDIO",
+        "sourcePath": str(wav),
+        "expectedSha256": "not-a-valid-sha256",
+    })
+    assert out[-1]["type"] == "ERROR"
+    assert out[-1]["errorCode"] == "INVALID_ARGUMENT"
+
+
+def test_isolated_derivative_wav_preserves_original_sha(tmp_path: Path):
+    mp3 = tmp_path / "worship_ref.mp3"
+    data = real_mp3_via_ffmpeg(mp3, 1.0, with_id3=True)
+    sha = hashlib.sha256(data).hexdigest()
+    deriv = tmp_path / "derivatives" / "normalized.wav"
+
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j10",
+        "command": "INSPECT_AND_VERIFY_AUDIO",
+        "sourcePath": str(mp3),
+        "expectedSha256": sha,
+        "derivativeWavPath": str(deriv),
+    })
+    res = out[-1]
+    assert res["type"] == "RESULT", res
+    d = res["data"]
+    assert d["pcmDecodeVerified"] is True
+    assert d["derivativePcmBytes"] is not None and d["derivativePcmBytes"] > 44
+    assert d["derivativePcmSha256"] == hashlib.sha256(deriv.read_bytes()).hexdigest()
+    assert hashlib.sha256(mp3.read_bytes()).hexdigest() == sha
+

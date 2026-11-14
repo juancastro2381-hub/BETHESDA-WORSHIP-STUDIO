@@ -18,6 +18,7 @@
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,11 +29,13 @@ import { pool } from '../db/index.ts';
 import { runMigrations } from '../db/migrate.ts';
 import { DrizzleUserRepository } from '../repositories/user-repository.ts';
 import { DrizzleSongRepository } from '../repositories/song-repository.ts';
-import { DrizzleAudioRepository } from '../repositories/audio-repository.ts';
+import { DrizzleAudioRepository, type IAudioRepository } from '../repositories/audio-repository.ts';
 import { LocalFileSystemAudioStorageProvider } from '../domain/audio/storage-provider.ts';
 import { AudioService } from '../application/audio-service.ts';
 import { JwtTokenService } from '../application/token-service.ts';
+import { globalStreamTicketService } from '../application/stream-ticket-service.ts';
 import { env } from '../config/env.ts';
+import type { AudioAsset, NewAudioAsset } from '../db/schema.ts';
 import type { UserEntity } from '../domain/auth-types.ts';
 import type { SongEntity } from '../domain/types.ts';
 import { ValidationError, ForbiddenError } from '../domain/errors.ts';
@@ -153,7 +156,22 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
   let testSong: SongEntity;
   const createdSongIds = new Set<string>();
   const createdUserIds = new Set<string>();
+  const createdAudioStoragePaths = new Set<string>();
   const tempFilesToClean: string[] = [];
+  const tempDirsToClean: string[] = [];
+
+  function generateRealMp3WithBundledFfmpeg(durationSec = 0.6): Buffer {
+    const pyExe = globalPythonAudioWorkerBridge.resolvePythonExecutable();
+    const outPath = path.join(os.tmpdir(), `bethesda_real_${Date.now()}_${Math.random().toString(16).slice(2)}.mp3`);
+    tempFilesToClean.push(outPath);
+    const pyScript = [
+      'import sys, subprocess, imageio_ffmpeg',
+      'ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()',
+      'subprocess.run([ffmpeg, "-nostdin", "-threads", "1", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={sys.argv[1]}", "-ar", "44100", "-ac", "1", "-b:a", "128k", "-id3v2_version", "3", "-metadata", "title=Bethesda Test", sys.argv[2]], check=True)',
+    ].join('; ');
+    execFileSync(pyExe, ['-c', pyScript, String(durationSec), outPath], { windowsHide: true });
+    return fs.readFileSync(outPath);
+  }
 
   before(async () => {
     await runMigrations();
@@ -244,9 +262,26 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       await pool.query('DELETE FROM users WHERE id = ANY($1)', [Array.from(createdUserIds)]);
     }
 
+    for (const relStoragePath of createdAudioStoragePaths) {
+      await storageProvider.delete(relStoragePath).catch(() => {});
+    }
+
     for (const file of tempFilesToClean) {
       try {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
+        if (fs.existsSync(file)) {
+          fs.chmodSync(file, 0o666);
+          fs.unlinkSync(file);
+        }
+      } catch {
+        // ignore cleanup error
+      }
+    }
+
+    for (const dir of tempDirsToClean) {
+      try {
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
       } catch {
         // ignore cleanup error
       }
@@ -316,6 +351,7 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
 
     assert.strictEqual(asset.checksumSha256, originalHash);
     assert.strictEqual(asset.fileSizeBytes, audioBytes.length);
+    createdAudioStoragePaths.add(asset.storagePath);
 
     // Descarga y re-verificación criptográfica
     const downloaded = await audioService.downloadAudio(asset.id);
@@ -387,10 +423,12 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       buffer: validMp3,
       uploadedByUserId: directorUser.id,
     });
+    createdAudioStoragePaths.add(asset.storagePath);
 
-    // Simular corrupción física del archivo en disco
+    // Simular corrupción física deliberada del archivo en disco (elevando permisos de solo lectura primero)
     const fullPath = path.resolve(env.AUDIO_STORAGE_PATH, asset.storagePath);
     if (fs.existsSync(fullPath)) {
+      fs.chmodSync(fullPath, 0o666);
       const corruptedBytes = Buffer.from('CORRUPTED DATA OVERWRITTEN');
       fs.writeFileSync(fullPath, corruptedBytes);
 
@@ -487,5 +525,482 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
     const choBytes = Buffer.from(chordProText, 'utf-8');
     const choRes = inspectAudioSignature(choBytes);
     assert.strictEqual(choRes.valid, false, 'ChordPro no debe ser identificado como audio');
+  });
+
+  // ==========================================================================
+  // REMEDIACIÓN DE AUDITORÍA INDEPENDIENTE (FINDINGS A, B, C, E)
+  // ==========================================================================
+
+  // CRITERIO 12 (Finding A): Verificación SHA-256 previa al streaming incluso en Range parciales
+  it('12. (Finding A) should verify full-file SHA-256 BEFORE streaming HTTP Range 206 and block out-of-range tail tampering', async () => {
+    const mp3Buffer = generateRealMp3WithBundledFfmpeg(0.6);
+    const asset = await audioService.uploadAudio({
+      songId: testSong.id,
+      title: 'Streaming Tail Tamper Guard Test',
+      filename: 'tail_tamper.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: mp3Buffer,
+      uploadedByUserId: directorUser.id,
+    });
+    createdAudioStoragePaths.add(asset.storagePath);
+
+    // Manipular ÚNICAMENTE el último byte del archivo en disco (fuera del rango bytes=0-15 solicitado)
+    const fullPath = storageProvider.resolveSafePath(asset.storagePath);
+    fs.chmodSync(fullPath, 0o666);
+    const diskBytes = fs.readFileSync(fullPath);
+    diskBytes[diskBytes.length - 1] = diskBytes[diskBytes.length - 1]! ^ 0xff;
+    fs.writeFileSync(fullPath, diskBytes);
+    fs.chmodSync(fullPath, 0o444);
+
+    // Solicitar Range bytes=0-15 (bytes iniciales aparentemente intactos): debe fallar antes de entregar datos
+    const streamRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${asset.id}/stream`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+        range: 'bytes=0-15',
+      },
+    });
+
+    assert.strictEqual(streamRes.statusCode, 400);
+    const body = streamRes.json();
+    assert.strictEqual(body.error.code, 'VALIDATION_ERROR');
+    assert.ok(body.error.message.includes('Integridad física comprometida'));
+
+    // La descarga completa también debe rechazar con ValidationError
+    await assert.rejects(
+      () => audioService.downloadAudio(asset.id),
+      (err: any) => err instanceof ValidationError && err.message.includes('Integridad física comprometida')
+    );
+
+    await audioService.deleteAudio(asset.id);
+    createdAudioStoragePaths.delete(asset.storagePath);
+  });
+
+  // CRITERIO 13 (Finding A): Archivo físico ausente retorna 404 NotFoundError controlado
+  it('13. (Finding A) should return structured 404 NotFoundError when physical audio file is missing on download or stream', async () => {
+    const mp3Buffer = makeValidMp3Buffer(4);
+    const asset = await audioService.uploadAudio({
+      songId: testSong.id,
+      title: 'Missing Physical Audio Test',
+      filename: 'missing_physical.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: mp3Buffer,
+      uploadedByUserId: directorUser.id,
+    });
+
+    const fullPath = storageProvider.resolveSafePath(asset.storagePath);
+    fs.chmodSync(fullPath, 0o666);
+    fs.unlinkSync(fullPath);
+
+    const downloadRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${asset.id}/download`,
+      headers: { authorization: `Bearer ${musicianToken}` },
+    });
+    assert.strictEqual(downloadRes.statusCode, 404);
+    assert.strictEqual(downloadRes.json().error.code, 'NOT_FOUND');
+
+    const streamRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${asset.id}/stream`,
+      headers: {
+        authorization: `Bearer ${musicianToken}`,
+        range: 'bytes=0-15',
+      },
+    });
+    assert.strictEqual(streamRes.statusCode, 404);
+    assert.strictEqual(streamRes.json().error.code, 'NOT_FOUND');
+
+    await audioRepo.delete(asset.id);
+  });
+
+  // CRITERIO 14 (Finding A): Permisos 0o444 en disco, cabeceras SHA-256 y Range seeking repetible sin mutación
+  it('14. (Finding A) should enforce read-only permissions on disk, emit checksum headers, and sustain repeated Range playback', async () => {
+    const mp3Buffer = generateRealMp3WithBundledFfmpeg(0.6);
+    const asset = await audioService.uploadAudio({
+      songId: testSong.id,
+      title: 'Range Playback Integrity Test',
+      filename: 'playback_integrity.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: mp3Buffer,
+      uploadedByUserId: directorUser.id,
+    });
+    createdAudioStoragePaths.add(asset.storagePath);
+
+    const fullPath = storageProvider.resolveSafePath(asset.storagePath);
+    const stat = fs.statSync(fullPath);
+    assert.strictEqual(stat.mode & 0o222, 0, 'El archivo preservado debe quedar en modo solo-lectura en disco');
+
+    const ticketRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${asset.id}/ticket`,
+      headers: { authorization: `Bearer ${musicianToken}` },
+    });
+    assert.strictEqual(ticketRes.statusCode, 200);
+    const { ticket } = ticketRes.json().data;
+
+    const r1 = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${asset.id}/stream?ticket=${ticket}`,
+      headers: { range: 'bytes=0-31' },
+    });
+    assert.strictEqual(r1.statusCode, 206);
+    assert.strictEqual(r1.headers['x-checksum-sha256'], asset.checksumSha256);
+    assert.strictEqual(r1.headers.etag, `"${asset.checksumSha256}"`);
+    assert.strictEqual(Buffer.compare(r1.rawPayload, mp3Buffer.subarray(0, 32)), 0);
+
+    const r2 = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${asset.id}/stream?ticket=${ticket}`,
+      headers: { range: 'bytes=32-63' },
+    });
+    assert.strictEqual(r2.statusCode, 206);
+    assert.strictEqual(Buffer.compare(r2.rawPayload, mp3Buffer.subarray(32, 64)), 0);
+
+    const diskShaAfter = crypto.createHash('sha256').update(fs.readFileSync(fullPath)).digest('hex');
+    assert.strictEqual(diskShaAfter, asset.checksumSha256);
+
+    await audioService.deleteAudio(asset.id);
+    createdAudioStoragePaths.delete(asset.storagePath);
+  });
+
+  // CRITERIO 15 (Finding B): Revocación inmediata de tickets al suspender, bloquear o eliminar usuario
+  it('15. (Finding B) should immediately revoke and reject stream tickets when user is suspended, locked, deleted, or on cross-asset reuse', async () => {
+    const tempEmail = `revoked-stream-${Date.now()}@bethesda.co`;
+    const tempUser = await userRepo.create({
+      email: tempEmail,
+      passwordHash: 'dummy_hash',
+      firstName: 'Temp',
+      lastName: 'Streamer',
+      role: 'MUSICIAN',
+      accountStatus: 'ACTIVE',
+    });
+    createdUserIds.add(tempUser.id);
+
+    const tempToken = tokenService.signAccessToken({
+      sub: tempUser.id,
+      email: tempUser.email,
+      role: tempUser.role,
+    }).token;
+
+    const assetA = await audioService.uploadAudio({
+      songId: testSong.id,
+      title: 'Asset A Revocation',
+      filename: 'asset_a.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(3),
+      uploadedByUserId: directorUser.id,
+    });
+    createdAudioStoragePaths.add(assetA.storagePath);
+
+    const assetB = await audioService.uploadAudio({
+      songId: testSong.id,
+      title: 'Asset B Revocation',
+      filename: 'asset_b.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(3),
+      uploadedByUserId: directorUser.id,
+    });
+    createdAudioStoragePaths.add(assetB.storagePath);
+
+    // 1. Emitir ticket válido y confirmar streaming inicial exitoso
+    const t1Res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${assetA.id}/ticket`,
+      headers: { authorization: `Bearer ${tempToken}` },
+    });
+    assert.strictEqual(t1Res.statusCode, 200);
+    const ticket1 = t1Res.json().data.ticket;
+
+    const okStream = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetA.id}/stream?ticket=${ticket1}`,
+      headers: { range: 'bytes=0-15' },
+    });
+    assert.strictEqual(okStream.statusCode, 206);
+
+    // 2. Suspender usuario en PostgreSQL dentro del TTL del ticket: debe rechazar con 403 y revocar el ticket
+    await userRepo.updateStatus(tempUser.id, 'SUSPENDED');
+
+    const suspendedTicketStream = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetA.id}/stream?ticket=${ticket1}`,
+      headers: { range: 'bytes=0-15' },
+    });
+    assert.strictEqual(suspendedTicketStream.statusCode, 403);
+    assert.strictEqual(suspendedTicketStream.json().error.code, 'FORBIDDEN');
+    assert.strictEqual(globalStreamTicketService.getTicketState(ticket1), null, 'El ticket debe haber sido purgado');
+
+    // Incluso Bearer token sin ticket debe fallar en tiempo real cuando el usuario está SUSPENDED
+    const suspendedBearerStream = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetA.id}/stream`,
+      headers: { authorization: `Bearer ${tempToken}` },
+    });
+    assert.strictEqual(suspendedBearerStream.statusCode, 403);
+
+    // 3. Reactivar usuario, emitir nuevo ticket y bloquear temporalmente por lockoutUntil
+    await userRepo.updateStatus(tempUser.id, 'ACTIVE');
+    const t2Res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${assetA.id}/ticket`,
+      headers: { authorization: `Bearer ${tempToken}` },
+    });
+    const ticket2 = t2Res.json().data.ticket;
+
+    await userRepo.update(tempUser.id, { lockoutUntil: new Date(Date.now() + 10 * 60 * 1000) });
+    const lockedStream = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetA.id}/stream?ticket=${ticket2}`,
+    });
+    assert.strictEqual(lockedStream.statusCode, 403);
+    assert.strictEqual(globalStreamTicketService.getTicketState(ticket2), null);
+
+    // 4. Desbloquear y validar rechazo de uso cruzado entre activos (ticket de assetA usado en assetB)
+    await userRepo.update(tempUser.id, { lockoutUntil: null });
+    const t3Res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${assetA.id}/ticket`,
+      headers: { authorization: `Bearer ${tempToken}` },
+    });
+    const ticket3 = t3Res.json().data.ticket;
+
+    const crossAssetRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetB.id}/stream?ticket=${ticket3}`,
+    });
+    assert.strictEqual(crossAssetRes.statusCode, 401);
+
+    // 5. Eliminar usuario en BD con ticket vigente: debe fallar con 401 y purgar el ticket
+    await pool.query('DELETE FROM users WHERE id = $1', [tempUser.id]);
+    createdUserIds.delete(tempUser.id);
+
+    const deletedUserStream = await app.inject({
+      method: 'GET',
+      url: `/api/v1/audio/${assetA.id}/stream?ticket=${ticket3}`,
+    });
+    assert.strictEqual(deletedUserStream.statusCode, 401);
+    assert.strictEqual(globalStreamTicketService.getTicketState(ticket3), null);
+
+    await audioService.deleteAudio(assetA.id);
+    await audioService.deleteAudio(assetB.id);
+    createdAudioStoragePaths.delete(assetA.storagePath);
+    createdAudioStoragePaths.delete(assetB.storagePath);
+  });
+
+  // CRITERIO 16 (Finding C): Rollback transaccional anti-huérfanos y reconciliación almacenamiento/BD
+  it('16. (Finding C) should roll back physical file when DB insert fails and reconcile orphan/missing/corrupted entries', async () => {
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bethesda-audio-gov-'));
+    tempDirsToClean.push(isolatedDir);
+    const isolatedStorage = new LocalFileSystemAudioStorageProvider(isolatedDir, env.MAX_AUDIO_FILE_SIZE_BYTES);
+
+    // 1. Simular fallo de inserción en PostgreSQL durante uploadAudio -> 0 archivos huérfanos en disco
+    const failingRepo: IAudioRepository = {
+      async create() {
+        throw new Error('Simulated PostgreSQL constraint error');
+      },
+      async findById() {
+        return null;
+      },
+      async findBySongId() {
+        return [];
+      },
+      async findAll() {
+        return [];
+      },
+      async delete() {
+        return false;
+      },
+    };
+    const failingService = new AudioService(failingRepo, isolatedStorage, songRepo, env.MAX_AUDIO_FILE_SIZE_BYTES);
+
+    await assert.rejects(
+      () =>
+        failingService.uploadAudio({
+          songId: testSong.id,
+          title: 'Failed Insert Rollback',
+          filename: 'rollback.mp3',
+          mimeType: 'audio/mpeg',
+          buffer: makeValidMp3Buffer(2),
+          uploadedByUserId: directorUser.id,
+        }),
+      /Simulated PostgreSQL constraint error/
+    );
+    assert.deepStrictEqual(
+      await isolatedStorage.listKeys(),
+      [],
+      'El archivo físico debe eliminarse automáticamente si falla el registro en BD'
+    );
+
+    // 2. Reconciliación completa (healthy, missing, corrupted y orphan con purgeOrphanFiles)
+    const memStore = new Map<string, AudioAsset>();
+    const memRepo: IAudioRepository = {
+      async create(data: NewAudioAsset) {
+        const record: AudioAsset = {
+          id: crypto.randomUUID(),
+          songId: data.songId,
+          title: data.title,
+          filename: data.filename,
+          storagePath: data.storagePath,
+          mimeType: data.mimeType,
+          fileSizeBytes: data.fileSizeBytes,
+          checksumSha256: data.checksumSha256,
+          durationSeconds: data.durationSeconds ?? null,
+          uploadedByUserId: data.uploadedByUserId ?? null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        memStore.set(record.id, record);
+        return record;
+      },
+      async findById(id: string) {
+        return memStore.get(id) ?? null;
+      },
+      async findBySongId(sId: string) {
+        return Array.from(memStore.values()).filter((a) => a.songId === sId);
+      },
+      async findAll() {
+        return Array.from(memStore.values());
+      },
+      async delete(id: string) {
+        return memStore.delete(id);
+      },
+    };
+
+    const isolatedService = new AudioService(memRepo, isolatedStorage, songRepo, env.MAX_AUDIO_FILE_SIZE_BYTES);
+    const healthy = await isolatedService.uploadAudio({
+      songId: testSong.id,
+      title: 'Healthy',
+      filename: 'healthy.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(3),
+    });
+    const missing = await isolatedService.uploadAudio({
+      songId: testSong.id,
+      title: 'Missing',
+      filename: 'missing.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(2),
+    });
+    const corrupted = await isolatedService.uploadAudio({
+      songId: testSong.id,
+      title: 'Corrupted',
+      filename: 'corrupted.mp3',
+      mimeType: 'audio/mpeg',
+      buffer: makeValidMp3Buffer(2),
+    });
+
+    // Inducir ausencia física de `missing`, adulteración de `corrupted` y crear archivo huérfano
+    await isolatedStorage.delete(missing.storagePath);
+    const corruptedFullPath = isolatedStorage.resolveSafePath(corrupted.storagePath);
+    fs.chmodSync(corruptedFullPath, 0o666);
+    fs.writeFileSync(corruptedFullPath, Buffer.from('TAMPERED'));
+    const orphanKey = 'orphan-unreferenced.mp3';
+    fs.writeFileSync(path.join(isolatedDir, orphanKey), Buffer.from('ORPHAN'));
+
+    const reportDry = await isolatedService.reconcileStorageConsistency({ purgeOrphanFiles: false });
+    assert.strictEqual(reportDry.checkedAssets, 3);
+    assert.deepStrictEqual(reportDry.healthyAssetIds, [healthy.id]);
+    assert.strictEqual(reportDry.missingPhysicalFiles[0]?.assetId, missing.id);
+    assert.strictEqual(reportDry.corruptedPhysicalFiles[0]?.assetId, corrupted.id);
+    assert.deepStrictEqual(reportDry.orphanFiles, [orphanKey]);
+    assert.deepStrictEqual(reportDry.purgedOrphanFiles, []);
+
+    const reportPurge = await isolatedService.reconcileStorageConsistency({ purgeOrphanFiles: true });
+    assert.deepStrictEqual(reportPurge.purgedOrphanFiles, [orphanKey]);
+    assert.strictEqual(fs.existsSync(path.join(isolatedDir, orphanKey)), false);
+    assert.strictEqual(await isolatedStorage.exists(healthy.storagePath), true);
+  });
+
+  // CRITERIO 17 (Finding E): Integración real de PythonAudioWorkerBridge en AudioService y rutas HTTP
+  it('17. (Finding E) should integrate Python worker into uploadAudio (verifyWithWorker=true), POST /api/v1/audio/:id/verify, and enforce bridge guards', async () => {
+    const realMp3 = generateRealMp3WithBundledFfmpeg(0.6);
+    const expectedSha = crypto.createHash('sha256').update(realMp3).digest('hex');
+
+    // 1. Subida con verificación sincrónica del worker Python en producción
+    const uploadRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'MP3 Verificado por Worker',
+        filename: 'verified_worship.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: realMp3.toString('base64'),
+        verifyWithWorker: true,
+      },
+    });
+
+    assert.strictEqual(uploadRes.statusCode, 201, uploadRes.body);
+    const assetData = uploadRes.json().data;
+    createdAudioStoragePaths.add(assetData.storagePath);
+    assert.strictEqual(assetData.checksumSha256, expectedSha);
+
+    // 2. Verificación bajo demanda mediante endpoint POST /api/v1/audio/:id/verify
+    const verifyRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${assetData.id}/verify`,
+      headers: { authorization: `Bearer ${musicianToken}` },
+    });
+    assert.strictEqual(verifyRes.statusCode, 200, verifyRes.body);
+    const verifyJson = verifyRes.json();
+    assert.strictEqual(verifyJson.status, 'success');
+    assert.strictEqual(verifyJson.data.detectedFormat, 'MP3');
+    assert.strictEqual(verifyJson.data.hasId3v2, true);
+    assert.strictEqual(verifyJson.data.pcmDecodeVerified, true);
+    assert.strictEqual(verifyJson.data.verifiedSha256, expectedSha);
+
+    // 3. Archivo sintético no decodificable con verifyWithWorker=true debe fallar y NO dejar huérfanos en disco
+    const beforeKeys = new Set(await storageProvider.listKeys());
+    const badUploadRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: { authorization: `Bearer ${directorToken}` },
+      payload: {
+        title: 'Corrupt Truncated MP3',
+        filename: 'corrupt.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: makeValidMp3Buffer(2).toString('base64'),
+        verifyWithWorker: true,
+      },
+    });
+    assert.strictEqual(badUploadRes.statusCode, 400);
+    const afterKeys = await storageProvider.listKeys();
+    const leaked = afterKeys.filter((k) => !beforeKeys.has(k));
+    assert.deepStrictEqual(leaked, [], 'No debe quedar archivo físico en disco si falla el worker');
+
+    // 4. Guardas del puente Node->Python: anti-sobrescritura, anti-URI y AbortSignal
+    const realFullPath = storageProvider.resolveSafePath(assetData.storagePath);
+    await assert.rejects(
+      () =>
+        globalPythonAudioWorkerBridge.inspectAndVerifyAudio('guard-overwrite', realFullPath, expectedSha, {
+          derivativeWavPath: realFullPath,
+        }),
+      (err: any) => err instanceof ValidationError && err.message.includes('inmutabilidad')
+    );
+
+    await assert.rejects(
+      () =>
+        globalPythonAudioWorkerBridge.inspectAndVerifyAudio(
+          'guard-proto',
+          'https://evil.example/audio.mp3',
+          expectedSha
+        ),
+      (err: any) => err instanceof ValidationError && err.message.includes('protocolos externos')
+    );
+
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(
+      () =>
+        globalPythonAudioWorkerBridge.inspectAndVerifyAudio('guard-abort', realFullPath, expectedSha, {
+          signal: ac.signal,
+        }),
+      (err: any) => err instanceof ValidationError && err.message.includes('AbortSignal')
+    );
+
+    await audioService.deleteAudio(assetData.id);
+    createdAudioStoragePaths.delete(assetData.storagePath);
   });
 });

@@ -14,8 +14,9 @@ import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
 import { UnauthorizedError, ForbiddenError } from '../../../domain/errors.ts';
-import { ROLE_PERMISSIONS, type UserRole } from '../../../domain/auth-types.ts';
+import { ROLE_PERMISSIONS, type Permission, type UserRole } from '../../../domain/auth-types.ts';
 import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
+import { globalPythonAudioWorkerBridge } from '../../../infrastructure/python-worker/python-audio-worker-bridge.ts';
 
 const UploadAudioBodySchema = z.object({
   title: z.string().min(1).max(255),
@@ -23,6 +24,7 @@ const UploadAudioBodySchema = z.object({
   mimeType: z.string().min(1).max(64),
   dataBase64: z.string().min(1, 'El contenido de audio en base64 no puede estar vacío'),
   durationSeconds: z.number().int().positive().optional(),
+  verifyWithWorker: z.boolean().optional(),
 });
 
 const SongIdParamSchema = z.object({
@@ -44,7 +46,48 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
     env.AUDIO_STORAGE_PATH,
     env.MAX_AUDIO_FILE_SIZE_BYTES
   );
-  const audioService = new AudioService(audioRepo, storageProvider, songRepo, env.MAX_AUDIO_FILE_SIZE_BYTES);
+  const audioService = new AudioService(
+    audioRepo,
+    storageProvider,
+    songRepo,
+    env.MAX_AUDIO_FILE_SIZE_BYTES,
+    globalPythonAudioWorkerBridge
+  );
+
+  /**
+   * Valida en tiempo real contra PostgreSQL que el usuario dueño del ticket o Bearer token
+   * sigue existiendo, está ACTIVE, no está bloqueado y conserva el permiso requerido.
+   */
+  async function verifyActiveAuthorizedStreamUser(
+    userId: string,
+    requiredPermission: Permission = 'songs:read'
+  ): Promise<void> {
+    const dbUser = await userRepo.findById(userId);
+    if (!dbUser) {
+      globalStreamTicketService.revokeTicketsForUser(userId);
+      throw new UnauthorizedError('Usuario no encontrado o dado de baja en la base de datos.');
+    }
+
+    if (dbUser.accountStatus !== 'ACTIVE') {
+      globalStreamTicketService.revokeTicketsForUser(userId);
+      throw new ForbiddenError(
+        `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación denegada.`
+      );
+    }
+
+    if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
+      globalStreamTicketService.revokeTicketsForUser(userId);
+      throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
+    }
+
+    const userPermissions = ROLE_PERMISSIONS[dbUser.role as UserRole] || [];
+    if (!userPermissions.includes(requiredPermission)) {
+      globalStreamTicketService.revokeTicketsForUser(userId);
+      throw new ForbiddenError(
+        `Acceso denegado: Su rol actual (${dbUser.role}) no posee el permiso '${requiredPermission}'.`
+      );
+    }
+  }
 
   // 1. POST /api/v1/songs/:songId/audio - Subir activo de audio (Líderes y Administradores)
   fastify.post(
@@ -67,6 +110,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
         buffer,
         durationSeconds: body.durationSeconds,
         uploadedByUserId: userId,
+        verifyWithPythonWorker: body.verifyWithWorker,
       });
 
       return reply.status(201).send({
@@ -183,10 +227,7 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
       } else {
         await authGuard.authenticate(request, reply);
         if (request.user) {
-          const permissions = ROLE_PERMISSIONS[request.user.role as UserRole] || [];
-          if (permissions.includes('songs:read')) {
-            authenticatedUserId = request.user.sub;
-          }
+          authenticatedUserId = request.user.sub;
         }
       }
 
@@ -196,6 +237,9 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
+      // Verificar en tiempo real contra PostgreSQL que el usuario siga activo, desbloqueado y autorizado
+      await verifyActiveAuthorizedStreamUser(authenticatedUserId, 'songs:read');
+
       const streamResult = await audioService.streamAudio(id, rangeHeader);
 
       for (const [headerName, headerVal] of Object.entries(streamResult.headers)) {
@@ -203,6 +247,23 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(streamResult.statusCode).send(streamResult.stream);
+    }
+  );
+
+  // 4c. POST /api/v1/audio/:id/verify - Verificación binaria profunda y PCM vía worker Python local
+  fastify.post(
+    '/audio/:id/verify',
+    {
+      preHandler: [authGuard.requirePermission('songs:read', true)],
+    },
+    async (request, reply) => {
+      const { id } = AudioIdParamSchema.parse(request.params);
+      const report = await audioService.inspectAndVerifyStoredAudio(id);
+
+      return reply.status(200).send({
+        status: 'success',
+        data: report,
+      });
     }
   );
 

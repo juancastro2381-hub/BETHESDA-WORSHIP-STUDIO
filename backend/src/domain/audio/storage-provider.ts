@@ -8,12 +8,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { Readable } from 'node:stream';
+import { NotFoundError, RangeNotSatisfiableError, ValidationError } from '../errors.ts';
 
 export interface StorageSaveResult {
   readonly storagePath: string;
   readonly checksumSha256: string;
   readonly fileSizeBytes: number;
+}
+
+export interface StreamIntegrityOptions {
+  readonly expectedChecksumSha256?: string | undefined;
+  readonly expectedSizeBytes?: number | undefined;
 }
 
 export interface StorageStreamResult {
@@ -22,16 +27,25 @@ export interface StorageStreamResult {
   readonly start: number;
   readonly end: number;
   readonly chunkSize: number;
+  readonly verifiedChecksumSha256?: string | undefined;
 }
 
 export interface IAudioStorageProvider {
   save(filename: string, buffer: Buffer): Promise<StorageSaveResult>;
-  getStream(storagePath: string, start?: number, end?: number): Promise<StorageStreamResult>;
+  getStream(
+    storagePath: string,
+    start?: number,
+    end?: number,
+    options?: StreamIntegrityOptions
+  ): Promise<StorageStreamResult>;
   getBuffer(storagePath: string): Promise<Buffer>;
   delete(storagePath: string): Promise<boolean>;
   exists(storagePath: string): Promise<boolean>;
   resolveSafePath(storagePath: string): string;
+  listKeys(): Promise<string[]>;
 }
+
+const STREAM_HASH_CHUNK_BYTES = 65536; // 64 KiB buffer constante para verificación previa al streaming
 
 export class LocalFileSystemAudioStorageProvider implements IAudioStorageProvider {
   private readonly baseDir: string;
@@ -48,47 +62,118 @@ export class LocalFileSystemAudioStorageProvider implements IAudioStorageProvide
   }
 
   /**
-   * Resuelve y valida una ruta contra ataques de Path Traversal (Directory Traversal).
-   * Lanza un error de seguridad si el destino se encuentra fuera del baseDir.
+   * Resuelve y valida una ruta contra ataques de Path Traversal, bytes nulos y escape por symlinks.
+   * Lanza ValidationError si el destino es inválido o intenta salir de baseDir.
    */
   public resolveSafePath(relativePathOrKey: string): string {
-    if (!relativePathOrKey || relativePathOrKey.includes('..') || path.isAbsolute(relativePathOrKey)) {
-      throw new Error(`Violación de seguridad: Intento de Path Traversal detectado en: ${relativePathOrKey}`);
+    if (!relativePathOrKey || typeof relativePathOrKey !== 'string' || relativePathOrKey.includes('\0')) {
+      throw new ValidationError(
+        `Violación de seguridad: Intento de Path Traversal o clave inválida detectada en: ${relativePathOrKey}`
+      );
     }
-    const sanitizedKey = path.basename(relativePathOrKey);
-    const resolvedPath = path.resolve(this.baseDir, sanitizedKey);
 
-    if (!resolvedPath.startsWith(this.baseDir)) {
-      throw new Error(`Violación de seguridad: Intento de Path Traversal detectado en: ${relativePathOrKey}`);
+    if (
+      relativePathOrKey.includes('..') ||
+      path.isAbsolute(relativePathOrKey) ||
+      /^[a-zA-Z]:/.test(relativePathOrKey)
+    ) {
+      throw new ValidationError(
+        `Violación de seguridad: Intento de Path Traversal detectado en: ${relativePathOrKey}`
+      );
+    }
+
+    const normalizedRel = path.normalize(relativePathOrKey).replace(/^[/\\]+/, '');
+    if (!normalizedRel || normalizedRel === '.' || normalizedRel.startsWith('..') || path.isAbsolute(normalizedRel)) {
+      throw new ValidationError(
+        `Violación de seguridad: Intento de Path Traversal detectado en: ${relativePathOrKey}`
+      );
+    }
+
+    const baseWithSep = this.baseDir.endsWith(path.sep) ? this.baseDir : `${this.baseDir}${path.sep}`;
+    const resolvedPath = path.resolve(this.baseDir, normalizedRel);
+
+    if (!resolvedPath.startsWith(baseWithSep)) {
+      throw new ValidationError(
+        `Violación de seguridad: Intento de Path Traversal detectado en: ${relativePathOrKey}`
+      );
+    }
+
+    // Protección contra symlink escape cuando el archivo o enlace existe físicamente
+    const realBase = fs.realpathSync(this.baseDir);
+    const realBaseWithSep = realBase.endsWith(path.sep) ? realBase : `${realBase}${path.sep}`;
+    const lstat = fs.lstatSync(resolvedPath, { throwIfNoEntry: false });
+    if (lstat) {
+      let realTarget: string;
+      try {
+        realTarget = fs.realpathSync(resolvedPath);
+      } catch {
+        throw new ValidationError(
+          `Violación de seguridad: Intento de Path Traversal mediante enlace simbólico inválido en: ${relativePathOrKey}`
+        );
+      }
+      if (!realTarget.startsWith(realBaseWithSep)) {
+        throw new ValidationError(
+          `Violación de seguridad: Intento de Path Traversal mediante enlace simbólico detectado en: ${relativePathOrKey}`
+        );
+      }
     }
 
     return resolvedPath;
   }
 
   /**
-   * Guarda un buffer de audio validando tamaño máximo y calculando SHA-256.
+   * Guarda un buffer de audio de forma atómica (.tmp -> fsync/datasync -> rename),
+   * calculando SHA-256 y aplicando permisos de solo lectura (0o444) en disco.
    */
   public async save(filename: string, buffer: Buffer): Promise<StorageSaveResult> {
     if (buffer.length > this.maxSizeBytes) {
-      throw new Error(
+      throw new ValidationError(
         `El archivo de audio (${buffer.length} bytes) excede la cuota máxima permitida de ${this.maxSizeBytes} bytes (50MB).`
       );
     }
 
     if (buffer.length === 0) {
-      throw new Error('El archivo de audio no puede estar vacío.');
+      throw new ValidationError('El archivo de audio no puede estar vacío.');
     }
 
-    // Generar nombre físico único e impredecible preservando la extensión
-    const ext = path.extname(filename).toLowerCase() || '.mp3';
-    const uniqueKey = `${crypto.randomUUID()}${ext}`;
+    // Generar clave física única e impredecible preservando extensión segura
+    const rawExt = path.extname(path.basename(filename)).toLowerCase();
+    const safeExt = /^\.[a-z0-9]{1,8}$/.test(rawExt) ? rawExt : '.mp3';
+    const uniqueKey = `${crypto.randomUUID()}${safeExt}`;
     const targetPath = this.resolveSafePath(uniqueKey);
+    const tempPath = `${targetPath}.tmp.${crypto.randomUUID()}`;
 
-    // Calcular checksum SHA-256
+    await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+
+    // Calcular checksum SHA-256 sobre los bytes originales exactos
     const hash = crypto.createHash('sha256').update(buffer).digest('hex');
 
-    // Escribir archivo en disco
-    await fs.promises.writeFile(targetPath, buffer);
+    // Escritura atómica con datasync + rename
+    const tempHandle = await fs.promises.open(tempPath, 'wx');
+    try {
+      let offset = 0;
+      while (offset < buffer.length) {
+        const { bytesWritten } = await tempHandle.write(buffer, offset, buffer.length - offset, offset);
+        if (bytesWritten <= 0) break;
+        offset += bytesWritten;
+      }
+      await tempHandle.datasync();
+    } catch (err) {
+      await tempHandle.close().catch(() => {});
+      await fs.promises.unlink(tempPath).catch(() => {});
+      throw err;
+    }
+    await tempHandle.close();
+
+    try {
+      await fs.promises.rename(tempPath, targetPath);
+      await fs.promises.chmod(targetPath, 0o444);
+    } catch (err) {
+      await fs.promises.unlink(tempPath).catch(() => {});
+      await fs.promises.chmod(targetPath, 0o666).catch(() => {});
+      await fs.promises.unlink(targetPath).catch(() => {});
+      throw err;
+    }
 
     return {
       storagePath: uniqueKey,
@@ -98,55 +183,132 @@ export class LocalFileSystemAudioStorageProvider implements IAudioStorageProvide
   }
 
   /**
-   * Obtiene un flujo de lectura (Readable Stream) con soporte de rangos HTTP para streaming 206.
+   * Obtiene un flujo de lectura (Readable Stream) sobre un descriptor único abierto,
+   * verificando tamaño e integridad SHA-256 completa antes de emitir bytes al cliente (sin TOCTOU ni buffering total).
    */
-  public async getStream(storagePath: string, start?: number, end?: number): Promise<StorageStreamResult> {
+  public async getStream(
+    storagePath: string,
+    start?: number,
+    end?: number,
+    options?: StreamIntegrityOptions
+  ): Promise<StorageStreamResult> {
     const fullPath = this.resolveSafePath(storagePath);
 
-    if (!fs.existsSync(fullPath)) {
-      throw new Error(`Archivo de audio no encontrado en almacenamiento: ${storagePath}`);
+    let fileHandle: fs.promises.FileHandle;
+    try {
+      fileHandle = await fs.promises.open(fullPath, 'r');
+    } catch (err: any) {
+      if (err?.code === 'ENOENT' || err?.code === 'EISDIR') {
+        throw new NotFoundError('Archivo físico de audio', storagePath);
+      }
+      throw err;
     }
 
-    const stat = await fs.promises.stat(fullPath);
-    const totalSize = stat.size;
+    let transferredOwnership = false;
+    try {
+      const stat = await fileHandle.stat();
+      if (!stat.isFile()) {
+        throw new NotFoundError('Archivo físico de audio', storagePath);
+      }
 
-    const rangeStart = start !== undefined ? Math.max(0, start) : 0;
-    const rangeEnd = end !== undefined ? Math.min(totalSize - 1, end) : totalSize - 1;
+      const totalSize = stat.size;
 
-    if (rangeStart > rangeEnd || rangeStart >= totalSize) {
-      throw new Error(`Rango de bytes inválido: bytes=${start}-${end} para un archivo de ${totalSize} bytes.`);
+      if (options?.expectedSizeBytes !== undefined && totalSize !== options.expectedSizeBytes) {
+        throw new ValidationError(
+          `Integridad física comprometida: el tamaño físico en disco (${totalSize} bytes) no coincide con el tamaño registrado (${options.expectedSizeBytes} bytes).`
+        );
+      }
+
+      let verifiedChecksumSha256: string | undefined;
+      if (options?.expectedChecksumSha256) {
+        const hasher = crypto.createHash('sha256');
+        const chunkBuf = Buffer.allocUnsafe(STREAM_HASH_CHUNK_BYTES);
+        let position = 0;
+
+        while (position < totalSize) {
+          const toRead = Math.min(chunkBuf.length, totalSize - position);
+          const { bytesRead } = await fileHandle.read(chunkBuf, 0, toRead, position);
+          if (bytesRead === 0) break;
+          hasher.update(chunkBuf.subarray(0, bytesRead));
+          position += bytesRead;
+        }
+
+        const computedHash = hasher.digest('hex');
+        if (computedHash.toLowerCase() !== options.expectedChecksumSha256.toLowerCase()) {
+          throw new ValidationError(
+            `Integridad física comprometida: el hash SHA-256 verificado antes del streaming (${computedHash}) no coincide con el registrado (${options.expectedChecksumSha256}).`
+          );
+        }
+        verifiedChecksumSha256 = computedHash;
+      }
+
+      const rangeStart = start !== undefined ? Math.max(0, start) : 0;
+      const rangeEnd = end !== undefined ? Math.min(totalSize - 1, end) : totalSize - 1;
+
+      if (totalSize === 0 || rangeStart > rangeEnd || rangeStart >= totalSize) {
+        throw new RangeNotSatisfiableError(
+          `Rango de bytes inválido: bytes=${start}-${end} para un archivo de ${totalSize} bytes.`,
+          totalSize
+        );
+      }
+
+      const chunkSize = rangeEnd - rangeStart + 1;
+      const stream = fileHandle.createReadStream({
+        start: rangeStart,
+        end: rangeEnd,
+        autoClose: true,
+      });
+
+      transferredOwnership = true;
+      return {
+        stream,
+        totalSize,
+        start: rangeStart,
+        end: rangeEnd,
+        chunkSize,
+        verifiedChecksumSha256,
+      };
+    } finally {
+      if (!transferredOwnership) {
+        await fileHandle.close().catch(() => {});
+      }
     }
-
-    const chunkSize = rangeEnd - rangeStart + 1;
-    const stream = fs.createReadStream(fullPath, { start: rangeStart, end: rangeEnd });
-
-    return {
-      stream,
-      totalSize,
-      start: rangeStart,
-      end: rangeEnd,
-      chunkSize,
-    };
   }
 
   /**
-   * Obtiene el buffer completo del archivo de audio.
+   * Obtiene el buffer completo del archivo de audio usando descriptor único seguro.
    */
   public async getBuffer(storagePath: string): Promise<Buffer> {
     const fullPath = this.resolveSafePath(storagePath);
-    if (!fs.existsSync(fullPath)) {
-      throw new Error(`Archivo de audio no encontrado: ${storagePath}`);
+    let fileHandle: fs.promises.FileHandle;
+    try {
+      fileHandle = await fs.promises.open(fullPath, 'r');
+    } catch (err: any) {
+      if (err?.code === 'ENOENT' || err?.code === 'EISDIR') {
+        throw new NotFoundError('Archivo físico de audio', storagePath);
+      }
+      throw err;
     }
-    return await fs.promises.readFile(fullPath);
+
+    try {
+      const stat = await fileHandle.stat();
+      if (!stat.isFile()) {
+        throw new NotFoundError('Archivo físico de audio', storagePath);
+      }
+      return await fileHandle.readFile();
+    } finally {
+      await fileHandle.close().catch(() => {});
+    }
   }
 
   /**
-   * Elimina el archivo del almacenamiento físico.
+   * Elimina el archivo del almacenamiento físico, restaurando permisos escribibles si es necesario.
    */
   public async delete(storagePath: string): Promise<boolean> {
     try {
       const fullPath = this.resolveSafePath(storagePath);
       if (fs.existsSync(fullPath)) {
+        await fs.promises.chmod(fullPath, 0o666).catch(() => {});
         await fs.promises.unlink(fullPath);
         return true;
       }
@@ -162,9 +324,37 @@ export class LocalFileSystemAudioStorageProvider implements IAudioStorageProvide
   public async exists(storagePath: string): Promise<boolean> {
     try {
       const fullPath = this.resolveSafePath(storagePath);
-      return fs.existsSync(fullPath);
+      return fs.existsSync(fullPath) && fs.statSync(fullPath).isFile();
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Enumera todas las claves físicas válidas almacenadas bajo baseDir (excluyendo temporales .tmp.*).
+   */
+  public async listKeys(): Promise<string[]> {
+    if (!fs.existsSync(this.baseDir)) {
+      return [];
+    }
+
+    const keys: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.includes('.tmp.')) continue;
+        const fullEntryPath = path.join(dir, entry.name);
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          await walk(fullEntryPath);
+        } else if (entry.isFile()) {
+          const rel = path.relative(this.baseDir, fullEntryPath).split(path.sep).join('/');
+          keys.push(rel);
+        }
+      }
+    };
+
+    await walk(this.baseDir);
+    return keys.sort();
   }
 }

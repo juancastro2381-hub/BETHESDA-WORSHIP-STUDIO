@@ -2,126 +2,74 @@
 # AUDIO SECURITY & DATA GOVERNANCE POLICY
 ## Scope 1C — Threat Modeling, Cryptographic Integrity & User Isolation
 
-**Document Version:** 1.0.0  
+**Document Version:** 2.0.0  
 **Phase:** Scope 1C — WS-AUDIO-01  
-**Date:** November 2026  
-**Status:** ACTIVE  
+**Status:** ACTIVE (Revalidated)  
 **Repository Branch:** `feature/phase-1a-core-foundation`
 
 ---
 
-## 1. Governance Charter & Principles
+## 1. Governance Charter & Security Invariants
 
-Bethesda Worship Studio is a non-commercial, privacy-respecting worship software platform. Worship team audio recordings—often consisting of rehearsals, proprietary arrangements, or private church performances—are treated as sensitive ecclesiastical data.
+Bethesda Worship Studio treats church rehearsal recordings and reference audio as private ecclesiastical media processed under four mandatory invariants:
 
-The system adheres to four mandatory security invariants:
-
-1. **Absolute Local Processing**: No audio binary, waveform telemetry, or derived metadata may ever be transmitted to external commercial cloud providers, remote AI services, or third-party transcription APIs.
-2. **Fail-Closed Binary Validation**: The server must never trust user-supplied file extensions or declared MIME types. Every byte stream is subjected to deep header and container analysis before being persisted.
-3. **Cryptographic Non-Repudiation & Tamper Resistance**: Every audio asset is bound to a SHA-256 cryptographic digest at the moment of ingestion. Any discrepancy detected at rest blocks file delivery immediately.
-4. **Anti-IDOR Ownership & Lifecycle Isolation**: Audio assets belong strictly to their uploaders and worship leaders. Unprivileged users cannot modify, replace, or delete assets uploaded by other team members.
+1. **Absolute Local Processing**: Audio files never leave the local server host or invoke external cloud AI/transcription APIs.
+2. **Fail-Closed Binary Validation**: Declared filenames and Content-Types are untrusted; deep binary header and MPEG/container inspection runs server-side before persistence.
+3. **Pre-Delivery Cryptographic Verification**: Every physical file's size and SHA-256 digest (`audio_assets.checksum_sha256`) are verified on a single open file descriptor before both HTTP Range streaming (`206`/`200`) and full downloads.
+4. **Real-Time Access Revocation & Anti-IDOR Isolation**: Active user verification applies to every request including active stream tickets, and deletion is isolated to owners or `WORSHIP_LEADER`/`SUPER_ADMIN`.
 
 ---
 
-## 2. Threat Modeling & Defense-in-Depth
+## 2. Threat Modeling & Mitigations
 
-The audio subsystem's threat matrix and mitigations are summarized below:
-
-| Threat Vector | Attack Scenario | Implemented Mitigation | Verification |
+| Threat Vector | Attack / Failure Scenario | Implemented Defense | Code & Test Evidence |
 | :--- | :--- | :--- | :--- |
-| **T1: Extension Spoofing** | Attacker renames malicious executable, HTML, or PHP script to `.mp3` or `.wav` to exploit downstream parsers. | `audio-signature-validator.ts` and `signature_inspector.py` inspect magic bytes against strict container standards. Rejects with 400. | Unit & regression tests in `audio-infrastructure.test.ts` and `audio-preservation-and-worker.test.ts`. |
-| **T2: Data Tampering at Rest** | Storage disk is compromised or files are swapped/modified out-of-band by an unauthorized process. | `AudioService.downloadAudio` recalculates SHA-256 from disk and compares against `song_audio_assets.sha256Hash`. Discrepancy triggers `IntegrityError` (500). | Verified in `test('2.3 should detect tampering if stored file is altered on disk')`. |
-| **T3: Insecure Direct Object References (IDOR)** | Authenticated musician accesses `DELETE /api/v1/audio/:id` specifying a target ID belonging to another worship leader. | `audio.routes.ts` evaluates `asset.uploadedByUserId === user.sub` or `SUPER_ADMIN`/`WORSHIP_LEADER`. Rejects with 403. | Verified in `test('2.6 should prevent musicians from deleting audio assets uploaded by other users')`. |
-| **T4: Revoked User Access** | Deactivated or banned user attempts to stream or download audio using a previously issued valid JWT. | `authGuard.requirePermission('songs:read', true)` executes a real-time database query to ensure the user account is active. | Verified in `test('2.5 should enforce real-time active user check on audio streaming')`. |
-| **T5: Subprocess Hang / DoS** | Malformed audio stream causes local decoder or FFmpeg subprocess to hang in an infinite loop. | `PythonAudioWorkerBridge` executes via `Promise.race` with an enforce-killed timeout (default 30s) and line-buffered IPC. | Verified in IPC bridge timeout tests. |
-| **T6: Path Traversal** | Attacker injects `../../` or Windows path traversal sequences into filename. | Stored filenames use server-generated UUIDs (`<assetId>.<ext>`) in dedicated storage root; original filenames are sanitized and stored as text metadata only. | Verified in `FileStorageService` tests. |
-| **T7: Notation Hallucination / Fabrication** | Un-transcribed audio causes system to generate random chords or overwrite canonical sheet music. | `AudioIngestionAdapter` returns null canonical payload, null key, and null BPM. Audio is purely linked as an attachment. | Verified in `test('2.1 should preserve zero-fabrication invariant in AudioIngestionAdapter')`. |
-| **T8: Cloud Leakage** | External transcription libraries make background phone-home calls or upload chunks to cloud servers. | Local Python worker dependencies are statically bundled (`imageio-ffmpeg`); worker has zero HTTP client code and zero network permissions. | Audited via dependency analysis and offline worker verification. |
+| **T1: Extension & MIME Spoofing** | HTML, text, executable, or ID3-only stub renamed `.mp3`. | `audio-signature-validator.ts` & `signature_inspector.py` require container headers + valid audio frame syncs; reject with `ValidationError` (400). | `audio-infrastructure.test.ts` (#3, #9b); `audio-preservation-and-worker.test.ts` (#6, #7); `test_worker.py` |
+| **T2: Data Tampering / TOCTOU on Stream & Download** | On-disk file altered outside target `Range` (e.g., tail byte flipped) or swapped between `stat` and `read`. | `LocalFileSystemAudioStorageProvider.getStream()` opens one `FileHandle`, verifies `stat.size` and full-file streaming SHA-256 (64 KiB chunks) before `createReadStream()`. Rejects with `400 VALIDATION_ERROR` (or `404 NOT_FOUND` if missing). | `audio-preservation-and-worker.test.ts` (#8, #12, #13) |
+| **T3: Stale / Suspended User Stream Ticket Abuse** | Musician obtains 60s/25-use stream ticket, then is suspended, locked, or deleted in PostgreSQL before ticket expires. | `verifyActiveAuthorizedStreamUser()` queries `userRepo.findById()` on **both** `?ticket=` and Bearer requests in `GET /api/v1/audio/:id/stream`. Calls `globalStreamTicketService.revokeTicketsForUser()` and returns `403 FORBIDDEN` or `401 UNAUTHORIZED`. | `audio-preservation-and-worker.test.ts` (#15) |
+| **T4: Insecure Direct Object Reference (IDOR)** | Non-owner `MUSICIAN` deletes audio uploaded by another team member. | `DELETE /api/v1/audio/:id` permits only `uploadedByUserId === user.sub` or `SUPER_ADMIN` / `WORSHIP_LEADER` (`403 FORBIDDEN`). | `audio-preservation-and-worker.test.ts` (#9) |
+| **T5: Path Traversal & Symlink Escape** | Caller/DB key contains `../`, null bytes, drive prefixes, or symlinks escaping `AUDIO_STORAGE_PATH`. | `resolveSafePath()` rejects traversal/null bytes and checks `fs.realpathSync()` containment inside `baseDir`. Saved files use UUID names + `chmod 0o444`. | `audio-infrastructure.test.ts` (#9); `storage-provider.ts` |
+| **T6: Orphan Disk Files on Partial Failures** | DB insertion or worker check fails after disk write leaves unreferenced media on disk. | `AudioService.uploadAudio()` deletes physical file in `catch`; `reconcileStorageConsistency()` detects/purges orphans. | `audio-preservation-and-worker.test.ts` (#16) |
+| **T7: Worker URI SSRF / Source Overwrite / DoS** | Worker handed `https://`/`file:` URI, `derivativeWavPath == sourcePath`, or 50 MiB file exhausting RAM/CPU. | `PythonAudioWorkerBridge` + `main.py` enforce regex SHA-256, reject protocols/null bytes, forbid `derivative == source`, stream headers/frames in bounded memory, run `ffmpeg -threads 1`, cap probes at 60s, and support `AbortSignal` + 30s timeout kill. | `test_worker.py` (15 passed); `audio-preservation-and-worker.test.ts` (#17) |
+| **T8: Musical Hallucination / Canonical Overwrite** | Raw audio auto-generates unverified chords or overwrites song lyrics/notation. | `AudioIngestionAdapter` outputs `null` musical fields; audio assets sit exclusively in satellite table `audio_assets`. | `audio-preservation-and-worker.test.ts` (#5); `conversion-api.test.ts` |
 
 ---
 
-## 3. Cryptographic Specification
-
-### 3.1 SHA-256 Digest Lifecycle
+## 3. Cryptographic Integrity Flow
 
 ```
-[Incoming Buffer] ──────────────────────► crypto.createHash('sha256').update(buffer).digest('hex')
-                                                         │
-                                                         ▼
-                                            Stored in PostgreSQL DB:
-                                            song_audio_assets.sha256Hash
-                                                         │
-                                                         ▼
-[Physical File on Disk] ─────────────────► backend/storage/audio/<id>.<ext>
-                                                         │
-                                      [Streaming / Download Request]
-                                                         │
-                                                         ▼
-[Re-read Disk Buffer] ──────────────────► crypto.createHash('sha256').update(diskBuffer).digest('hex')
-                                                         │
-                                          ┌──────────────┴──────────────┐
-                                          │ Computed === Persisted ?    │
-                                          └──────────────┬──────────────┘
-                                                         │
-                                    ┌────────────────────┴────────────────────┐
-                                    │ YES                                     │ NO
-                                    ▼                                         ▼
-                            Deliver to Client                    Throw IntegrityError (500)
-                            (HTTP 200 / 206)                     Block Stream Immediately
+Upload Buffer ──► crypto.createHash('sha256') ──► Persisted in DB: audio_assets.checksum_sha256
+                                                       │
+Atomic Write (.tmp.<uuid> -> datasync -> rename -> chmod 0o444)
+                                                       │
+                                                       ▼
+GET /api/v1/audio/:id/stream (or /download)
+    ├── Verify User Active/Role in PostgreSQL (`verifyActiveAuthorizedStreamUser`)
+    ├── Single FileHandle open(fullPath, 'r') ──► ENOENT? ──► 404 NOT_FOUND
+    ├── fstat() size === file_size_bytes?       ──► NO?     ──► Close Handle & 400 VALIDATION_ERROR
+    └── Streaming SHA-256 (64 KiB loop on fd) === checksum_sha256?
+           ├── NO  ──► Close Handle & Throw ValidationError (HTTP 400, 0 bytes emitted)
+           └── YES ──► fileHandle.createReadStream({ start, end, autoClose: true }) + ETag / X-Checksum-Sha256
 ```
 
-### 3.2 Magic Byte Signatures Enforced
+---
 
-- **MP3 (MPEG-1/2 Audio Layer III)**:
-  - Header Tag: `49 44 33` (`ID3`) with valid version byte `< 0xFF`.
-  - Frame Sync: First byte `0xFF`, second byte `0xE0` mask (11 sync bits), Layer I/II/III bits non-zero, bitrate index `< 15`, sample rate index `< 3`.
-- **WAV (RIFF Waveform Audio)**:
-  - Bytes 0-3: `52 49 46 46` (`RIFF`).
-  - Bytes 8-11: `57 41 56 45` (`WAVE`).
-- **FLAC (Free Lossless Audio Codec)**:
-  - Bytes 0-3: `66 4C 61 43` (`fLaC`).
-- **OGG (Ogg Vorbis / Opus Container)**:
-  - Bytes 0-3: `4F 67 67 53` (`OggS`).
-- **M4A / AAC (MPEG-4 Audio)**:
-  - Bytes 4-7: `66 74 79 70` (`ftyp`), followed by brands `M4A `, `M4B `, `M4P `, `aac `.
-  - Raw ADTS Frame Sync: Bytes `0xFFF1` or `0xFFF9`.
+## 4. Access Control Matrix (`audio.routes.ts`)
 
-Any buffer deviating from these signatures is rejected prior to any filesystem write.
+| Endpoint | Permission | Real-Time DB Check | Additional Enforcement |
+| :--- | :--- | :--- | :--- |
+| `POST /api/v1/songs/:songId/audio` | `songs:create` | Yes (`verifyDatabaseRole = true`) | Fail-closed binary signature + optional Python worker check |
+| `GET /api/v1/songs/:songId/audio` | `songs:read` | Yes (`verifyDatabaseRole = true`) | Song existence validation |
+| `GET /api/v1/audio/:id` | `songs:read` | Yes (`verifyDatabaseRole = true`) | Asset UUID validation |
+| `POST /api/v1/audio/:id/ticket` | `songs:read` | Yes (`verifyDatabaseRole = true`) | Scoped 60s TTL, max 25 uses, bound to `userId` & `assetId` |
+| `GET /api/v1/audio/:id/stream` | `songs:read` | **Yes (`verifyActiveAuthorizedStreamUser`)** | Enforced on `?ticket=` & Bearer; revokes tickets on bad user state; pre-stream SHA-256 |
+| `POST /api/v1/audio/:id/verify` | `songs:read` | Yes (`verifyDatabaseRole = true`) | Local Python worker inspection & PCM decode probe |
+| `GET /api/v1/audio/:id/download` | `songs:read` | Yes (`verifyDatabaseRole = true`) | Full SHA-256 verification before delivery |
+| `DELETE /api/v1/audio/:id` | `songs:update_draft` | Yes (`verifyDatabaseRole = true`) | Anti-IDOR: owner OR `WORSHIP_LEADER` / `SUPER_ADMIN` |
 
 ---
 
-## 4. Role-Based Access Control (RBAC) & Ownership Matrix
+## 5. Worker Licensing & Infrastructure Disclosure
 
-| Action | HTTP Route | Required Permission | Active DB Check | Role Allowed | IDOR Check Enforced |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Upload Audio** | `POST /api/v1/songs/:songId/audio` | `songs:create` | Yes (Real-time) | Musician, Worship Leader, Admin | Associated with uploader's user ID |
-| **Stream Audio** | `GET /api/v1/audio/:id/stream` | `songs:read` | Yes (Real-time) | All active authenticated users | N/A (Shared Repertoire) |
-| **Download Audio** | `GET /api/v1/audio/:id/download` | `songs:read` | Yes (Real-time) | All active authenticated users | N/A (Shared Repertoire) |
-| **Delete Audio** | `DELETE /api/v1/audio/:id` | `songs:read` | Yes (Real-time) | Uploader, Worship Leader, Admin | **Enforced**: Non-owner musicians receive 403 Forbidden |
-
----
-
-## 5. Subprocess Sandbox & Isolation Standards
-
-The Python worker runs as an isolated helper subprocess:
-1. **Operating Environment**:
-   - Executes inside a virtual environment (`workers/audio_worker/.venv`).
-   - Run under the operating system account of the backend service without elevated privileges.
-2. **File System Boundaries**:
-   - The worker only accesses file paths passed explicitly in the JSON request payload.
-   - It performs read-only inspection of target audio files.
-3. **Execution Timeouts**:
-   - Node.js wrapper enforces a hard timeout (default 30,000 ms) using `setTimeout`.
-   - On timeout, `childProcess.kill('SIGKILL')` is dispatched, releasing memory and file handles immediately.
-4. **Zero Networking**:
-   - No socket libraries (`urllib`, `requests`, `aiohttp`, etc.) are imported.
-   - No external ports are opened.
-
----
-
-## 6. Auditability & Incident Response
-
-- **Security Logging**: All integrity check failures and Anti-IDOR rejections are logged at `WARN`/`ERROR` level with request IP, user ID, asset ID, and timestamp.
-- **Corrupted Asset Quarantine**: If an `IntegrityError` is triggered, an administrative alert is generated to notify the system administrator to investigate disk health or restore from backup.
-- **Revocation Propagation**: When a user account is deactivated in the administrative console, the real-time active check terminates their audio streaming capability on the very next HTTP request.
-
+- **Open-Source Stack**: Python worker uses `numpy` (BSD-3-Clause), `pydantic` (MIT), `pytest` (MIT), and `imageio-ffmpeg` (BSD-2-Clause wrapper) shipping static **FFmpeg 9.0.2** (`gyan.dev` essentials, **GPLv3**). Because FFmpeg runs out-of-process as a local CLI executable in git-ignored `.venv`, repo source code remains unencumbered; binary distribution of `.venv`/FFmpeg requires GPLv3 compliance.
+- **Volume Durability**: Production persistent storage infrastructure for `AUDIO_STORAGE_PATH` is **`NOT PRODUCTION VERIFIED`** (`docker-compose.yml` contains local development PostgreSQL only).

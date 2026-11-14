@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import sys
 from pathlib import Path
 from typing import Literal, Optional
@@ -35,6 +36,23 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from audio_inspector import inspect_and_verify_audio_file, outcome_to_dict
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_DISALLOWED_URI_PREFIX_RE = re.compile(
+    r"^(?:https?|ftps?|sftp|rtmps?|rtsp|tcp|udp|tls|file|pipe|concat|subfile|data|crypto):",
+    re.IGNORECASE,
+)
+
+
+def _validate_local_path_string(raw_path: str, field_name: str) -> Path:
+    if "\x00" in raw_path:
+        raise ValueError(f"{field_name} contains a null byte.")
+    stripped = raw_path.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} must not be empty.")
+    if _DISALLOWED_URI_PREFIX_RE.match(stripped):
+        raise ValueError(f"{field_name} must be a local filesystem path, not a URI or protocol stream.")
+    return Path(stripped)
 
 
 class WorkerRequest(BaseModel):
@@ -90,6 +108,35 @@ def handle_request_json(raw_json: str) -> int:
         })
         return 2
 
+    if not _SHA256_HEX_RE.match(req.expectedSha256):
+        _emit({
+            "type": "ERROR",
+            "contractVersion": "1.0",
+            "jobId": req.jobId,
+            "errorCode": "INVALID_ARGUMENT",
+            "message": "expectedSha256 must be a 64-character hexadecimal SHA-256 digest.",
+        })
+        return 2
+
+    try:
+        source_path = _validate_local_path_string(req.sourcePath, "sourcePath")
+        derivative_path = (
+            _validate_local_path_string(req.derivativeWavPath, "derivativeWavPath")
+            if req.derivativeWavPath is not None
+            else None
+        )
+        if derivative_path is not None and derivative_path.resolve() == source_path.resolve():
+            raise ValueError("derivativeWavPath must not resolve to the immutable sourcePath.")
+    except ValueError as exc:
+        _emit({
+            "type": "ERROR",
+            "contractVersion": "1.0",
+            "jobId": req.jobId,
+            "errorCode": "INVALID_ARGUMENT",
+            "message": str(exc),
+        })
+        return 2
+
     def on_progress(pct: int, stage: str) -> None:
         _emit({
             "type": "PROGRESS",
@@ -100,9 +147,8 @@ def handle_request_json(raw_json: str) -> int:
         })
 
     try:
-        derivative_path = Path(req.derivativeWavPath) if req.derivativeWavPath else None
         outcome = inspect_and_verify_audio_file(
-            source_path=Path(req.sourcePath),
+            source_path=source_path,
             expected_sha256=req.expectedSha256,
             derivative_wav_path=derivative_path,
             emit_progress=on_progress,

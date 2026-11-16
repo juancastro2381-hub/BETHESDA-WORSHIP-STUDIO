@@ -3766,6 +3766,23 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       assert.strictEqual(draft1.targets.MUSIC_XML.generatable, true);
       assert.strictEqual(draft1.targets.LYRICS_ONLY.generatable, false);
       assert.strictEqual(draft1.targets.LYRICS_ONLY.status, 'REVIEW_REQUIRED');
+      assert.ok(
+        !JSON.stringify({
+          reason: draft1.analysisSummary.noteExtractionReason,
+          stages: draft1.analysisSummary.stages,
+          targets: Object.values(draft1.targets).map((t: any) => t.reason),
+        }).includes('\uFFFD'),
+        'Las cadenas IPC UTF-8 no deben contener caracteres de reemplazo U+FFFD'
+      );
+      const draft1Chords = (draft1.proposedCanonicalPayload.measures ?? []).flatMap((m: any) => m.chords ?? []);
+      assert.ok(
+        draft1Chords.every((c: any) =>
+          ['DETECTED', 'ESTIMATED', 'AMBIGUOUS', 'HUMAN_VERIFIED'].includes(c.evidenceStatus)
+        ),
+        'Cada ChordEvent debe preservar su classification evidenceStatus'
+      );
+      assert.ok(draft1.harmonicEvidenceSummary);
+      assert.strictEqual(draft1.harmonicEvidenceSummary.totalChords, draft1Chords.length);
 
       // Verificar que la canción canónica NO fue modificada automáticamente por el análisis
       const afterAnalyzeSongRes = await app.inject({
@@ -3807,6 +3824,7 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       });
       assert.strictEqual(exportChoRes.statusCode, 200, exportChoRes.body);
       assert.ok(exportChoRes.json().data.content.includes('{title: Al Que Está Sentado En El Trono (Audio Revisado)}'));
+      assert.ok(exportChoRes.json().data.content.includes('{comment: Evidencia armónica:'));
 
       const exportXmlRes = await app.inject({
         method: 'GET',
@@ -3815,6 +3833,15 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       });
       assert.strictEqual(exportXmlRes.statusCode, 200, exportXmlRes.body);
       assert.ok(exportXmlRes.json().data.content.includes('<score-partwise'));
+      assert.ok(!String(exportXmlRes.json().data.reason).includes('acordes verificados'));
+      assert.ok(String(exportXmlRes.json().data.content).includes('<!-- evidence: status='));
+      if (draft1.analysisSummary.totalNotesDetected === 0) {
+        assert.ok(
+          String(exportXmlRes.json().data.content).includes(
+            '<miscellaneous-field name="musical-representation">HARMONIC_LEAD_SHEET_ONLY'
+          )
+        );
+      }
 
       // 6. Rechazar el primer borrador y comprobar que no puede publicarse ni altera la canción canónica
       const rejectRes = await app.inject({
@@ -3843,7 +3870,8 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       });
       assert.strictEqual(approveRejectedRes.statusCode, 400);
 
-      // 7. Generar segundo borrador con letra incluida, verificar bloqueo RBAC para MUSICIAN y aprobar con WORSHIP_LEADER
+      // 7. Generar segundo borrador con letra incluida y selectedInstrument='VOCAL' (TABLATURE queda NOT_GENERATABLE),
+      // verificar bloqueo RBAC para MUSICIAN, rechazo 400 de formatos NOT_GENERATABLE, y aprobar con WORSHIP_LEADER
       const analyze2Res = await app.inject({
         method: 'POST',
         url: `/api/v1/audio/${uploadedAsset.id}/analyze`,
@@ -3853,10 +3881,13 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
         },
         payload: JSON.stringify({
           verifiedLyrics: 'Al que está sentado en el trono\nSea la gloria y el honor',
+          selectedInstrument: 'VOCAL',
         }),
       });
       assert.strictEqual(analyze2Res.statusCode, 201, analyze2Res.body);
       const draft2 = analyze2Res.json().data;
+      assert.strictEqual(draft2.targets.TABLATURE.generatable, false);
+      assert.strictEqual(draft2.targets.TABLATURE.status, 'NOT_GENERATABLE');
 
       const forbiddenApproveRes = await app.inject({
         method: 'POST',
@@ -3869,6 +3900,53 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       });
       assert.strictEqual(forbiddenApproveRes.statusCode, 403);
 
+      // Bloquear aprobación de formatos NOT_GENERATABLE (Cero Fabricación) y listas vacías
+      const invalidTabApproveRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          approvedFormats: ['CHORD_PRO', 'TABLATURE'],
+        }),
+      });
+      assert.strictEqual(invalidTabApproveRes.statusCode, 400);
+
+      if (!draft2.targets.MIDI.generatable) {
+        const invalidMidiApproveRes = await app.inject({
+          method: 'POST',
+          url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
+          headers: {
+            authorization: `Bearer ${directorToken}`,
+            'content-type': 'application/json',
+          },
+          payload: JSON.stringify({
+            approvedFormats: ['CHORD_PRO', 'MIDI'],
+          }),
+        });
+        assert.strictEqual(invalidMidiApproveRes.statusCode, 400);
+      }
+
+      const emptyFormatsApproveRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          approvedFormats: [],
+        }),
+      });
+      assert.strictEqual(emptyFormatsApproveRes.statusCode, 400);
+
+      const preApproveChords = (draft2.proposedCanonicalPayload.measures ?? []).flatMap((m: any) => m.chords ?? []);
+      const preEstimatedAndAmbiguous = preApproveChords.filter(
+        (c: any) => c.evidenceStatus === 'ESTIMATED' || c.evidenceStatus === 'AMBIGUOUS'
+      ).length;
+
       const approve2Res = await app.inject({
         method: 'POST',
         url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
@@ -3879,12 +3957,25 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
         payload: JSON.stringify({
           versionName: 'Transcripción Audio Aprobada v2',
           reviewNotes: 'Aprobación humana Gate 4 completada.',
+          approvedFormats: ['CHORD_PRO', 'MUSIC_XML'],
         }),
       });
       assert.strictEqual(approve2Res.statusCode, 201, approve2Res.body);
       const approvalPayload = approve2Res.json().data;
       assert.strictEqual(approvalPayload.versionNumber, 2);
       assert.strictEqual(approvalPayload.draft.workflowState, 'APPROVED');
+      assert.deepStrictEqual(approvalPayload.approvalMetadata.approvedFormats, ['CHORD_PRO', 'MUSIC_XML']);
+      assert.ok(
+        approvalPayload.approvalMetadata.blockedFormats.some(
+          (b: any) => b.format === 'TABLATURE' && b.status === 'NOT_GENERATABLE'
+        )
+      );
+      assert.ok(
+        approvalPayload.approvalMetadata.blockedFormats.some(
+          (b: any) => b.format === 'LYRICS_ONLY' && b.status === 'EXCLUDED_BY_REVIEWER'
+        )
+      );
+      assert.ok(approvalPayload.approvalMetadata.harmonicEvidenceSummary);
 
       // 8. Verificar integración con el Atril Digital (Gate 5) y preservación de historial canónico (v1 + v2)
       const standSongRes = await app.inject({
@@ -3902,6 +3993,17 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       assert.strictEqual(approvedCanonical.metadata.approvalStatus, 'APPROVED');
       assert.strictEqual(approvedCanonical.metadata.sourceAudioAssetId, uploadedAsset.id);
       assert.strictEqual(approvedCanonical.metadata.sourceAudioSha256, uploadedAsset.checksumSha256);
+      assert.deepStrictEqual(approvedCanonical.metadata.approvedFormats, ['CHORD_PRO', 'MUSIC_XML']);
+      assert.ok(approvedCanonical.metadata.harmonicEvidenceSummary);
+      const postApproveChords = (approvedCanonical.measures ?? []).flatMap((m: any) => m.chords ?? []);
+      const postEstimatedAndAmbiguous = postApproveChords.filter(
+        (c: any) => c.evidenceStatus === 'ESTIMATED' || c.evidenceStatus === 'AMBIGUOUS'
+      ).length;
+      assert.strictEqual(
+        postEstimatedAndAmbiguous,
+        preEstimatedAndAmbiguous,
+        'La aprobación humana no debe promover acordes ESTIMATED o AMBIGUOUS sin edición explícita'
+      );
       assert.ok(approvedCanonical.measures.length > 0, 'El modelo canónico aprobado debe contener compases verificados');
 
       const versionsRes = await app.inject({

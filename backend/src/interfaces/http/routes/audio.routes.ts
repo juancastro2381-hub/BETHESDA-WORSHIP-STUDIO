@@ -344,6 +344,9 @@ const ApproveAudioDraftBodySchema = z
     versionDescription: z.string().max(1000).optional(),
     setAsCurrent: z.boolean().optional(),
     reviewNotes: z.string().max(1000).optional(),
+    approvedFormats: z
+      .array(z.enum(['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY']))
+      .optional(),
   })
   .default({});
 

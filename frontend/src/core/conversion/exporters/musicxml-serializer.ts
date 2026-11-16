@@ -72,6 +72,13 @@ export class CanonicalToMusicXmlSerializer {
 
     // 3. Identificación y Créditos
     const artist = typeof payload.metadata?.artist === 'string' ? payload.metadata.artist : null;
+    const allChords = payload.getAllChords();
+    const totalMelodicNotes = payload.getAllNotes().length;
+    const isAudioDerived =
+      payload.metadata?.isAudioDerived === true ||
+      typeof payload.metadata?.harmonicEvidenceSummary === 'object' ||
+      allChords.some((ce) => ce.evidenceStatus !== undefined);
+
     xmlLines.push('  <identification>');
     if (artist) {
       xmlLines.push(`    <creator type="composer">${this.escapeXml(artist)}</creator>`);
@@ -80,6 +87,33 @@ export class CanonicalToMusicXmlSerializer {
     xmlLines.push(`      <software>${this.escapeXml(softwareName)}</software>`);
     xmlLines.push(`      <encoding-date>${encodingDate}</encoding-date>`);
     xmlLines.push('    </encoding>');
+    if (isAudioDerived) {
+      const detectedCount = allChords.filter((ce) => ce.evidenceStatus === 'DETECTED').length;
+      const estimatedCount = allChords.filter((ce) => ce.evidenceStatus === 'ESTIMATED').length;
+      const ambiguousCount = allChords.filter((ce) => ce.evidenceStatus === 'AMBIGUOUS').length;
+      const humanVerifiedCount = allChords.filter((ce) => ce.evidenceStatus === 'HUMAN_VERIFIED').length;
+      const representationLabel =
+        totalMelodicNotes === 0
+          ? 'HARMONIC_LEAD_SHEET_ONLY (0 melodic notes; not a complete traditional staff score)'
+          : `MELODIC_AND_HARMONIC_DRAFT (${totalMelodicNotes} melodic notes)`;
+      const evidenceSummaryText = `${allChords.length} chord events total: ${detectedCount} DETECTED, ${estimatedCount} ESTIMATED, ${ambiguousCount} AMBIGUOUS, ${humanVerifiedCount} HUMAN_VERIFIED`;
+      const overallConfPct =
+        typeof payload.metadata?.overallConfidence === 'number'
+          ? `${(payload.metadata.overallConfidence * 100).toFixed(1)}%`
+          : 'N/A';
+
+      xmlLines.push('    <miscellaneous>');
+      xmlLines.push(
+        `      <miscellaneous-field name="musical-representation">${this.escapeXml(representationLabel)}</miscellaneous-field>`
+      );
+      xmlLines.push(
+        `      <miscellaneous-field name="harmonic-evidence-breakdown">${this.escapeXml(evidenceSummaryText)}</miscellaneous-field>`
+      );
+      xmlLines.push(
+        `      <miscellaneous-field name="overall-analysis-confidence">${this.escapeXml(overallConfPct)}</miscellaneous-field>`
+      );
+      xmlLines.push('    </miscellaneous>');
+    }
     xmlLines.push('  </identification>');
 
     // 4. Lista de Partes
@@ -365,6 +399,17 @@ export class CanonicalToMusicXmlSerializer {
     else if (quality === 'POWER_5') kindXml = 'power';
 
     lines.push('      <harmony>');
+    if (chordEvent.evidenceStatus) {
+      const safeConf =
+        typeof chordEvent.confidence === 'number'
+          ? `; confidence=${(chordEvent.confidence * 100).toFixed(1)}%`
+          : '';
+      const safeAlt =
+        typeof chordEvent.alternativeSymbol === 'string' && chordEvent.alternativeSymbol.trim().length > 0
+          ? `; alternative=${chordEvent.alternativeSymbol.replace(/--/g, '-')}`
+          : '';
+      lines.push(`        <!-- evidence: status=${chordEvent.evidenceStatus}${safeConf}${safeAlt} -->`);
+    }
     lines.push('        <root>');
     lines.push(`          <root-step>${baseLetter}</root-step>`);
     if (alter !== 0) {

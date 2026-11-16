@@ -21,18 +21,18 @@ import { hasAudioExtension, inspectAudioSignature } from './audio-signature.ts';
 
 export interface AudioWorkflowCapabilityContext {
   readonly workflowState:
-    | 'IDLE'
-    | 'AUDIO_PRESERVED'
-    | 'ANALYSIS_QUEUED'
-    | 'ANALYSIS_RUNNING'
-    | 'ANALYSIS_COMPLETED'
-    | 'ANALYSIS_PARTIAL'
-    | 'TRANSCRIPTION_RUNNING'
-    | 'DRAFT_READY'
-    | 'REVIEW_REQUIRED'
-    | 'APPROVED'
-    | 'REJECTED'
-    | 'FAILED';
+  | 'IDLE'
+  | 'AUDIO_PRESERVED'
+  | 'ANALYSIS_QUEUED'
+  | 'ANALYSIS_RUNNING'
+  | 'ANALYSIS_COMPLETED'
+  | 'ANALYSIS_PARTIAL'
+  | 'TRANSCRIPTION_RUNNING'
+  | 'DRAFT_READY'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'FAILED';
   readonly draft?: {
     readonly workflowState: string;
     readonly selectedInstrument?: string;
@@ -40,6 +40,10 @@ export interface AudioWorkflowCapabilityContext {
       readonly totalNotesDetected: number;
       readonly totalChordsDetected: number;
     };
+    readonly approvalMetadata?: {
+      readonly approvedFormats?: ReadonlyArray<string>;
+      readonly blockedFormats?: ReadonlyArray<{ readonly format: string; readonly reason: string }>;
+    } | null;
     readonly targets: Record<
       string,
       {
@@ -145,8 +149,8 @@ export class FormatCapabilitiesEvaluator {
       typeof content === 'string'
         ? content
         : content instanceof Uint8Array && !isBufferBinary
-        ? new TextDecoder('utf-8', { fatal: false }).decode(content.slice(0, 8192))
-        : null;
+          ? new TextDecoder('utf-8', { fatal: false }).decode(content.slice(0, 8192))
+          : null;
 
     if (textContent !== null) {
       const trimmed = textContent.trim();
@@ -745,7 +749,7 @@ export class FormatCapabilitiesEvaluator {
         idleDescription:
           'Extracción armónica de acordes alineados por compás y sección (requiere análisis Python WS-AUDIO-02).',
         draftDescription:
-          'Cifrado armónico con línea de tiempo de acordes detectados y directivas de sección.',
+          'Cifrado armónico con línea de tiempo de acordes detectados, estimados y ambiguos, más directivas de sección.',
       },
       {
         format: 'MUSIC_XML',
@@ -755,7 +759,7 @@ export class FormatCapabilitiesEvaluator {
         idleDescription:
           'Guion armónico MusicXML 4.0 con compases y acordes (incluye notas melódicas únicamente si son verificables).',
         draftDescription:
-          'Partitura estructural MusicXML 4.0 con compases, métrica, armadura y eventos verificados.',
+          'Partitura estructural MusicXML 4.0 con compases, métrica, armadura y evidencia armónica/melódica diferenciada.',
       },
       {
         format: 'MIDI',
@@ -795,15 +799,21 @@ export class FormatCapabilitiesEvaluator {
     const scope1cCaps: FormatCapabilityInfo[] = baseDefs.map((def) => {
       if (context.draft) {
         const t = context.draft.targets[def.format];
+        const approvedList = context.draft.approvalMetadata?.approvedFormats;
+        const excludedByReviewer =
+          context.draft.workflowState === 'APPROVED' &&
+          Array.isArray(approvedList) &&
+          !approvedList.includes(def.format);
+
         let dynamicState: AudioDynamicCapabilityState;
         if (isRunning) {
           dynamicState = 'ANALYSIS_RUNNING';
         } else if (isFailed) {
           dynamicState = 'FAILED';
-        } else if (context.draft.workflowState === 'APPROVED' && t?.generatable) {
+        } else if (context.draft.workflowState === 'APPROVED' && t?.generatable && !excludedByReviewer) {
           dynamicState = 'APPROVED';
         } else if (t?.generatable && t.status === 'DRAFT_READY') {
-          dynamicState = 'DRAFT_READY';
+          dynamicState = excludedByReviewer ? 'REVIEW_REQUIRED' : 'DRAFT_READY';
         } else if (t?.status === 'REVIEW_REQUIRED') {
           dynamicState = 'REVIEW_REQUIRED';
         } else {
@@ -821,14 +831,14 @@ export class FormatCapabilitiesEvaluator {
           dynamicState === 'APPROVED'
             ? 'CONVERTED'
             : isAvailable
-            ? 'AI_DRAFT'
-            : 'BLOCKED_ZERO_FABRICATION';
+              ? 'AI_DRAFT'
+              : 'BLOCKED_ZERO_FABRICATION';
 
         const isHarmonicOnlyMusicXml =
           def.format === 'MUSIC_XML' && context.draft.analysisSummary?.totalNotesDetected === 0;
 
         const description = isHarmonicOnlyMusicXml
-          ? 'Guion armónico estructural MusicXML 4.0 con compases y acordes <harmony> (sin notas melódicas inventadas; no constituye una partitura melódica tradicional).'
+          ? 'Guion armónico estructural MusicXML 4.0 con compases y acordes <harmony> (detectados, estimados y ambiguos diferenciados; sin notas melódicas inventadas; no constituye una partitura melódica tradicional).'
           : def.draftDescription;
 
         return {
@@ -842,6 +852,8 @@ export class FormatCapabilitiesEvaluator {
           description,
           blockingReason: !isAvailable
             ? t?.reason || 'No generable con la evidencia acústica actual (Cero Fabricación).'
+            : excludedByReviewer
+            ? 'Excluido del alcance de aprobación por decisión del revisor humano.'
             : undefined,
           dynamicAudioState: dynamicState,
           confidencePercent,

@@ -24,6 +24,8 @@ export interface ChordStructuredJSON {
   symbol: string;
 }
 
+export type ChordEvidenceStatus = 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'HUMAN_VERIFIED';
+
 export interface ChordEventJSON {
   id: string;
   chord: ChordStructuredJSON;
@@ -31,6 +33,9 @@ export interface ChordEventJSON {
   durationTicks?: number | null;
   measureNumber: number;
   voice?: number;
+  evidenceStatus?: ChordEvidenceStatus;
+  confidence?: number;
+  alternativeSymbol?: string | null;
 }
 
 export class ChordEvent {
@@ -40,6 +45,9 @@ export class ChordEvent {
   public readonly durationTicks?: number | null;
   public readonly measureNumber: number;
   public readonly voice?: number;
+  public readonly evidenceStatus?: ChordEvidenceStatus;
+  public readonly confidence?: number;
+  public readonly alternativeSymbol?: string | null;
 
   public constructor(init: {
     id: string;
@@ -48,6 +56,9 @@ export class ChordEvent {
     durationTicks?: number | null;
     measureNumber: number;
     voice?: number;
+    evidenceStatus?: ChordEvidenceStatus;
+    confidence?: number;
+    alternativeSymbol?: string | null;
   }) {
     if (!init.id || typeof init.id !== 'string') {
       throw new Error(`ID de evento de acorde requerido e inválido: ${init.id}`);
@@ -75,6 +86,9 @@ export class ChordEvent {
     this.durationTicks = init.durationTicks ?? null;
     this.measureNumber = init.measureNumber;
     if (init.voice !== undefined) this.voice = init.voice;
+    if (init.evidenceStatus !== undefined) this.evidenceStatus = init.evidenceStatus;
+    if (init.confidence !== undefined) this.confidence = init.confidence;
+    if (init.alternativeSymbol !== undefined) this.alternativeSymbol = init.alternativeSymbol;
   }
 
   public get endTick(): number | null {
@@ -101,6 +115,9 @@ export class ChordEvent {
     };
     if (this.durationTicks !== undefined) json.durationTicks = this.durationTicks;
     if (this.voice !== undefined) json.voice = this.voice;
+    if (this.evidenceStatus !== undefined) json.evidenceStatus = this.evidenceStatus;
+    if (this.confidence !== undefined) json.confidence = this.confidence;
+    if (this.alternativeSymbol !== undefined) json.alternativeSymbol = this.alternativeSymbol;
     return json;
   }
 
@@ -123,6 +140,9 @@ export class ChordEvent {
       durationTicks?: number | null;
       measureNumber: number;
       voice?: number;
+      evidenceStatus?: ChordEvidenceStatus;
+      confidence?: number;
+      alternativeSymbol?: string | null;
     } = {
       id: json.id,
       chord,
@@ -131,6 +151,9 @@ export class ChordEvent {
     };
     if (json.durationTicks !== undefined) init.durationTicks = json.durationTicks;
     if (json.voice !== undefined) init.voice = json.voice;
+    if (json.evidenceStatus !== undefined) init.evidenceStatus = json.evidenceStatus;
+    if (json.confidence !== undefined) init.confidence = json.confidence;
+    if (json.alternativeSymbol !== undefined) init.alternativeSymbol = json.alternativeSymbol;
     return new ChordEvent(init);
   }
 }

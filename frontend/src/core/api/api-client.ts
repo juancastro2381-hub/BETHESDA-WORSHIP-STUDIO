@@ -1499,6 +1499,7 @@ export class BethesdaApiClient {
       versionDescription?: string;
       setAsCurrent?: boolean;
       reviewNotes?: string;
+      approvedFormats?: Array<'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY'>;
     }
   ): Promise<{
     draft: AudioDraftProposalDTO;
@@ -1607,6 +1608,21 @@ export interface AudioDraftReviewChangeRecordDTO {
   readonly fieldsModified: string[];
 }
 
+export interface HarmonicEvidenceBreakdownDTO {
+  readonly totalChords: number;
+  readonly detectedCount: number;
+  readonly estimatedCount: number;
+  readonly ambiguousCount: number;
+  readonly humanVerifiedCount: number;
+  readonly melodicNotesCount: number;
+}
+
+export interface BlockedFormatRecordDTO {
+  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly status: 'NOT_GENERATABLE' | 'EXCLUDED_BY_REVIEWER';
+  readonly reason: string;
+}
+
 export interface AudioDraftApprovalMetadataDTO {
   readonly approvedByUserId: string;
   readonly approvedAt: string;
@@ -1620,6 +1636,10 @@ export interface AudioDraftApprovalMetadataDTO {
   readonly setAsCurrent: boolean;
   readonly reviewNotes?: string;
   readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
+  readonly approvedFormats?: Array<'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY'>;
+  readonly blockedFormats?: BlockedFormatRecordDTO[];
+  readonly approvalScope?: 'HARMONIC_LEAD_SHEET_ONLY' | 'MELODIC_AND_HARMONIC';
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdownDTO;
 }
 
 export interface AudioAnalysisSummaryDTO {
@@ -1723,6 +1743,7 @@ export interface AudioDraftProposalDTO {
   readonly targets: Record<string, GeneratedTargetArtifactDTO>;
   readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
   readonly approvalMetadata: AudioDraftApprovalMetadataDTO | null;
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdownDTO;
   readonly createdAt: string;
   readonly reviewedAt: string | null;
   readonly reviewedByUserId: string | null;

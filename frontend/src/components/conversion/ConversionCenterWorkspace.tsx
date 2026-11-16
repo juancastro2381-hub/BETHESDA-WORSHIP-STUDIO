@@ -121,6 +121,12 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const [isSubmittingReviewDecision, setIsSubmittingReviewDecision] = useState<boolean>(false);
   const [reviewActionFeedback, setReviewActionFeedback] = useState<string | null>(null);
   const [showAllChords, setShowAllChords] = useState<boolean>(false);
+  const [chordEvidenceFilter, setChordEvidenceFilter] = useState<
+    'ALL' | 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'HUMAN_VERIFIED'
+  >('ALL');
+  const [selectedApprovedFormats, setSelectedApprovedFormats] = useState<
+    Array<'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY'>
+  >(['CHORD_PRO', 'MUSIC_XML']);
   const [isLoadingPersistedAudioState, setIsLoadingPersistedAudioState] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -172,6 +178,15 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       setReviewVerifiedLyrics(draft.verifiedLyrics || '');
       setReviewChordPro(draft.proposedChordPro || '');
       setShowAllChords(false);
+      setChordEvidenceFilter('ALL');
+      const generatableFormats = (
+        ['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY'] as const
+      ).filter((fmt) => Boolean(draft.targets[fmt]?.generatable));
+      if (draft.approvalMetadata?.approvedFormats?.length) {
+        setSelectedApprovedFormats([...draft.approvalMetadata.approvedFormats]);
+      } else {
+        setSelectedApprovedFormats(generatableFormats);
+      }
       try {
         const streamUrl = await client.getAudioPlaybackStreamUrl(draft.audioAssetId);
         setAudioPlaybackUrl(streamUrl);
@@ -657,6 +672,18 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
 
   const handleApproveAndPublishAudioDraft = async () => {
     if (!activeAudioDraft) return;
+    const generatableSet = new Set(
+      (['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY'] as const).filter((fmt) =>
+        Boolean(activeAudioDraft.targets[fmt]?.generatable)
+      )
+    );
+    const validSelected = selectedApprovedFormats.filter((fmt) => generatableSet.has(fmt));
+    if (validSelected.length === 0) {
+      setErrorMessage(
+        'Seleccione al menos un formato generable válido (por ejemplo, CHORD_PRO o MUSIC_XML) antes de aprobar y publicar al Atril Digital.'
+      );
+      return;
+    }
     setIsSubmittingReviewDecision(true);
     setErrorMessage(null);
     setReviewActionFeedback(null);
@@ -668,11 +695,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
           targetSongId: activeAudioDraft.songId,
           setAsCurrent: true,
           reviewNotes: reviewNotes.trim() || 'Aprobado tras revisión humana para Atril Digital.',
+          approvedFormats: validSelected,
         }
       );
       await populateReviewFormFromDraft(res.draft);
+      const approvedListLabel =
+        res.approvalMetadata.approvedFormats?.join(', ') || validSelected.join(', ');
       setReviewActionFeedback(
-        `🎉 Versión canónica v${res.versionNumber} creada y aprobada para "${res.draft.songTitle}". Las versiones anteriores se conservaron en el historial.`
+        `🎉 Versión canónica v${res.versionNumber} creada y aprobada para "${res.draft.songTitle}" (formatos autorizados: ${approvedListLabel}). Las versiones anteriores se conservaron en el historial.`
       );
     } catch (err: any) {
       setErrorMessage(err?.message || 'No se pudo aprobar y publicar el borrador.');
@@ -784,8 +814,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
           const details = job.errorDetails as any;
           setErrorMessage(
             details?.diagnostics?.find((d: any) => d.severity === 'ERROR')?.message ||
-              (job as any).errorCode ||
-              'La conversión en segundo plano ha fallado.'
+            (job as any).errorCode ||
+            'La conversión en segundo plano ha fallado.'
           );
         } else if (job.status === 'CANCELLED') {
           clearInterval(interval);
@@ -909,7 +939,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
         setConversionStatus('FAILED');
         setErrorMessage(
           result.diagnostics.find((d) => d.severity === 'ERROR')?.message ||
-            'La conversión no pudo completarse.'
+          'La conversión no pudo completarse.'
         );
       } else {
         const hasWarnings = result.diagnostics.some((d) => d.severity === 'WARNING');
@@ -1042,9 +1072,9 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
 
   const sourceSummary = sourceCategory
     ? FormatCapabilitiesEvaluator.getSourceCapabilitySummary(
-        sourceCategory,
-        selectedFile?.name || audioPreservationSuccess?.filename
-      )
+      sourceCategory,
+      selectedFile?.name || audioPreservationSuccess?.filename
+    )
     : null;
   const isAudioWorkflowActive =
     sourceCategory === 'AUDIO_RECORDING' ||
@@ -1052,9 +1082,9 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     activeAudioDraft !== null;
   const displayedCapabilities = isAudioWorkflowActive
     ? FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
-        workflowState: audioWorkflowState,
-        draft: activeAudioDraft,
-      })
+      workflowState: audioWorkflowState,
+      draft: activeAudioDraft,
+    })
     : capabilities;
   const canConvert = displayedCapabilities.some((c) => c.isAvailable);
   const currentTargetCap = displayedCapabilities.find((c) => c.format === selectedTarget);
@@ -1277,14 +1307,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
             {!selectedFile && !isAudioWorkflowActive
               ? '⚪ Esperando archivo...'
               : isAudioWorkflowActive
-              ? `🎙️ Audio Scope 1C (${audioWorkflowState})`
-              : sourceSummary?.state === 'SUPPORTED'
-              ? `🟢 Formato Soportado (${sourceSummary.label})`
-              : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
-              ? `⚠️ Soporte Parcial (${sourceSummary.label})`
-              : sourceSummary?.state === 'NOT_SUPPORTED'
-              ? `❌ No Soportado (${sourceSummary.label})`
-              : `⏱️ Planificado Fase 2B (${sourceSummary?.label})`}
+                ? `🎙️ Audio Scope 1C (${audioWorkflowState})`
+                : sourceSummary?.state === 'SUPPORTED'
+                  ? `🟢 Formato Soportado (${sourceSummary.label})`
+                  : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
+                    ? `⚠️ Soporte Parcial (${sourceSummary.label})`
+                    : sourceSummary?.state === 'NOT_SUPPORTED'
+                      ? `❌ No Soportado (${sourceSummary.label})`
+                      : `⏱️ Planificado Fase 2B (${sourceSummary?.label})`}
           </span>
         </div>
       </div>
@@ -1421,26 +1451,25 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
 
             {(selectedFile || isAudioWorkflowActive) && (sourceSummary?.advisoryNotice || isAudioWorkflowActive) && (
               <div
-                className={`capability-advisory-banner ${
-                  isAudioWorkflowActive
-                    ? 'advisory-info'
-                    : sourceSummary?.state === 'NOT_SUPPORTED'
+                className={`capability-advisory-banner ${isAudioWorkflowActive
+                  ? 'advisory-info'
+                  : sourceSummary?.state === 'NOT_SUPPORTED'
                     ? 'advisory-blocked'
                     : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
-                    ? 'advisory-warning'
-                    : 'advisory-info'
-                }`}
+                      ? 'advisory-warning'
+                      : 'advisory-info'
+                  }`}
               >
                 <span className="advisory-icon">
                   {sourceCategory === 'AUDIO_RECORDING' || isAudioWorkflowActive
                     ? '🎙️'
                     : sourceCategory === 'PDF_SCORE' || sourceCategory === 'IMAGE_SCORE'
-                    ? '📄'
-                    : sourceCategory === 'TABLATURE_ASCII'
-                    ? '⚠️'
-                    : sourceCategory === 'UNKNOWN_UNSUPPORTED'
-                    ? '❌'
-                    : 'ℹ️'}
+                      ? '📄'
+                      : sourceCategory === 'TABLATURE_ASCII'
+                        ? '⚠️'
+                        : sourceCategory === 'UNKNOWN_UNSUPPORTED'
+                          ? '❌'
+                          : 'ℹ️'}
                 </span>
                 <div className="advisory-content">
                   <strong>{sourceSummary?.label ?? 'Grabación de Audio (MP3, WAV, M4A, FLAC, OGG)'}:</strong>{' '}
@@ -1476,13 +1505,12 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </span>
                 {isAudioWorkflowActive ? (
                   <span
-                    className={`cap-badge ${
-                      audioWorkflowState === 'APPROVED' || audioWorkflowState === 'DRAFT_READY'
-                        ? 'badge-state-supported'
-                        : audioWorkflowState === 'FAILED' || audioWorkflowState === 'REJECTED'
+                    className={`cap-badge ${audioWorkflowState === 'APPROVED' || audioWorkflowState === 'DRAFT_READY'
+                      ? 'badge-state-supported'
+                      : audioWorkflowState === 'FAILED' || audioWorkflowState === 'REJECTED'
                         ? 'badge-state-not-supported'
                         : 'badge-state-partially-supported'
-                    }`}
+                      }`}
                     style={{ marginLeft: '8px' }}
                   >
                     {audioWorkflowState === 'IDLE' ? 'IMPLEMENTED' : audioWorkflowState}
@@ -1516,8 +1544,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           )}
                           {(cap.dynamicAudioState === 'DRAFT_READY' ||
                             cap.dynamicAudioState === 'REVIEW_REQUIRED') && (
-                            <span className="cap-badge badge-draft">BORRADOR REVISIÓN HUMANA</span>
-                          )}
+                              <span className="cap-badge badge-draft">BORRADOR REVISIÓN HUMANA</span>
+                            )}
                         </>
                       ) : (
                         <>
@@ -1554,9 +1582,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   return (
                     <div
                       key={cap.format}
-                      className={`target-format-card ${isSelected ? 'selected' : ''} ${
-                        isBlocked ? 'disabled' : ''
-                      }`}
+                      className={`target-format-card ${isSelected ? 'selected' : ''} ${isBlocked ? 'disabled' : ''
+                        }`}
                       onClick={() => {
                         if (!isBlocked) {
                           setSelectedTarget(cap.format);
@@ -1715,14 +1742,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           audioWorkflowState === 'APPROVED'
                             ? 'rgba(34,197,94,0.2)'
                             : audioWorkflowState === 'REJECTED' || audioWorkflowState === 'FAILED'
-                            ? 'rgba(239,68,68,0.2)'
-                            : 'rgba(59,130,246,0.2)',
+                              ? 'rgba(239,68,68,0.2)'
+                              : 'rgba(59,130,246,0.2)',
                         color:
                           audioWorkflowState === 'APPROVED'
                             ? '#86efac'
                             : audioWorkflowState === 'REJECTED' || audioWorkflowState === 'FAILED'
-                            ? '#fca5a5'
-                            : '#93c5fd',
+                              ? '#fca5a5'
+                              : '#93c5fd',
                         padding: '4px 8px',
                         borderRadius: '4px',
                         fontSize: '0.75rem',
@@ -1847,8 +1874,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                       {isPreservingAudio
                         ? '💾 Preservando Audio Original...'
                         : !user
-                        ? '🔒 Inicie sesión para preservar'
-                        : '💾 Paso 1: Preservar Audio para el Atril Digital (WS-AUDIO-01)'}
+                          ? '🔒 Inicie sesión para preservar'
+                          : '💾 Paso 1: Preservar Audio para el Atril Digital (WS-AUDIO-01)'}
                     </button>
 
                     <button
@@ -1867,8 +1894,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                       {isAnalyzingAudio
                         ? '🔬 Ejecutando Análisis Python DSP (10 Etapas) y Transcripción...'
                         : !user
-                        ? '🔒 Inicie sesión para analizar y transcribir'
-                        : '🔬 Paso 2: Analizar Audio con Python y Generar Borradores Musicales (WS-AUDIO-02/03)'}
+                          ? '🔒 Inicie sesión para analizar y transcribir'
+                          : '🔬 Paso 2: Analizar Audio con Python y Generar Borradores Musicales (WS-AUDIO-02/03)'}
                     </button>
 
                     {activeAudioDraft && (
@@ -1916,10 +1943,10 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     {conversionStatus === 'PROCESSING'
                       ? '⚙️ Procesando...'
                       : !canConvert
-                      ? '🚫 Conversión no disponible (Planificado Fase 2B)'
-                      : !isTargetAvailable
-                      ? '🚫 Formato Objetivo No Disponible'
-                      : '🚀 Convertir Archivo'}
+                        ? '🚫 Conversión no disponible (Planificado Fase 2B)'
+                        : !isTargetAvailable
+                          ? '🚫 Formato Objetivo No Disponible'
+                          : '🚀 Convertir Archivo'}
                   </button>
                 </>
               )}
@@ -2038,13 +2065,33 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </div>
 
                 <div style={{ padding: '10px', background: 'rgba(255,255,255,0.04)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Eventos Detectados</div>
-                  <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f8fafc' }}>
-                    {activeAudioDraft.analysisSummary.totalChordsDetected} acordes /{' '}
-                    {activeAudioDraft.analysisSummary.totalNotesDetected} notas
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>
-                    Notas: {activeAudioDraft.analysisSummary.noteExtractionStatus}
+                  <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Evidencia Armónica y Notas</div>
+                  {(() => {
+                    const timeline = activeAudioDraft.analysisSummary.chordTimeline ?? [];
+                    const ev = activeAudioDraft.harmonicEvidenceSummary ?? {
+                      totalChords: activeAudioDraft.analysisSummary.totalChordsDetected,
+                      detectedCount: timeline.filter((c) => c.status === 'DETECTED').length,
+                      estimatedCount: timeline.filter((c) => c.status === 'ESTIMATED').length,
+                      ambiguousCount: timeline.filter((c) => c.status === 'AMBIGUOUS' || c.status === 'UNSUPPORTED').length,
+                      humanVerifiedCount: 0,
+                      melodicNotesCount: activeAudioDraft.analysisSummary.totalNotesDetected,
+                    };
+                    return (
+                      <>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f8fafc' }}>
+                          {ev.totalChords} acordes / {ev.melodicNotesCount} notas
+                        </div>
+                        <div style={{ fontSize: '0.71rem', color: '#cbd5e1', marginTop: '2px', lineHeight: 1.35 }}>
+                          <span style={{ color: '#86efac' }}>{ev.detectedCount} DETECTED</span> •{' '}
+                          <span style={{ color: '#fde68a' }}>{ev.estimatedCount} ESTIMATED</span> •{' '}
+                          <span style={{ color: '#fca5a5' }}>{ev.ambiguousCount} AMBIGUOUS</span> •{' '}
+                          <span style={{ color: '#93c5fd' }}>{ev.humanVerifiedCount} verificados manualmente</span>
+                        </div>
+                      </>
+                    );
+                  })()}
+                  <div style={{ fontSize: '0.7rem', color: '#fbbf24', marginTop: '2px' }}>
+                    Notas melódicas: {activeAudioDraft.analysisSummary.noteExtractionStatus}
                   </div>
                 </div>
               </div>
@@ -2058,6 +2105,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   fontSize: '0.78rem',
                   color: '#fde68a',
                   marginBottom: '14px',
+                  overflowWrap: 'anywhere',
                 }}
               >
                 ℹ️ <strong>Evaluación de Polifonía y Cero Fabricación:</strong>{' '}
@@ -2065,98 +2113,153 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
               </div>
 
               {/* 3. Línea de Tiempo de Acordes Reconocidos */}
-              {activeAudioDraft.analysisSummary.chordTimeline.length > 0 && (
-                <div style={{ marginBottom: '14px' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: '8px',
-                      marginBottom: '6px',
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#cbd5e1' }}>
-                      🎸 Línea de Tiempo de Acordes Reconocidos (
-                      {activeAudioDraft.analysisSummary.chordTimeline.length} segmentos):
-                    </div>
-                    {activeAudioDraft.analysisSummary.chordTimeline.length > 32 && (
-                      <button
-                        type="button"
-                        onClick={() => setShowAllChords((prev) => !prev)}
-                        style={{
-                          padding: '3px 8px',
-                          background: 'rgba(59,130,246,0.2)',
-                          border: '1px solid rgba(59,130,246,0.4)',
-                          borderRadius: '4px',
-                          color: '#93c5fd',
-                          fontSize: '0.74rem',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {showAllChords
-                          ? 'Mostrar primeros 32 segmentos'
-                          : `Ver todos (${activeAudioDraft.analysisSummary.chordTimeline.length} segmentos)`}
-                      </button>
-                    )}
-                  </div>
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '6px',
-                      overflowX: 'auto',
-                      flexWrap: showAllChords ? 'wrap' : 'nowrap',
-                      paddingBottom: '6px',
-                      maxHeight: showAllChords ? '260px' : '115px',
-                      overflowY: showAllChords ? 'auto' : 'hidden',
-                    }}
-                  >
-                    {(showAllChords
-                      ? activeAudioDraft.analysisSummary.chordTimeline
-                      : activeAudioDraft.analysisSummary.chordTimeline.slice(0, 32)
-                    ).map((seg, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          minWidth: '112px',
-                          padding: '6px 8px',
-                          background: 'rgba(30, 41, 59, 0.85)',
-                          borderRadius: '5px',
-                          border:
-                            seg.status === 'DETECTED'
-                              ? '1px solid rgba(34,197,94,0.45)'
-                              : '1px solid rgba(251,191,36,0.45)',
-                          fontSize: '0.73rem',
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px' }}>
-                          <span style={{ fontWeight: 700, fontSize: '0.9rem', color: '#f8fafc' }}>{seg.chord}</span>
-                          <span
+              {activeAudioDraft.analysisSummary.chordTimeline.length > 0 && (() => {
+                const timeline = activeAudioDraft.analysisSummary.chordTimeline;
+                const detCount = timeline.filter((s) => s.status === 'DETECTED').length;
+                const estCount = timeline.filter((s) => s.status === 'ESTIMATED').length;
+                const ambCount = timeline.filter((s) => s.status === 'AMBIGUOUS' || s.status === 'UNSUPPORTED').length;
+                const filteredTimeline =
+                  chordEvidenceFilter === 'ALL' || chordEvidenceFilter === 'HUMAN_VERIFIED'
+                    ? timeline
+                    : timeline.filter((s) => s.status === chordEvidenceFilter);
+                const visibleSegments = showAllChords ? filteredTimeline : filteredTimeline.slice(0, 32);
+
+                return (
+                  <div style={{ marginBottom: '14px', maxWidth: '100%', minWidth: 0 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '8px',
+                        marginBottom: '6px',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#cbd5e1' }}>
+                        🎸 Línea de Tiempo Armónica ({filteredTimeline.length} de {timeline.length} segmentos):
+                      </div>
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
+                        {(
+                          [
+                            { id: 'ALL', label: `Todos (${timeline.length})` },
+                            { id: 'DETECTED', label: `Detectados (${detCount})` },
+                            { id: 'ESTIMATED', label: `Estimados (${estCount})` },
+                            { id: 'AMBIGUOUS', label: `Ambiguos (${ambCount})` },
+                          ] as const
+                        ).map((pill) => (
+                          <button
+                            key={pill.id}
+                            type="button"
+                            onClick={() => {
+                              setChordEvidenceFilter(pill.id);
+                              setShowAllChords(false);
+                            }}
                             style={{
-                              fontSize: '0.66rem',
-                              color: seg.status === 'DETECTED' ? '#86efac' : '#fde68a',
+                              padding: '3px 7px',
+                              background:
+                                chordEvidenceFilter === pill.id
+                                  ? 'rgba(59,130,246,0.35)'
+                                  : 'rgba(15,23,42,0.75)',
+                              border:
+                                chordEvidenceFilter === pill.id
+                                  ? '1px solid rgba(96,165,250,0.75)'
+                                  : '1px solid rgba(148,163,184,0.25)',
+                              borderRadius: '4px',
+                              color: chordEvidenceFilter === pill.id ? '#eff6ff' : '#cbd5e1',
+                              fontSize: '0.7rem',
+                              cursor: 'pointer',
                             }}
                           >
-                            {seg.status}
-                          </span>
-                        </div>
-                        <div style={{ color: '#94a3b8' }}>
-                          Compás {seg.measureNumber} • T{seg.beat}
-                        </div>
-                        <div style={{ color: '#60a5fa' }}>
-                          {seg.startTimeSec.toFixed(1)}s–{seg.endTimeSec.toFixed(1)}s ({Math.round(seg.confidence * 100)}%)
-                        </div>
-                        {seg.alternativeChord && (
-                          <div style={{ color: '#cbd5e1', fontSize: '0.68rem' }}>
-                            Alt: {seg.alternativeChord}
-                          </div>
+                            {pill.label}
+                          </button>
+                        ))}
+                        {filteredTimeline.length > 32 && (
+                          <button
+                            type="button"
+                            onClick={() => setShowAllChords((prev) => !prev)}
+                            style={{
+                              padding: '3px 8px',
+                              background: 'rgba(59,130,246,0.2)',
+                              border: '1px solid rgba(59,130,246,0.4)',
+                              borderRadius: '4px',
+                              color: '#93c5fd',
+                              fontSize: '0.72rem',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {showAllChords
+                              ? 'Mostrar primeros 32'
+                              : `Ver todos (${filteredTimeline.length})`}
+                          </button>
                         )}
                       </div>
-                    ))}
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: '6px',
+                        maxWidth: '100%',
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        overflowX: 'auto',
+                        flexWrap: showAllChords ? 'wrap' : 'nowrap',
+                        paddingBottom: '6px',
+                        maxHeight: showAllChords ? '260px' : '125px',
+                        overflowY: showAllChords ? 'auto' : 'hidden',
+                      }}
+                    >
+                      {visibleSegments.map((seg, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            flex: showAllChords ? '0 1 128px' : '0 0 116px',
+                            minWidth: '112px',
+                            padding: '6px 8px',
+                            background: 'rgba(30, 41, 59, 0.85)',
+                            borderRadius: '5px',
+                            border:
+                              seg.status === 'DETECTED'
+                                ? '1px solid rgba(34,197,94,0.45)'
+                                : seg.status === 'AMBIGUOUS' || seg.status === 'UNSUPPORTED'
+                                ? '1px solid rgba(239,68,68,0.5)'
+                                : '1px solid rgba(251,191,36,0.45)',
+                            fontSize: '0.73rem',
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ fontWeight: 700, fontSize: '0.9rem', color: '#f8fafc' }}>{seg.chord}</span>
+                            <span
+                              style={{
+                                fontSize: '0.66rem',
+                                color:
+                                  seg.status === 'DETECTED'
+                                    ? '#86efac'
+                                    : seg.status === 'AMBIGUOUS' || seg.status === 'UNSUPPORTED'
+                                    ? '#fca5a5'
+                                    : '#fde68a',
+                              }}
+                            >
+                              {seg.status}
+                            </span>
+                          </div>
+                          <div style={{ color: '#94a3b8' }}>
+                            Compás {seg.measureNumber} • T{seg.beat}
+                          </div>
+                          <div style={{ color: '#60a5fa' }}>
+                            {seg.startTimeSec.toFixed(1)}s–{seg.endTimeSec.toFixed(1)}s ({Math.round(seg.confidence * 100)}%)
+                          </div>
+                          {seg.alternativeChord && (
+                            <div style={{ color: '#cbd5e1', fontSize: '0.68rem' }}>
+                              Alt: {seg.alternativeChord}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* 4. Editor de Propuesta Musical (Revisión Humana) */}
               <div
@@ -2333,6 +2436,15 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 {(() => {
                   const selectedArt = activeAudioDraft.targets[previewTargetFormat];
                   if (!selectedArt) return null;
+                  const timeline = activeAudioDraft.analysisSummary.chordTimeline ?? [];
+                  const ev = activeAudioDraft.harmonicEvidenceSummary ?? {
+                    totalChords: activeAudioDraft.analysisSummary.totalChordsDetected,
+                    detectedCount: timeline.filter((c) => c.status === 'DETECTED').length,
+                    estimatedCount: timeline.filter((c) => c.status === 'ESTIMATED').length,
+                    ambiguousCount: timeline.filter((c) => c.status === 'AMBIGUOUS' || c.status === 'UNSUPPORTED').length,
+                    humanVerifiedCount: 0,
+                    melodicNotesCount: activeAudioDraft.analysisSummary.totalNotesDetected,
+                  };
                   return (
                     <div
                       style={{
@@ -2340,10 +2452,29 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                         background: 'rgba(15, 23, 42, 0.8)',
                         borderRadius: '6px',
                         border: '1px solid rgba(148, 163, 184, 0.2)',
+                        maxWidth: '100%',
+                        minWidth: 0,
+                        boxSizing: 'border-box',
                       }}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                        <span style={{ fontSize: '0.8rem', color: selectedArt.generatable ? '#86efac' : '#fca5a5' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '8px',
+                          marginBottom: '6px',
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: '0.8rem',
+                            color: selectedArt.generatable ? '#86efac' : '#fca5a5',
+                            overflowWrap: 'anywhere',
+                            flex: '1 1 240px',
+                          }}
+                        >
                           <strong>{selectedArt.format}</strong> — {selectedArt.reason}
                         </span>
                         {selectedArt.generatable && selectedArt.content && (
@@ -2358,6 +2489,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                               borderRadius: '4px',
                               fontSize: '0.75rem',
                               cursor: 'pointer',
+                              flexShrink: 0,
                             }}
                           >
                             ⬇️ Descargar {selectedArt.filename}
@@ -2383,25 +2515,33 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                                     borderRadius: '5px',
                                     fontSize: '0.78rem',
                                     color: '#bfdbfe',
+                                    overflowWrap: 'anywhere',
                                   }}
                                 >
                                   ℹ️ Guion Armónico Estructural MusicXML 4.0: Contiene los{' '}
                                   {activeAudioDraft.proposedCanonicalPayload?.measures?.length ?? 0} compases,
-                                  métrica, armadura, tempo y {activeAudioDraft.analysisSummary.totalChordsDetected}{' '}
-                                  acordes <code>&lt;harmony&gt;</code>, con 0 notas melódicas inventadas. No constituye
-                                  una partitura melódica en pentagrama tradicional.
+                                  métrica, armadura, tempo y {ev.totalChords} eventos armónicos{' '}
+                                  <code>&lt;harmony&gt;</code> ({ev.detectedCount} DETECTED, {ev.estimatedCount} ESTIMATED,{' '}
+                                  {ev.ambiguousCount} AMBIGUOUS, {ev.humanVerifiedCount} verificados manualmente), con{' '}
+                                  {ev.melodicNotesCount} notas melódicas inventadas. No constituye una partitura melódica
+                                  en pentagrama tradicional.
                                 </div>
                               )}
                             <pre
                               style={{
-                                maxHeight: '200px',
-                                overflowY: 'auto',
+                                maxWidth: '100%',
+                                maxHeight: '280px',
+                                overflow: 'auto',
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                overflowWrap: 'anywhere',
                                 fontSize: '0.76rem',
                                 background: '#090d16',
                                 padding: '8px',
                                 borderRadius: '4px',
                                 margin: 0,
                                 color: '#e2e8f0',
+                                boxSizing: 'border-box',
                               }}
                             >
                               <code>{selectedArt.content.slice(0, 2500)}</code>
@@ -2412,6 +2552,83 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     </div>
                   );
                 })()}
+              </div>
+
+              {/* 5b. Alcance Explícito de Aprobación por Formato Objetivo */}
+              <div
+                style={{
+                  padding: '10px 12px',
+                  marginBottom: '12px',
+                  background: 'rgba(15, 23, 42, 0.65)',
+                  border: '1px solid rgba(148, 163, 184, 0.22)',
+                  borderRadius: '6px',
+                }}
+              >
+                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '6px' }}>
+                  🛡️ Alcance de Aprobación por Formato Objetivo (Principio de Cero Fabricación):
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {(['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY'] as const).map((fmt) => {
+                    const art = activeAudioDraft.targets[fmt];
+                    const isGeneratable = Boolean(art?.generatable);
+                    const isChecked = isGeneratable && selectedApprovedFormats.includes(fmt);
+                    const isLocked =
+                      !isGeneratable ||
+                      activeAudioDraft.reviewStatus === 'COMMITTED' ||
+                      activeAudioDraft.reviewStatus === 'REJECTED';
+                    return (
+                      <label
+                        key={fmt}
+                        title={art?.reason || ''}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '5px 8px',
+                          borderRadius: '4px',
+                          background: isGeneratable ? 'rgba(30, 41, 59, 0.9)' : 'rgba(15, 23, 42, 0.45)',
+                          border: isChecked
+                            ? '1px solid rgba(34, 197, 94, 0.55)'
+                            : '1px solid rgba(148, 163, 184, 0.2)',
+                          fontSize: '0.75rem',
+                          color: isGeneratable ? '#f8fafc' : '#94a3af',
+                          cursor: isLocked ? 'not-allowed' : 'pointer',
+                          opacity: isGeneratable ? 1 : 0.7,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={isLocked}
+                          onChange={(e) => {
+                            if (!isGeneratable) return;
+                            if (e.target.checked) {
+                              setSelectedApprovedFormats((prev) =>
+                                prev.includes(fmt) ? prev : [...prev, fmt]
+                              );
+                            } else {
+                              setSelectedApprovedFormats((prev) => prev.filter((item) => item !== fmt));
+                            }
+                          }}
+                        />
+                        <span>
+                          <strong>{fmt}</strong>{' '}
+                          {!isGeneratable
+                            ? '(Bloqueado: NOT_GENERATABLE)'
+                            : fmt === 'MUSIC_XML' && activeAudioDraft.analysisSummary.totalNotesDetected === 0
+                            ? '(Guion estructural)'
+                            : '(Generable)'}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {activeAudioDraft.approvalMetadata?.approvedFormats && (
+                  <div style={{ fontSize: '0.74rem', color: '#86efac', marginTop: '6px' }}>
+                    ✅ Publicado con alcance <code>{activeAudioDraft.approvalMetadata.approvalScope}</code> — Formatos aprobados:{' '}
+                    <strong>{activeAudioDraft.approvalMetadata.approvedFormats.join(', ')}</strong>
+                  </div>
+                )}
               </div>
 
               {/* 6. Acciones de Aprobación, Solicitud de Corrección y Rechazo (Gate 4 & Protección Canónica) */}
@@ -2453,8 +2670,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     padding: '8px 14px',
                     background:
                       activeAudioDraft.workflowState === 'REJECTED' ||
-                      activeAudioDraft.reviewStatus === 'REJECTED' ||
-                      activeAudioDraft.reviewStatus === 'COMMITTED'
+                        activeAudioDraft.reviewStatus === 'REJECTED' ||
+                        activeAudioDraft.reviewStatus === 'COMMITTED'
                         ? '#475569'
                         : '#16a34a',
                     color: '#fff',
@@ -2464,9 +2681,9 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     fontSize: '0.84rem',
                     cursor:
                       isSubmittingReviewDecision ||
-                      activeAudioDraft.workflowState === 'REJECTED' ||
-                      activeAudioDraft.reviewStatus === 'REJECTED' ||
-                      activeAudioDraft.reviewStatus === 'COMMITTED'
+                        activeAudioDraft.workflowState === 'REJECTED' ||
+                        activeAudioDraft.reviewStatus === 'REJECTED' ||
+                        activeAudioDraft.reviewStatus === 'COMMITTED'
                         ? 'not-allowed'
                         : 'pointer',
                   }}
@@ -2739,8 +2956,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   {savedToCatalog
                     ? '✅ Guardado en Catálogo'
                     : savingCatalog
-                    ? 'Guardando...'
-                    : '💾 Guardar en Catálogo de Canciones'}
+                      ? 'Guardando...'
+                      : '💾 Guardar en Catálogo de Canciones'}
                 </button>
 
                 {/* 3. Abrir en Atril Digital */}

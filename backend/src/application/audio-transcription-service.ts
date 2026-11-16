@@ -43,7 +43,7 @@ import { Timeline } from '../../../frontend/src/core/canonical-model/timeline.ts
 import { TempoEvent, TempoMap } from '../../../frontend/src/core/canonical-model/tempo-map.ts';
 import { TimeSignature } from '../../../frontend/src/core/canonical-model/time-signature.ts';
 import { KeySignatureReference } from '../../../frontend/src/core/canonical-model/key-signature-reference.ts';
-import { ChordEvent } from '../../../frontend/src/core/canonical-model/chord-event.ts';
+import { ChordEvent, type ChordEvidenceStatus } from '../../../frontend/src/core/canonical-model/chord-event.ts';
 import { Note, Rest, Voice } from '../../../frontend/src/core/canonical-model/musical-event.ts';
 import { LyricSyllable } from '../../../frontend/src/core/canonical-model/lyric-syllable.ts';
 import { InstrumentTrack } from '../../../frontend/src/core/canonical-model/instrument-track.ts';
@@ -78,8 +78,25 @@ export type AudioConversionWorkflowState =
 
 export type SupportedReviewInstrument = 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
 
+export type ApprovalTargetFormat = 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+
+export interface HarmonicEvidenceBreakdown {
+  readonly totalChords: number;
+  readonly detectedCount: number;
+  readonly estimatedCount: number;
+  readonly ambiguousCount: number;
+  readonly humanVerifiedCount: number;
+  readonly melodicNotesCount: number;
+}
+
+export interface BlockedFormatRecord {
+  readonly format: ApprovalTargetFormat;
+  readonly status: 'NOT_GENERATABLE' | 'EXCLUDED_BY_REVIEWER';
+  readonly reason: string;
+}
+
 export interface GeneratedTargetArtifact {
-  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly format: ApprovalTargetFormat;
   readonly status: 'DRAFT_READY' | 'REVIEW_REQUIRED' | 'NOT_GENERATABLE';
   readonly generatable: boolean;
   readonly confidence: number;
@@ -112,6 +129,10 @@ export interface AudioDraftApprovalMetadata {
   readonly setAsCurrent: boolean;
   readonly reviewNotes?: string | undefined;
   readonly changesMadeDuringReview: AudioDraftReviewChangeRecord[];
+  readonly approvedFormats?: ApprovalTargetFormat[] | undefined;
+  readonly blockedFormats?: BlockedFormatRecord[] | undefined;
+  readonly approvalScope?: 'HARMONIC_LEAD_SHEET_ONLY' | 'MELODIC_AND_HARMONIC' | undefined;
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdown | undefined;
 }
 
 export interface AudioDraftProposalDTO {
@@ -140,6 +161,7 @@ export interface AudioDraftProposalDTO {
   readonly targets: Record<string, GeneratedTargetArtifact>;
   readonly changesMadeDuringReview: AudioDraftReviewChangeRecord[];
   readonly approvalMetadata: AudioDraftApprovalMetadata | null;
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdown | undefined;
   readonly createdAt: string;
   readonly reviewedAt: string | null;
   readonly reviewedByUserId: string | null;
@@ -171,6 +193,72 @@ export interface ApproveAudioDraftInput {
   readonly versionDescription?: string | undefined;
   readonly setAsCurrent?: boolean | undefined;
   readonly reviewNotes?: string | undefined;
+  readonly approvedFormats?: ApprovalTargetFormat[] | undefined;
+}
+
+const LEGACY_UTF8_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/Grabaci\uFFFDn/g, 'Grabación'],
+  [/grabaci\uFFFDn/g, 'grabación'],
+  [/Fabricaci\uFFFDn/g, 'Fabricación'],
+  [/fabricaci\uFFFDn/g, 'fabricación'],
+  [/Extracci\uFFFDn/g, 'Extracción'],
+  [/extracci\uFFFDn/g, 'extracción'],
+  [/Polif\uFFFDnic([ao]s?)/g, 'Polifónic$1'],
+  [/polif\uFFFDnic([ao]s?)/g, 'polifónic$1'],
+  [/Polifon\uFFFDa/g, 'Polifonía'],
+  [/polifon\uFFFDa/g, 'polifonía'],
+  [/Monof\uFFFDnic([ao]s?)/g, 'Monofónic$1'],
+  [/monof\uFFFDnic([ao]s?)/g, 'monofónic$1'],
+  [/Arm\uFFFDnic([ao]s?)/g, 'Armónic$1'],
+  [/arm\uFFFDnic([ao]s?)/g, 'armónic$1'],
+  [/Mel\uFFFDdic([ao]s?)/g, 'Melódic$1'],
+  [/mel\uFFFDdic([ao]s?)/g, 'melódic$1'],
+  [/Revisi\uFFFDn/g, 'Revisión'],
+  [/revisi\uFFFDn/g, 'revisión'],
+  [/Ac\uFFFDstic([ao]s?)/g, 'Acústic$1'],
+  [/ac\uFFFDstic([ao]s?)/g, 'acústic$1'],
+  [/L\uFFFDric([ao]s?)/g, 'Líric$1'],
+  [/l\uFFFDric([ao]s?)/g, 'líric$1'],
+  [/Transcripci\uFFFDn/g, 'Transcripción'],
+  [/transcripci\uFFFDn/g, 'transcripción'],
+  [/Progresi\uFFFDn/g, 'Progresión'],
+  [/progresi\uFFFDn/g, 'progresión'],
+  [/Digitaci\uFFFDn/g, 'Digitación'],
+  [/digitaci\uFFFDn/g, 'digitación'],
+  [/Decodificaci\uFFFDn/g, 'Decodificación'],
+  [/decodificaci\uFFFDn/g, 'decodificación'],
+  [/Evaluaci\uFFFDn/g, 'Evaluación'],
+  [/evaluaci\uFFFDn/g, 'evaluación'],
+  [/Segmentaci\uFFFDn/g, 'Segmentación'],
+  [/segmentaci\uFFFDn/g, 'segmentación'],
+  [/Identificaci\uFFFDn/g, 'Identificación'],
+  [/identificaci\uFFFDn/g, 'identificación'],
+  [/Estimaci\uFFFDn/g, 'Estimación'],
+  [/estimaci\uFFFDn/g, 'estimación'],
+  [/An\uFFFDlisis/g, 'Análisis'],
+  [/an\uFFFDlisis/g, 'análisis'],
+  [/Se\uFFFDal/g, 'Señal'],
+  [/se\uFFFDal/g, 'señal'],
+  [/L\uFFFDnea/g, 'Línea'],
+  [/l\uFFFDnea/g, 'línea'],
+  [/\uFFFDndice/g, 'índice'],
+  [/detect\uFFFD/g, 'detectó'],
+  [/t\uFFFDcnic([ao]s?)/g, 'técnic$1'],
+  [/estad\uFFFDstic([ao]s?)/g, 'estadístic$1'],
+  [/comp\uFFFDs/g, 'compás'],
+  [/t\uFFFDnica/g, 'tónica'],
+  [/vii\uFFFD/g, 'vii°'],
+  [/m\uFFFDltiples/g, 'múltiples'],
+  [/\s\uFFFD\s/g, ' — '],
+];
+
+export function repairLegacyUtf8Text(value: string): string {
+  if (!value || !value.includes('\uFFFD')) return value;
+  let repaired = value;
+  for (const [pattern, replacement] of LEGACY_UTF8_REPLACEMENTS) {
+    repaired = repaired.replace(pattern, replacement);
+  }
+  return repaired;
 }
 
 const TRANSCRIPTION_VERSION = 'ws-audio-03-v1.0';
@@ -253,11 +341,12 @@ export class AudioTranscriptionService {
 
     try {
       // 3. Ejecutar WS-AUDIO-02: Pipeline de 10 etapas en el worker local de Python
-      const analysis = await this.pythonWorkerBridge.analyzeAudio(
+      const rawAnalysis = await this.pythonWorkerBridge.analyzeAudio(
         job.id,
         fullPath,
         asset.checksumSha256
       );
+      const analysis = this.repairLegacyUtf8AnalysisStrings(rawAnalysis);
 
       // Actualizar duración en audio_assets si aún era null y el análisis la determinó con precisión
       if (asset.durationSeconds === null && analysis.durationSeconds > 0) {
@@ -645,6 +734,7 @@ export class AudioTranscriptionService {
           `El contenido ChordPro editado contiene errores de sintaxis: ${imported.diagnostics.map((d) => d.message).join('; ')}`
         );
       }
+      const prevCanonical = CanonicalDeserializer.deserialize(currentDto.proposedCanonicalPayload);
       updatedCanonical = this.mergeEditedChordProWithAnalysisNotes(
         imported.payload,
         newTitle,
@@ -653,7 +743,8 @@ export class AudioTranscriptionService {
         newTimeSig,
         currentDto.analysisSummary,
         asset,
-        newInstrument
+        newInstrument,
+        prevCanonical
       );
     } else {
       updatedCanonical = this.buildCanonicalPayloadFromAnalysis({
@@ -891,7 +982,7 @@ export class AudioTranscriptionService {
 
     const currentDto = await this.getDraftById(audioId, proposalId, user);
 
-    if (currentDto.reviewStatus === 'REJECTED') {
+    if (currentDto.reviewStatus === 'REJECTED' || currentDto.workflowState === 'REJECTED') {
       throw new ValidationError(
         'No se puede publicar un borrador rechazado. Edite y valide el borrador antes de aprobarlo.'
       );
@@ -946,6 +1037,79 @@ export class AudioTranscriptionService {
       );
     }
 
+    const refreshedTargets = this.generateTargetArtifacts(
+      baseCanonical,
+      currentDto.analysisSummary,
+      currentDto.verifiedLyrics,
+      currentDto.selectedInstrument
+    );
+    const harmonicEvidenceSummary = this.computeHarmonicEvidenceBreakdown(baseCanonical);
+    const approvalScope: 'HARMONIC_LEAD_SHEET_ONLY' | 'MELODIC_AND_HARMONIC' =
+      harmonicEvidenceSummary.melodicNotesCount > 0 ? 'MELODIC_AND_HARMONIC' : 'HARMONIC_LEAD_SHEET_ONLY';
+
+    const ALL_TARGET_FORMATS: ApprovalTargetFormat[] = [
+      'CHORD_PRO',
+      'MUSIC_XML',
+      'MIDI',
+      'TABLATURE',
+      'LYRICS_ONLY',
+    ];
+    const midiEligibility = MidiExportGatekeeper.isEligible(baseCanonical);
+    const isFormatGeneratable = (fmt: ApprovalTargetFormat): boolean => {
+      const target = refreshedTargets[fmt];
+      if (!target || !target.generatable) return false;
+      if (fmt === 'MIDI') return totalNotes > 0 && midiEligibility.eligible;
+      if (fmt === 'TABLATURE') return totalNotes > 0;
+      if (fmt === 'LYRICS_ONLY') return totalLyrics > 0 || currentDto.verifiedLyrics.trim().length > 0;
+      return true;
+    };
+
+    const generatableFormats = ALL_TARGET_FORMATS.filter(isFormatGeneratable);
+    let approvedFormats: ApprovalTargetFormat[];
+    if (input.approvedFormats !== undefined) {
+      const requested = Array.from(new Set(input.approvedFormats));
+      if (requested.length === 0) {
+        throw new ValidationError(
+          'Debe seleccionar al menos un formato generable válido (p. ej., CHORD_PRO o MUSIC_XML) para aprobar este borrador.'
+        );
+      }
+      const blockedRequested = requested.filter((fmt) => !isFormatGeneratable(fmt));
+      if (blockedRequested.length > 0) {
+        const details = blockedRequested
+          .map((fmt) => `${fmt}: ${refreshedTargets[fmt]?.reason ?? 'NOT_GENERATABLE'}`)
+          .join(' | ');
+        throw new ValidationError(
+          `No se pueden aprobar formatos no generables (Principio de Cero Fabricación): ${blockedRequested.join(', ')}. ${details}`
+        );
+      }
+      approvedFormats = requested;
+    } else {
+      approvedFormats = generatableFormats;
+      if (approvedFormats.length === 0) {
+        throw new ValidationError(
+          'Ningún formato objetivo es generable actualmente para aprobar este borrador.'
+        );
+      }
+    }
+
+    const blockedFormats: BlockedFormatRecord[] = ALL_TARGET_FORMATS.filter(
+      (fmt) => !approvedFormats.includes(fmt)
+    ).map((fmt) =>
+      !isFormatGeneratable(fmt)
+        ? {
+            format: fmt,
+            status: 'NOT_GENERATABLE',
+            reason: repairLegacyUtf8Text(
+              refreshedTargets[fmt]?.reason ?? 'Formato no generable sin evidencia suficiente.'
+            ),
+          }
+        : {
+            format: fmt,
+            status: 'EXCLUDED_BY_REVIEWER',
+            reason: 'Excluido del alcance de aprobación por decisión del revisor humano.',
+          }
+    );
+
     const approvedAtIso = new Date().toISOString();
     const setAsCurrent = input.setAsCurrent ?? true;
 
@@ -980,6 +1144,10 @@ export class AudioTranscriptionService {
         bpm: currentDto.detectedBpm ?? existingSong.defaultBpm ?? undefined,
         timeSignature: currentDto.detectedTimeSignature ?? existingSong.timeSignature ?? undefined,
         changesCount: currentDto.changesMadeDuringReview.length,
+        approvedFormats,
+        blockedFormats,
+        approvalScope,
+        harmonicEvidenceSummary,
       };
 
       const approvedCanonical = new CanonicalMusicPayload({
@@ -1007,7 +1175,7 @@ export class AudioTranscriptionService {
         `Transcripción Audio Aprobada (v${nextVersionNumber})`;
       const versionDescription =
         input.versionDescription?.trim() ||
-        `Aprobada por revisión humana desde audio "${asset.filename}" (SHA-256: ${asset.checksumSha256.slice(0, 12)}...). Confianza: ${Math.round(currentDto.overallConfidence * 100)}%.`;
+        `Aprobada por revisión humana (${approvalScope}; formatos: ${approvedFormats.join(', ')}) desde "${asset.filename}" (SHA-256: ${asset.checksumSha256.slice(0, 12)}...). Evidencia armónica: ${harmonicEvidenceSummary.detectedCount} detectados, ${harmonicEvidenceSummary.estimatedCount} estimados, ${harmonicEvidenceSummary.ambiguousCount} ambiguos, ${harmonicEvidenceSummary.humanVerifiedCount} verificados manualmente.`;
 
       const [createdVersion] = await tx
         .insert(songVersions)
@@ -1016,7 +1184,12 @@ export class AudioTranscriptionService {
           versionNumber: nextVersionNumber,
           name: versionName,
           description: versionDescription,
-          sourceFormat: totalNotes > 0 ? 'MUSIC_XML' : 'CHORD_PRO',
+          sourceFormat:
+            approvedFormats.includes('MUSIC_XML') && totalNotes > 0
+              ? 'MUSIC_XML'
+              : approvedFormats.includes('CHORD_PRO')
+              ? 'CHORD_PRO'
+              : approvedFormats[0]!,
           canonicalPayload: serializedCanonical,
           totalMeasures: stats.totalMeasures,
           totalNotes: stats.totalNotes,
@@ -1073,6 +1246,10 @@ export class AudioTranscriptionService {
         setAsCurrent,
         ...(input.reviewNotes ? { reviewNotes: input.reviewNotes } : {}),
         changesMadeDuringReview: currentDto.changesMadeDuringReview,
+        approvedFormats,
+        blockedFormats,
+        approvalScope,
+        harmonicEvidenceSummary,
       };
 
       const [proposalRow] = await tx
@@ -1085,6 +1262,7 @@ export class AudioTranscriptionService {
         ...((proposalRow?.rawPayload as Record<string, unknown>) ?? {}),
         workflowState: 'APPROVED' as AudioConversionWorkflowState,
         proposedCanonicalPayload: serializedCanonical,
+        targets: refreshedTargets,
         approvalMetadata,
       };
 
@@ -1230,7 +1408,7 @@ export class AudioTranscriptionService {
       const measureNum = mData.measureNumber || i + 1;
       const measureStartTick = currentTick;
 
-      // 1. Acordes detectados en el compás
+      // 1. Acordes detectados/estimados/ambiguos en el compás (preservando evidencia exacta)
       const chordEvents: ChordEvent[] = [];
       let chordIdx = 1;
       for (const c of mData.chordsDetected) {
@@ -1240,6 +1418,10 @@ export class AudioTranscriptionService {
             typeof c.tickOffset === 'number'
               ? c.tickOffset
               : Math.max(0, (c.beat - 1) * effectiveTimeSig.beatDurationTicks);
+          const evStatus: ChordEvidenceStatus =
+            c.status === 'DETECTED' || c.status === 'ESTIMATED' || c.status === 'AMBIGUOUS'
+              ? c.status
+              : 'ESTIMATED';
           chordEvents.push(
             new ChordEvent({
               id: `aud_ch_${measureNum}_${chordIdx++}`,
@@ -1247,6 +1429,9 @@ export class AudioTranscriptionService {
               startTick: measureStartTick + relOffset,
               measureNumber: measureNum,
               voice: 1,
+              evidenceStatus: evStatus,
+              confidence: c.confidence,
+              alternativeSymbol: c.alternativeChord ?? null,
             })
           );
         } catch {
@@ -1394,7 +1579,7 @@ export class AudioTranscriptionService {
       totalDurationTicks: Math.max(measureDurationTicks, currentTick),
     });
 
-    return new CanonicalMusicPayload({
+    const draftPayload = new CanonicalMusicPayload({
       title,
       timeline,
       sections,
@@ -1422,8 +1607,21 @@ export class AudioTranscriptionService {
         meterConfidence: analysis.meterConfidence,
         meterStatus: analysis.meterStatus,
         noteExtractionStatus: analysis.noteExtractionStatus,
-        noteExtractionReason: analysis.noteExtractionReason,
+        noteExtractionReason: repairLegacyUtf8Text(analysis.noteExtractionReason),
         instrument: selectedInstrument,
+      },
+    });
+    const harmonicEvidenceSummary = this.computeHarmonicEvidenceBreakdown(draftPayload);
+    return new CanonicalMusicPayload({
+      version: draftPayload.version,
+      title: draftPayload.title,
+      timeline: draftPayload.timeline,
+      sections: [...draftPayload.sections],
+      measures: [...draftPayload.measures],
+      instrumentTracks: [...draftPayload.instrumentTracks],
+      metadata: {
+        ...draftPayload.metadata,
+        harmonicEvidenceSummary,
       },
     });
   }
@@ -1436,14 +1634,87 @@ export class AudioTranscriptionService {
     resolvedTimeSig: string | null,
     analysis: PythonWorkerAnalysisResult,
     asset: AudioAsset,
-    selectedInstrument: SupportedReviewInstrument
+    selectedInstrument: SupportedReviewInstrument,
+    previousCanonical?: CanonicalMusicPayload
   ): CanonicalMusicPayload {
-    return new CanonicalMusicPayload({
+    const prevMeasuresByNum = new Map<number, Measure>(
+      (previousCanonical?.measures ?? []).map((m) => [m.number, m])
+    );
+    const analysisMeasuresByNum = new Map<number, PythonWorkerAnalysisResult['measures'][number]>(
+      analysis.measures.map((m) => [m.measureNumber, m])
+    );
+
+    const preservedMeasures = importedChordProPayload.measures.map((m) => {
+      const prevMeasure = prevMeasuresByNum.get(m.number);
+      const analysisMeasure = analysisMeasuresByNum.get(m.number);
+      const updatedChords = m.chords.map((ce, idx) => {
+        const importedSymbol = ce.chord.toString('STANDARD');
+        const prevChord = prevMeasure?.chords[idx];
+        if (prevChord && prevChord.chord.toString('STANDARD') === importedSymbol) {
+          return new ChordEvent({
+            id: ce.id,
+            chord: ce.chord,
+            startTick: ce.startTick,
+            durationTicks: ce.durationTicks ?? null,
+            measureNumber: ce.measureNumber,
+            ...(ce.voice !== undefined ? { voice: ce.voice } : {}),
+            ...(prevChord.evidenceStatus !== undefined ? { evidenceStatus: prevChord.evidenceStatus } : {}),
+            ...(prevChord.confidence !== undefined ? { confidence: prevChord.confidence } : {}),
+            ...(prevChord.alternativeSymbol !== undefined ? { alternativeSymbol: prevChord.alternativeSymbol } : {}),
+          });
+        }
+        const rawAnalysisChord = analysisMeasure?.chordsDetected[idx];
+        if (rawAnalysisChord && rawAnalysisChord.chord === importedSymbol) {
+          const evStatus: ChordEvidenceStatus =
+            rawAnalysisChord.status === 'DETECTED' ||
+            rawAnalysisChord.status === 'ESTIMATED' ||
+            rawAnalysisChord.status === 'AMBIGUOUS'
+              ? rawAnalysisChord.status
+              : 'ESTIMATED';
+          return new ChordEvent({
+            id: ce.id,
+            chord: ce.chord,
+            startTick: ce.startTick,
+            durationTicks: ce.durationTicks ?? null,
+            measureNumber: ce.measureNumber,
+            ...(ce.voice !== undefined ? { voice: ce.voice } : {}),
+            evidenceStatus: evStatus,
+            confidence: rawAnalysisChord.confidence,
+            alternativeSymbol: rawAnalysisChord.alternativeChord ?? null,
+          });
+        }
+        // Solo si el acorde fue alterado o insertado manualmente en el editor pasa a HUMAN_VERIFIED
+        return new ChordEvent({
+          id: ce.id,
+          chord: ce.chord,
+          startTick: ce.startTick,
+          durationTicks: ce.durationTicks ?? null,
+          measureNumber: ce.measureNumber,
+          ...(ce.voice !== undefined ? { voice: ce.voice } : {}),
+          evidenceStatus: 'HUMAN_VERIFIED',
+          confidence: 1.0,
+          alternativeSymbol: prevChord ? prevChord.chord.toString('STANDARD') : null,
+        });
+      });
+
+      return new Measure({
+        number: m.number,
+        startTick: m.startTick,
+        durationTicks: m.durationTicks,
+        timeSignature: m.timeSignature,
+        keySignature: m.keySignature,
+        voices: m.voices.length > 0 ? [...m.voices] : [...(prevMeasure?.voices ?? [])],
+        chords: updatedChords,
+        lyrics: [...m.lyrics],
+      });
+    });
+
+    const draftPayload = new CanonicalMusicPayload({
       version: importedChordProPayload.version,
       title,
       timeline: importedChordProPayload.timeline,
       sections: [...importedChordProPayload.sections],
-      measures: [...importedChordProPayload.measures],
+      measures: preservedMeasures,
       instrumentTracks: [...importedChordProPayload.instrumentTracks],
       metadata: {
         ...(importedChordProPayload.metadata ?? {}),
@@ -1461,7 +1732,22 @@ export class AudioTranscriptionService {
         key: resolvedKey ?? undefined,
         bpm: resolvedBpm ?? undefined,
         timeSignature: resolvedTimeSig ?? undefined,
+        noteExtractionStatus: analysis.noteExtractionStatus,
+        noteExtractionReason: repairLegacyUtf8Text(analysis.noteExtractionReason),
         instrument: selectedInstrument,
+      },
+    });
+    const harmonicEvidenceSummary = this.computeHarmonicEvidenceBreakdown(draftPayload);
+    return new CanonicalMusicPayload({
+      version: draftPayload.version,
+      title: draftPayload.title,
+      timeline: draftPayload.timeline,
+      sections: [...draftPayload.sections],
+      measures: [...draftPayload.measures],
+      instrumentTracks: [...draftPayload.instrumentTracks],
+      metadata: {
+        ...draftPayload.metadata,
+        harmonicEvidenceSummary,
       },
     });
   }
@@ -1475,9 +1761,12 @@ export class AudioTranscriptionService {
     const allChords = payload.getAllChords();
     const allNotes = payload.getAllNotes();
     const allLyrics = payload.getAllLyrics();
+    const breakdown = this.computeHarmonicEvidenceBreakdown(payload);
+    const breakdownClause = this.formatEvidenceSummaryClause(breakdown);
+    const repairedAnalysis = this.repairLegacyUtf8AnalysisStrings(analysis);
 
     const evalMap = new Map<string, PythonWorkerTargetEvaluation>(
-      (analysis.targetEvaluations ?? []).map((e) => [e.format, e])
+      (repairedAnalysis.targetEvaluations ?? []).map((e) => [e.format, e])
     );
 
     // A. CHORD_PRO / Lead Sheet
@@ -1485,8 +1774,9 @@ export class AudioTranscriptionService {
     if (allChords.length > 0 || allLyrics.length > 0) {
       const exported = CanonicalToChordProSerializer.serialize(payload);
       const headerComments = [
-        `{comment: Borrador derivado de audio (${analysis.analysisVersion} / ${TRANSCRIPTION_VERSION}) — Revisión humana obligatoria}`,
-        `{comment: Confianza global: ${Math.round(analysis.overallConfidence * 100)}% | Tonalidad: ${analysis.key ?? 'No resuelta'} (${Math.round(analysis.keyConfidence * 100)}%) | Tempo: ${analysis.bpm ?? '—'} BPM (${Math.round(analysis.bpmConfidence * 100)}%)}`,
+        `{comment: Borrador derivado de audio (${repairedAnalysis.analysisVersion} / ${TRANSCRIPTION_VERSION}) — Revisión humana obligatoria}`,
+        `{comment: Evidencia armónica: ${allChords.length} acordes (${breakdownClause}) | Notas melódicas: ${allNotes.length}}`,
+        `{comment: Confianza global: ${Math.round(repairedAnalysis.overallConfidence * 100)}% | Tonalidad: ${repairedAnalysis.key ?? 'No resuelta'} (${Math.round(repairedAnalysis.keyConfidence * 100)}%) | Tempo: ${repairedAnalysis.bpm ?? '—'} BPM (${Math.round(repairedAnalysis.bpmConfidence * 100)}%)}`,
       ].join('\n');
       const rawText = String(exported.content);
       const lines = rawText.split('\n');
@@ -1496,15 +1786,13 @@ export class AudioTranscriptionService {
       } else {
         lines.unshift(headerComments);
       }
-      const conf = evalMap.get('CHORD_PRO')?.confidence ?? analysis.overallConfidence;
+      const conf = evalMap.get('CHORD_PRO')?.confidence ?? repairedAnalysis.overallConfidence;
       chordProArtifact = {
         format: 'CHORD_PRO',
         status: conf >= 0.55 ? 'DRAFT_READY' : 'REVIEW_REQUIRED',
         generatable: true,
         confidence: conf,
-        reason:
-          evalMap.get('CHORD_PRO')?.reason ??
-          `Guion armónico ChordPro generado con ${allChords.length} acordes en ${payload.measures.length} compases.`,
+        reason: `Guion armónico ChordPro con ${allChords.length} eventos (${breakdownClause}) en ${payload.measures.length} compases.`,
         filename: exported.filename,
         mimeType: 'text/plain',
         isBinary: false,
@@ -1518,7 +1806,7 @@ export class AudioTranscriptionService {
         confidence: 0,
         reason:
           evalMap.get('CHORD_PRO')?.reason ??
-          'La grabación no proporcionó evidencia armónica ni acordes verificables para generar ChordPro.',
+          'La grabación no proporcionó evidencia armónica ni acordes suficientes para generar ChordPro.',
         filename: `${payload.title}.cho`,
         mimeType: 'text/plain',
         isBinary: false,
@@ -1535,7 +1823,7 @@ export class AudioTranscriptionService {
         xmlStr.includes('<?xml') &&
         xmlStr.includes('<score-partwise version="4.0">') &&
         xmlStr.includes('<measure');
-      const conf = evalMap.get('MUSIC_XML')?.confidence ?? analysis.overallConfidence;
+      const conf = evalMap.get('MUSIC_XML')?.confidence ?? repairedAnalysis.overallConfidence;
       musicXmlArtifact = {
         format: 'MUSIC_XML',
         status: isValidXml ? (allNotes.length > 0 && conf >= 0.65 ? 'DRAFT_READY' : 'REVIEW_REQUIRED') : 'NOT_GENERATABLE',
@@ -1543,8 +1831,8 @@ export class AudioTranscriptionService {
         confidence: conf,
         reason:
           allNotes.length > 0
-            ? `Partitura MusicXML 4.0 generada con ${allNotes.length} notas verificadas y ${allChords.length} acordes.`
-            : `Guion armónico MusicXML 4.0 con ${payload.measures.length} compases y ${allChords.length} acordes verificados (sin notas melódicas inventadas).`,
+            ? `Partitura MusicXML 4.0 generada con ${allNotes.length} notas verificadas y ${allChords.length} acordes (${breakdownClause}).`
+            : `Guion armónico estructural MusicXML 4.0 (${payload.measures.length} compases; 0 notas melódicas): ${allChords.length} eventos armónicos (${breakdownClause}).`,
         filename: exported.filename,
         mimeType: exported.mimeType,
         isBinary: false,
@@ -1556,7 +1844,7 @@ export class AudioTranscriptionService {
         status: 'NOT_GENERATABLE',
         generatable: false,
         confidence: 0,
-        reason: 'Sin eventos musicales ni acordes verificados para construir MusicXML 4.0.',
+        reason: 'Sin eventos musicales ni evidencia armónica suficiente para construir MusicXML 4.0.',
         filename: `${payload.title}.musicxml`,
         mimeType: 'application/vnd.recordare.musicxml+xml',
         isBinary: false,
@@ -1571,7 +1859,7 @@ export class AudioTranscriptionService {
       const exported = CanonicalToMidiSerializer.serialize(payload);
       if (exported.success && exported.content instanceof Uint8Array && exported.content.byteLength > 0) {
         const b64 = Buffer.from(exported.content).toString('base64');
-        const conf = evalMap.get('MIDI')?.confidence ?? analysis.monophonicSalience;
+        const conf = evalMap.get('MIDI')?.confidence ?? repairedAnalysis.monophonicSalience;
         midiArtifact = {
           format: 'MIDI',
           status: conf >= 0.7 ? 'DRAFT_READY' : 'REVIEW_REQUIRED',
@@ -1604,10 +1892,11 @@ export class AudioTranscriptionService {
         status: 'NOT_GENERATABLE',
         generatable: false,
         confidence: 0,
-        reason:
+        reason: repairLegacyUtf8Text(
           evalMap.get('MIDI')?.reason ??
-          midiEligibility.reason ??
-          'NOT_GENERATABLE: La grabación no contiene eventos de notas individuales con timing suficientemente verificado (Cero Fabricación).',
+            midiEligibility.reason ??
+            'NOT_GENERATABLE: La grabación no contiene eventos de notas individuales con timing suficientemente verificado (Cero Fabricación).'
+        ),
         filename: `${payload.title}.mid`,
         mimeType: 'audio/midi',
         isBinary: true,
@@ -1622,7 +1911,7 @@ export class AudioTranscriptionService {
       const exported = CanonicalToTablatureSerializer.serialize(payload, {
         instrument: selectedInstrument === 'BASS' ? 'BASS' : 'GUITAR',
       });
-      const conf = evalMap.get('TABLATURE')?.confidence ?? analysis.monophonicSalience;
+      const conf = evalMap.get('TABLATURE')?.confidence ?? repairedAnalysis.monophonicSalience;
       tabArtifact = {
         format: 'TABLATURE',
         status: conf >= 0.7 ? 'DRAFT_READY' : 'REVIEW_REQUIRED',
@@ -1636,10 +1925,12 @@ export class AudioTranscriptionService {
         instrument: selectedInstrument,
       };
     } else {
-      const reason = !isStringInstrument
-        ? `El instrumento seleccionado (${selectedInstrument}) no utiliza tablatura de trastes; seleccione Guitarra o Bajo con notas verificadas.`
-        : evalMap.get('TABLATURE')?.reason ??
-          'NOT_GENERATABLE: No se fabrican posiciones de guitarra o bajo sin eventos de notas individuales verificados.';
+      const reason = repairLegacyUtf8Text(
+        !isStringInstrument
+          ? `El instrumento seleccionado (${selectedInstrument}) no utiliza tablatura de trastes; seleccione Guitarra o Bajo con notas verificadas.`
+          : evalMap.get('TABLATURE')?.reason ??
+            'NOT_GENERATABLE: No se fabrican posiciones de guitarra o bajo sin eventos de notas individuales verificados.'
+      );
       tabArtifact = {
         format: 'TABLATURE',
         status: 'NOT_GENERATABLE',
@@ -1711,6 +2002,91 @@ export class AudioTranscriptionService {
     return lines.join('\n') + '\n';
   }
 
+  private computeHarmonicEvidenceBreakdown(payload: CanonicalMusicPayload): HarmonicEvidenceBreakdown {
+    const allChords = payload.getAllChords();
+    let detectedCount = 0;
+    let estimatedCount = 0;
+    let ambiguousCount = 0;
+    let humanVerifiedCount = 0;
+    for (const ce of allChords) {
+      if (ce.evidenceStatus === 'HUMAN_VERIFIED') humanVerifiedCount += 1;
+      else if (ce.evidenceStatus === 'DETECTED') detectedCount += 1;
+      else if (ce.evidenceStatus === 'AMBIGUOUS') ambiguousCount += 1;
+      else estimatedCount += 1;
+    }
+    return {
+      totalChords: allChords.length,
+      detectedCount,
+      estimatedCount,
+      ambiguousCount,
+      humanVerifiedCount,
+      melodicNotesCount: payload.getAllNotes().length,
+    };
+  }
+
+  private formatEvidenceSummaryClause(breakdown: HarmonicEvidenceBreakdown): string {
+    const det = breakdown.detectedCount === 1 ? '1 detectado' : `${breakdown.detectedCount} detectados`;
+    const est = breakdown.estimatedCount === 1 ? '1 estimado' : `${breakdown.estimatedCount} estimados`;
+    const amb = breakdown.ambiguousCount === 1 ? '1 ambiguo' : `${breakdown.ambiguousCount} ambiguos`;
+    const hum =
+      breakdown.humanVerifiedCount === 1
+        ? '1 verificado por humano'
+        : `${breakdown.humanVerifiedCount} verificados por humano`;
+    return `${det}, ${est}, ${amb}, ${hum}`;
+  }
+
+  private repairLegacyUtf8AnalysisStrings(analysis: PythonWorkerAnalysisResult): PythonWorkerAnalysisResult {
+    return {
+      ...analysis,
+      noteExtractionReason: repairLegacyUtf8Text(analysis.noteExtractionReason),
+      stages: (analysis.stages ?? []).map((st) => ({
+        ...st,
+        summary: repairLegacyUtf8Text(st.summary),
+        details:
+          st.details && typeof st.details['noteExtractionReason'] === 'string'
+            ? {
+                ...st.details,
+                noteExtractionReason: repairLegacyUtf8Text(st.details['noteExtractionReason']),
+              }
+            : st.details,
+      })),
+      targetEvaluations: (analysis.targetEvaluations ?? []).map((te) => ({
+        ...te,
+        reason: repairLegacyUtf8Text(te.reason),
+      })),
+      warnings: (analysis.warnings ?? []).map((w) => repairLegacyUtf8Text(w)),
+    };
+  }
+
+  private computeEvidenceFromRawAnalysisAndCanonical(
+    canonicalJson: CanonicalMusicPayloadJSON,
+    analysis: PythonWorkerAnalysisResult
+  ): HarmonicEvidenceBreakdown {
+    const canonical = CanonicalDeserializer.deserialize(canonicalJson);
+    const allChords = canonical.getAllChords();
+    const hasExplicitStatus = allChords.some((c) => c.evidenceStatus !== undefined);
+    if (hasExplicitStatus || allChords.length === 0) {
+      return this.computeHarmonicEvidenceBreakdown(canonical);
+    }
+    // Respaldo para payloads legados previos a Scope 1C-final: derivar desde analysis.chordTimeline
+    let detectedCount = 0;
+    let estimatedCount = 0;
+    let ambiguousCount = 0;
+    for (const seg of analysis.chordTimeline ?? []) {
+      if (seg.status === 'DETECTED') detectedCount += 1;
+      else if (seg.status === 'AMBIGUOUS' || seg.status === 'UNSUPPORTED') ambiguousCount += 1;
+      else estimatedCount += 1;
+    }
+    return {
+      totalChords: allChords.length,
+      detectedCount,
+      estimatedCount,
+      ambiguousCount,
+      humanVerifiedCount: 0,
+      melodicNotesCount: canonical.getAllNotes().length,
+    };
+  }
+
   private async mapProposalRowToDto(
     row: typeof omrProposals.$inferSelect,
     asset: AudioAsset
@@ -1729,6 +2105,23 @@ export class AudioTranscriptionService {
         : row.reviewStatus === 'REJECTED'
         ? 'REJECTED'
         : 'REVIEW_REQUIRED');
+
+    const repairedAnalysis = this.repairLegacyUtf8AnalysisStrings(
+      raw['analysisSummary'] as PythonWorkerAnalysisResult
+    );
+    const rawTargets = (raw['targets'] as Record<string, GeneratedTargetArtifact>) ?? {};
+    const repairedTargets: Record<string, GeneratedTargetArtifact> = {};
+    for (const [k, t] of Object.entries(rawTargets)) {
+      repairedTargets[k] = {
+        ...t,
+        reason: repairLegacyUtf8Text(t.reason),
+      };
+    }
+    const canonicalJson = raw['proposedCanonicalPayload'] as CanonicalMusicPayloadJSON;
+    const harmonicEvidenceSummary = this.computeEvidenceFromRawAnalysisAndCanonical(
+      canonicalJson,
+      repairedAnalysis
+    );
 
     return {
       proposalId: row.id,
@@ -1751,13 +2144,14 @@ export class AudioTranscriptionService {
       selectedInstrument: (raw['selectedInstrument'] as SupportedReviewInstrument) ?? 'GUITAR',
       verifiedLyrics: String(raw['verifiedLyrics'] ?? ''),
       proposedChordPro: String(raw['proposedChordPro'] ?? ''),
-      proposedCanonicalPayload: raw['proposedCanonicalPayload'] as CanonicalMusicPayloadJSON,
-      analysisSummary: raw['analysisSummary'] as PythonWorkerAnalysisResult,
-      targets: (raw['targets'] as Record<string, GeneratedTargetArtifact>) ?? {},
+      proposedCanonicalPayload: canonicalJson,
+      analysisSummary: repairedAnalysis,
+      targets: repairedTargets,
       changesMadeDuringReview: Array.isArray(raw['changesMadeDuringReview'])
         ? (raw['changesMadeDuringReview'] as AudioDraftReviewChangeRecord[])
         : [],
       approvalMetadata: (raw['approvalMetadata'] as AudioDraftApprovalMetadata | null) ?? null,
+      harmonicEvidenceSummary,
       createdAt: row.createdAt.toISOString(),
       reviewedAt: row.reviewedAt ? row.reviewedAt.toISOString() : null,
       reviewedByUserId: row.reviewedByUserId ?? null,

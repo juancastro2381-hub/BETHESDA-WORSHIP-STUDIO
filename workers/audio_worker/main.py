@@ -30,6 +30,20 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
+
+def _ensure_utf8_streams() -> None:
+    """Force UTF-8 stdio streams on Windows consoles where cp1252 is default."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+_ensure_utf8_streams()
+
 # Ensure sibling imports resolve cleanly regardless of cwd
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:

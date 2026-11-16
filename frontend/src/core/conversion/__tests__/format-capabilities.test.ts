@@ -362,7 +362,7 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
     assert.strictEqual(draftCaps.find((c) => c.format === 'LYRICS_ONLY')?.dynamicAudioState, 'REVIEW_REQUIRED');
     assert.strictEqual(draftCaps.find((c) => c.format === 'LYRICS_ONLY')?.isAvailable, false);
 
-    // 5. APPROVED draft -> generatable targets become APPROVED
+    // 5. APPROVED draft -> generatable targets become APPROVED (respecting approvalMetadata.approvedFormats)
     const approvedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
       workflowState: 'APPROVED',
       draft: { ...polyphonicDraft, workflowState: 'APPROVED' },
@@ -371,6 +371,25 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
     assert.strictEqual(approvedCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'APPROVED');
     assert.strictEqual(approvedCaps.find((c) => c.format === 'MUSIC_XML')?.dynamicAudioState, 'APPROVED');
     assert.strictEqual(approvedCaps.find((c) => c.format === 'MIDI')?.dynamicAudioState, 'NOT_GENERATABLE');
+
+    // 5b. APPROVED draft with explicit format-level scope (only CHORD_PRO approved; MUSIC_XML excluded by reviewer)
+    const scopedApprovedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'APPROVED',
+      draft: {
+        ...polyphonicDraft,
+        workflowState: 'APPROVED',
+        approvalMetadata: {
+          approvedFormats: ['CHORD_PRO'],
+          blockedFormats: [
+            { format: 'MUSIC_XML', reason: 'Excluido por el revisor' },
+            { format: 'MIDI', reason: 'NOT_GENERATABLE' },
+          ],
+        },
+      },
+    });
+    assert.strictEqual(scopedApprovedCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'APPROVED');
+    assert.strictEqual(scopedApprovedCaps.find((c) => c.format === 'MUSIC_XML')?.dynamicAudioState, 'REVIEW_REQUIRED');
+    assert.strictEqual(scopedApprovedCaps.find((c) => c.format === 'MIDI')?.dynamicAudioState, 'NOT_GENERATABLE');
 
     // 6. FAILED state
     const failedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({

@@ -441,10 +441,17 @@ export class PythonAudioWorkerBridge {
         return settle(new ValidationError('Ejecución del worker de audio cancelada por AbortSignal.'));
       }
 
-      proc = spawn(pythonExe, [this.workerScriptPath], {
+      proc = spawn(pythonExe, ['-X', 'utf8', this.workerScriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+        },
       });
+      proc.stdout?.setEncoding('utf8');
+      proc.stderr?.setEncoding('utf8');
 
       if (signal) {
         signal.addEventListener('abort', onAbort, { once: true });

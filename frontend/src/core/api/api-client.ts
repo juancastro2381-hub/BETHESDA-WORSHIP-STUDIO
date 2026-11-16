@@ -1348,6 +1348,384 @@ export class BethesdaApiClient {
     const json = await res.json();
     return json.data;
   }
+
+  // ==========================================================================
+  // SCOPE 1C: WS-AUDIO-02, WS-AUDIO-03, REVISIÓN HUMANA Y VERSIONES CANÓNICAS
+  // ==========================================================================
+
+  /**
+   * Crea una canción contenedor en estado DRAFT para asociar un nuevo archivo de audio
+   * sin sobrescribir ni mezclar con canciones canónicas existentes (WS-AUDIO-01 / Sección 8).
+   */
+  public async createAudioDraftSong(params: {
+    title: string;
+    artist?: string;
+  }): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth('/audio/songs/draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Ejecuta el análisis acústico Python de 10 etapas (WS-AUDIO-02) y la transcripción musical
+   * a borradores (WS-AUDIO-03) sobre un activo de audio preservado.
+   */
+  public async analyzeAndTranscribeAudio(
+    audioId: string,
+    params?: {
+      verifiedLyrics?: string;
+      selectedInstrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+      titleOverride?: string;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(`/audio/${encodeURIComponent(audioId)}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params ?? {}),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista los borradores de transcripción asociados a un activo de audio.
+   */
+  public async listAudioDrafts(audioId: string): Promise<AudioDraftProposalDTO[]> {
+    const res = await this.fetchWithAuth(`/audio/${encodeURIComponent(audioId)}/drafts`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista los borradores de transcripción de audio asociados a una canción del catálogo.
+   */
+  public async listSongAudioDrafts(songId: string): Promise<AudioDraftProposalDTO[]> {
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/audio-drafts`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Edita el borrador propuesto durante la Revisión Humana obligatoria (Gate 4).
+   */
+  public async updateAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload: {
+      title?: string;
+      key?: string;
+      bpm?: number;
+      timeSignature?: string;
+      proposedChordPro?: string;
+      verifiedLyrics?: string;
+      selectedInstrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+      reason?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Registra la decisión de revisión humana: REJECTED, CORRECTION_REQUESTED o APPROVED_FOR_IMPORT.
+   */
+  public async reviewAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload: {
+      decision: 'REJECTED' | 'CORRECTION_REQUESTED' | 'APPROVED_FOR_IMPORT';
+      notes?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Aprueba explícitamente un borrador revisado y publica una nueva versión controlada en `song_versions`
+   * para su visualización inmediata en el Atril Digital (preservando las versiones anteriores).
+   */
+  public async approveAndPublishAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload?: {
+      targetSongId?: string;
+      versionName?: string;
+      versionDescription?: string;
+      setAsCurrent?: boolean;
+      reviewNotes?: string;
+    }
+  ): Promise<{
+    draft: AudioDraftProposalDTO;
+    songId: string;
+    versionId: string;
+    versionNumber: number;
+    approvalMetadata: AudioDraftApprovalMetadataDTO;
+  }> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload ?? {}),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Exporta un formato específico ('CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY')
+   * de un borrador derivado de audio si está habilitado.
+   */
+  public async exportAudioDraftFormat(
+    audioId: string,
+    proposalId: string,
+    format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY',
+    instrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL'
+  ): Promise<GeneratedTargetArtifactDTO> {
+    const query = instrument ? `?instrument=${encodeURIComponent(instrument)}` : '';
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/export/${encodeURIComponent(format)}${query}`,
+      { method: 'GET' }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista todas las versiones históricas y aprobadas de una canción en PostgreSQL.
+   */
+  public async listSongVersions(songId: string): Promise<BackendVersionItem[]> {
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/versions`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Activa una versión específica de una canción como su versión actual para el Atril Digital.
+   */
+  public async activateSongVersion(songId: string, versionId: string): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/versions/${encodeURIComponent(versionId)}/activate`,
+      { method: 'PUT' }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+}
+
+export type AudioConversionWorkflowStateDTO =
+  | 'AUDIO_PRESERVED'
+  | 'ANALYSIS_QUEUED'
+  | 'ANALYSIS_RUNNING'
+  | 'ANALYSIS_COMPLETED'
+  | 'ANALYSIS_PARTIAL'
+  | 'TRANSCRIPTION_RUNNING'
+  | 'DRAFT_READY'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'FAILED';
+
+export interface GeneratedTargetArtifactDTO {
+  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly status: 'DRAFT_READY' | 'REVIEW_REQUIRED' | 'NOT_GENERATABLE';
+  readonly generatable: boolean;
+  readonly confidence: number;
+  readonly reason: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly isBinary: boolean;
+  readonly content: string | null;
+  readonly instrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+}
+
+export interface AudioDraftReviewChangeRecordDTO {
+  readonly changedAt: string;
+  readonly changedByUserId: string;
+  readonly summary: string;
+  readonly fieldsModified: string[];
+}
+
+export interface AudioDraftApprovalMetadataDTO {
+  readonly approvedByUserId: string;
+  readonly approvedAt: string;
+  readonly sourceAudioAssetId: string;
+  readonly sourceAudioSha256: string;
+  readonly analysisVersion: string;
+  readonly transcriptionVersion: string;
+  readonly targetSongId: string;
+  readonly approvedSongVersionId: string;
+  readonly approvedVersionNumber: number;
+  readonly setAsCurrent: boolean;
+  readonly reviewNotes?: string;
+  readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
+}
+
+export interface AudioAnalysisSummaryDTO {
+  readonly contractVersion: string;
+  readonly workerVersion: string;
+  readonly analysisVersion: string;
+  readonly verifiedSha256: string;
+  readonly fileSizeBytes: number;
+  readonly detectedFormat: string;
+  readonly mimeType: string;
+  readonly durationSeconds: number;
+  readonly originalSampleRateHz: number | null;
+  readonly analysisSampleRateHz: number;
+  readonly originalChannels: number;
+  readonly stereoCorrelation: number | null;
+  readonly channelBalanceDb: number | null;
+  readonly resampled: boolean;
+  readonly rmsDb: number;
+  readonly peakDb: number;
+  readonly activeFrameRatio: number;
+  readonly harmonicEnergyRatio: number;
+  readonly percussiveEnergyRatio: number;
+  readonly bpm: number | null;
+  readonly bpmExact: number | null;
+  readonly bpmConfidence: number;
+  readonly bpmStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly key: string | null;
+  readonly keyMode: string | null;
+  readonly keyConfidence: number;
+  readonly keyStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly keyAlternatives: Array<{ key: string; mode: string; correlation: number }>;
+  readonly timeSignature: string | null;
+  readonly meterConfidence: number;
+  readonly meterStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly chromaDistribution: Record<string, number>;
+  readonly chordTimeline: Array<{
+    measureNumber: number;
+    beat: number;
+    tickOffset: number;
+    startTimeSec: number;
+    endTimeSec: number;
+    chord: string;
+    root: string;
+    quality: string;
+    confidence: number;
+    status: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+    alternativeChord?: string | null;
+  }>;
+  readonly sections: Array<{
+    id: string;
+    label: string;
+    type: string;
+    startMeasure: number;
+    measureCount: number;
+    startTimeSec: number;
+    endTimeSec: number;
+    confidence: number;
+  }>;
+  readonly polyphonyIndex: number;
+  readonly monophonicSalience: number;
+  readonly noteExtractionStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly noteExtractionReason: string;
+  readonly totalNotesDetected: number;
+  readonly totalChordsDetected: number;
+  readonly overallConfidence: number;
+  readonly overallStatus: 'ANALYSIS_COMPLETED' | 'ANALYSIS_PARTIAL' | 'UNSUPPORTED';
+  readonly stages: Array<{
+    stageNumber: number;
+    stageName: string;
+    status: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+    confidence: number;
+    summary: string;
+    details: Record<string, unknown>;
+  }>;
+  readonly warnings: string[];
+}
+
+export interface AudioDraftProposalDTO {
+  readonly proposalId: string;
+  readonly jobId: string | null;
+  readonly audioAssetId: string;
+  readonly songId: string;
+  readonly songTitle: string;
+  readonly sourceFilename: string;
+  readonly sourceSha256: string;
+  readonly workflowState: AudioConversionWorkflowStateDTO;
+  readonly reviewStatus: 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED_FOR_IMPORT' | 'REJECTED' | 'COMMITTED';
+  readonly isAiDraft: boolean;
+  readonly analysisVersion: string;
+  readonly transcriptionVersion: string;
+  readonly title: string;
+  readonly detectedKey: string | null;
+  readonly detectedBpm: number | null;
+  readonly detectedTimeSignature: string | null;
+  readonly overallConfidence: number;
+  readonly selectedInstrument: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+  readonly verifiedLyrics: string;
+  readonly proposedChordPro: string;
+  readonly proposedCanonicalPayload: CanonicalMusicPayloadJSON;
+  readonly analysisSummary: AudioAnalysisSummaryDTO;
+  readonly targets: Record<string, GeneratedTargetArtifactDTO>;
+  readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
+  readonly approvalMetadata: AudioDraftApprovalMetadataDTO | null;
+  readonly createdAt: string;
+  readonly reviewedAt: string | null;
+  readonly reviewedByUserId: string | null;
 }
 
 export interface DocumentAnalysisSongDTO {

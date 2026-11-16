@@ -3666,4 +3666,288 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       assert.strictEqual(Buffer.compare(rangeRes.rawPayload, streamMp3.subarray(0, 128)), 0);
     });
   });
+
+  // ==========================================================================
+  // CRITERIO 23: SCOPE 1C END-TO-END (WS-AUDIO-01 + WS-AUDIO-02 + WS-AUDIO-03 + GATE 4 + GATE 5)
+  // ==========================================================================
+  it('23. (Scope 1C End-to-End) should execute Python DSP analysis, generate truthful drafts, enforce human review & canonical protection, and publish approved version to Digital Music Stand', async () => {
+    // 1. Crear canción borrador contenedora dedicada para audio (evita asociar por accidente a otra canción)
+    const draftSongRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/audio/songs/draft',
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({
+        title: 'El Señor Está en Este Lugar (Contenedor Audio)',
+        artist: 'Ministerio Bethesda',
+      }),
+    });
+    assert.strictEqual(draftSongRes.statusCode, 201, draftSongRes.body);
+    const draftContainerSong = draftSongRes.json().data.song;
+    createdSongIds.add(draftContainerSong.id);
+    assert.strictEqual(draftContainerSong.status, 'DRAFT');
+
+    const containerDetailRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/songs/${draftContainerSong.id}`,
+      headers: { authorization: `Bearer ${musicianToken}` },
+    });
+    assert.strictEqual(containerDetailRes.statusCode, 200);
+    const containerCanonical = containerDetailRes.json().data.version.canonicalPayload;
+    assert.strictEqual(containerCanonical.metadata?.isAudioContainerDraft, true);
+    assert.strictEqual(containerCanonical.measures.length, 0);
+
+    // 2. Generar un MP3 real con melodía clara (C4 -> E4 -> G4 -> C5 a 120 BPM, 2.0s) usando ffmpeg del worker
+    const pyExe = globalPythonAudioWorkerBridge.resolvePythonExecutable();
+    const melodicMp3Path = path.join(
+      os.tmpdir(),
+      `bethesda_scope1c_melody_${Date.now()}_${Math.random().toString(16).slice(2)}.mp3`
+    );
+    tempFilesToClean.push(melodicMp3Path);
+    const pyGenScript = [
+      'import sys, subprocess, imageio_ffmpeg',
+      'ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()',
+      'expr = "0.5*sin(2*PI*261.63*t)*between(t,0,0.48)+0.5*sin(2*PI*329.63*t)*between(t,0.5,0.98)+0.5*sin(2*PI*392.00*t)*between(t,1.0,1.48)+0.5*sin(2*PI*523.25*t)*between(t,1.5,1.98)"',
+      'subprocess.run([ffmpeg, "-nostdin", "-threads", "1", "-v", "error", "-y", "-f", "lavfi", "-i", f"aevalsrc=\'{expr}\':s=44100:d=2.0", "-ar", "44100", "-ac", "1", "-b:a", "128k", sys.argv[1]], check=True)',
+    ].join('; ');
+    execFileSync(pyExe, ['-c', pyGenScript, melodicMp3Path], { windowsHide: true });
+    const melodicMp3Buffer = fs.readFileSync(melodicMp3Path);
+
+    // Subir el MP3 a la canción canónica existente (testSong) para verificar también protección canónica (v1 intacta)
+    const beforeSongRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/songs/${testSong.id}`,
+      headers: { authorization: `Bearer ${directorToken}` },
+    });
+    assert.strictEqual(beforeSongRes.statusCode, 200);
+    const originalVersionId = beforeSongRes.json().data.version.id as string;
+
+    const uploadRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${testSong.id}/audio`,
+      headers: {
+        authorization: `Bearer ${directorToken}`,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({
+        title: 'Melodía Do Mayor Scope 1C',
+        filename: 'melodia_do_mayor_scope1c.mp3',
+        mimeType: 'audio/mpeg',
+        dataBase64: melodicMp3Buffer.toString('base64'),
+      }),
+    });
+    assert.strictEqual(uploadRes.statusCode, 201, uploadRes.body);
+    const uploadedAsset = uploadRes.json().data;
+    createdAudioStoragePaths.add(uploadedAsset.storagePath);
+
+    try {
+      // 3. Ejecutar WS-AUDIO-02 (Análisis DSP Python) + WS-AUDIO-03 (Transcripción a Borrador)
+      const analyzeRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/analyze`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          verifiedLyrics: '',
+        }),
+      });
+      assert.strictEqual(analyzeRes.statusCode, 201, analyzeRes.body);
+      const draft1 = analyzeRes.json().data;
+
+      assert.strictEqual(draft1.audioAssetId, uploadedAsset.id);
+      assert.strictEqual(draft1.songId, testSong.id);
+      assert.ok(['DRAFT_READY', 'REVIEW_REQUIRED'].includes(draft1.workflowState));
+      assert.strictEqual(draft1.analysisSummary.stages.length, 10, 'Deben completarse las 10 etapas DSP');
+      assert.strictEqual(draft1.targets.CHORD_PRO.generatable, true);
+      assert.strictEqual(draft1.targets.MUSIC_XML.generatable, true);
+      assert.strictEqual(draft1.targets.LYRICS_ONLY.generatable, false);
+      assert.strictEqual(draft1.targets.LYRICS_ONLY.status, 'REVIEW_REQUIRED');
+
+      // Verificar que la canción canónica NO fue modificada automáticamente por el análisis
+      const afterAnalyzeSongRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/songs/${testSong.id}`,
+        headers: { authorization: `Bearer ${directorToken}` },
+      });
+      assert.strictEqual(afterAnalyzeSongRes.json().data.version.id, originalVersionId);
+
+      // 4. Editar el borrador en Revisión Humana (Gate 4): agregar letra verificada y tonalidad C
+      const patchRes = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft1.proposalId}`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          title: 'Al Que Está Sentado En El Trono (Audio Revisado)',
+          key: 'C',
+          bpm: 120,
+          verifiedLyrics: 'Santo es el Señor\nDigno de adoración',
+          reviewNotes: 'Letra verificada manualmente por dirección musical.',
+        }),
+      });
+      assert.strictEqual(patchRes.statusCode, 200, patchRes.body);
+      const updatedDraft1 = patchRes.json().data;
+      assert.strictEqual(updatedDraft1.detectedKey, 'C');
+      assert.strictEqual(updatedDraft1.detectedBpm, 120);
+      assert.strictEqual(updatedDraft1.targets.LYRICS_ONLY.generatable, true);
+      assert.ok(updatedDraft1.proposedChordPro.includes('{key: C}'));
+      assert.ok(updatedDraft1.targets.LYRICS_ONLY.content?.includes('Santo es el Señor'));
+
+      // 5. Exportar artefactos del borrador (ChordPro y MusicXML)
+      const exportChoRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft1.proposalId}/export/CHORD_PRO`,
+        headers: { authorization: `Bearer ${directorToken}` },
+      });
+      assert.strictEqual(exportChoRes.statusCode, 200, exportChoRes.body);
+      assert.ok(exportChoRes.json().data.content.includes('{title: Al Que Está Sentado En El Trono (Audio Revisado)}'));
+
+      const exportXmlRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft1.proposalId}/export/MUSIC_XML`,
+        headers: { authorization: `Bearer ${directorToken}` },
+      });
+      assert.strictEqual(exportXmlRes.statusCode, 200, exportXmlRes.body);
+      assert.ok(exportXmlRes.json().data.content.includes('<score-partwise'));
+
+      // 6. Rechazar el primer borrador y comprobar que no puede publicarse ni altera la canción canónica
+      const rejectRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft1.proposalId}/review`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          decision: 'REJECTED',
+          notes: 'Se rechaza este primer borrador de prueba.',
+        }),
+      });
+      assert.strictEqual(rejectRes.statusCode, 200, rejectRes.body);
+      assert.strictEqual(rejectRes.json().data.workflowState, 'REJECTED');
+
+      const approveRejectedRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft1.proposalId}/approve`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({}),
+      });
+      assert.strictEqual(approveRejectedRes.statusCode, 400);
+
+      // 7. Generar segundo borrador con letra incluida, verificar bloqueo RBAC para MUSICIAN y aprobar con WORSHIP_LEADER
+      const analyze2Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/analyze`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          verifiedLyrics: 'Al que está sentado en el trono\nSea la gloria y el honor',
+        }),
+      });
+      assert.strictEqual(analyze2Res.statusCode, 201, analyze2Res.body);
+      const draft2 = analyze2Res.json().data;
+
+      const forbiddenApproveRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
+        headers: {
+          authorization: `Bearer ${musicianToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({}),
+      });
+      assert.strictEqual(forbiddenApproveRes.statusCode, 403);
+
+      const approve2Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/audio/${uploadedAsset.id}/drafts/${draft2.proposalId}/approve`,
+        headers: {
+          authorization: `Bearer ${directorToken}`,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          versionName: 'Transcripción Audio Aprobada v2',
+          reviewNotes: 'Aprobación humana Gate 4 completada.',
+        }),
+      });
+      assert.strictEqual(approve2Res.statusCode, 201, approve2Res.body);
+      const approvalPayload = approve2Res.json().data;
+      assert.strictEqual(approvalPayload.versionNumber, 2);
+      assert.strictEqual(approvalPayload.draft.workflowState, 'APPROVED');
+
+      // 8. Verificar integración con el Atril Digital (Gate 5) y preservación de historial canónico (v1 + v2)
+      const standSongRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/songs/${testSong.id}`,
+        headers: { authorization: `Bearer ${musicianToken}` },
+      });
+      assert.strictEqual(standSongRes.statusCode, 200);
+      const standSongData = standSongRes.json().data;
+      assert.strictEqual(standSongData.version.versionNumber, 2);
+      assert.strictEqual(standSongData.version.name, 'Transcripción Audio Aprobada v2');
+
+      const approvedCanonical = standSongData.version.canonicalPayload;
+      assert.strictEqual(approvedCanonical.metadata.isAudioDerived, true);
+      assert.strictEqual(approvedCanonical.metadata.approvalStatus, 'APPROVED');
+      assert.strictEqual(approvedCanonical.metadata.sourceAudioAssetId, uploadedAsset.id);
+      assert.strictEqual(approvedCanonical.metadata.sourceAudioSha256, uploadedAsset.checksumSha256);
+      assert.ok(approvedCanonical.measures.length > 0, 'El modelo canónico aprobado debe contener compases verificados');
+
+      const versionsRes = await app.inject({
+        method: 'GET',
+        url: `/api/v1/songs/${testSong.id}/versions`,
+        headers: { authorization: `Bearer ${musicianToken}` },
+      });
+      assert.strictEqual(versionsRes.statusCode, 200);
+      const versionsList = versionsRes.json().data as Array<{ id: string; versionNumber: number; name: string }>;
+      assert.strictEqual(versionsList.length, 2, 'Deben coexistir la versión 1 canónica original y la versión 2 derivada de audio');
+      assert.ok(versionsList.some((v) => v.id === originalVersionId && v.versionNumber === 1));
+      assert.ok(versionsList.some((v) => v.id === approvalPayload.versionId && v.versionNumber === 2));
+
+      // Restaurar v1 activa usando el endpoint de activación de versión del Atril Digital
+      const activateV1Res = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/songs/${testSong.id}/versions/${originalVersionId}/activate`,
+        headers: { authorization: `Bearer ${directorToken}` },
+      });
+      assert.strictEqual(activateV1Res.statusCode, 200, activateV1Res.body);
+      assert.strictEqual(activateV1Res.json().data.version.id, originalVersionId);
+    } finally {
+      await pool.query(
+        `DELETE FROM audit_logs
+         WHERE resource = $1
+            OR metadata->>'audioAssetId' = $1
+            OR resource = $2`,
+        [uploadedAsset.id, draftContainerSong.id]
+      );
+      await pool.query(
+        `DELETE FROM omr_proposal_measures
+         WHERE proposal_id IN (
+           SELECT id FROM omr_proposals WHERE raw_payload->>'audioAssetId' = $1
+         )`,
+        [uploadedAsset.id]
+      );
+      await pool.query(
+        `DELETE FROM omr_proposals WHERE raw_payload->>'audioAssetId' = $1`,
+        [uploadedAsset.id]
+      );
+      await pool.query(
+        `DELETE FROM background_jobs WHERE input_ref = $1 OR output_ref = $1`,
+        [uploadedAsset.id]
+      );
+      await audioService.deleteAudio(uploadedAsset.id).catch(() => {});
+      createdAudioStoragePaths.delete(uploadedAsset.storagePath);
+    }
+  });
 });

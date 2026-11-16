@@ -36,6 +36,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from audio_inspector import inspect_and_verify_audio_file, outcome_to_dict
+from audio_analyzer import analyze_audio_file, analysis_outcome_to_dict
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DISALLOWED_URI_PREFIX_RE = re.compile(
@@ -58,7 +59,7 @@ def _validate_local_path_string(raw_path: str, field_name: str) -> Path:
 class WorkerRequest(BaseModel):
     contractVersion: Literal["1.0"]
     jobId: str = Field(min_length=1, max_length=128)
-    command: Literal["PING", "INSPECT_AND_VERIFY_AUDIO"]
+    command: Literal["PING", "INSPECT_AND_VERIFY_AUDIO", "ANALYZE_AUDIO"]
     sourcePath: Optional[str] = None
     expectedSha256: Optional[str] = None
     derivativeWavPath: Optional[str] = None
@@ -147,6 +148,22 @@ def handle_request_json(raw_json: str) -> int:
         })
 
     try:
+        if req.command == "ANALYZE_AUDIO":
+            analysis_outcome = analyze_audio_file(
+                source_path=source_path,
+                expected_sha256=req.expectedSha256,
+                emit_progress=on_progress,
+            )
+            analysis_dict = analysis_outcome_to_dict(analysis_outcome)
+            analysis_dict["pythonVersion"] = platform.python_version()
+            _emit({
+                "type": "RESULT",
+                "contractVersion": "1.0",
+                "jobId": req.jobId,
+                "data": analysis_dict,
+            })
+            return 0
+
         outcome = inspect_and_verify_audio_file(
             source_path=source_path,
             expected_sha256=req.expectedSha256,

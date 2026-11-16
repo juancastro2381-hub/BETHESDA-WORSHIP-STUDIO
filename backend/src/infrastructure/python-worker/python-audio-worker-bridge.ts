@@ -64,6 +64,132 @@ export interface InspectAudioOptions {
   readonly signal?: AbortSignal;
 }
 
+export type AudioEpistemicStatus = 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+export type AudioTargetEligibilityStatus = 'DRAFT_READY' | 'REVIEW_REQUIRED' | 'NOT_GENERATABLE';
+
+export interface PythonWorkerStageTelemetry {
+  readonly stageNumber: number;
+  readonly stageName: string;
+  readonly status: AudioEpistemicStatus;
+  readonly confidence: number;
+  readonly summary: string;
+  readonly details: Record<string, unknown>;
+}
+
+export interface PythonWorkerChordSegment {
+  readonly measureNumber: number;
+  readonly beat: number;
+  readonly tickOffset: number;
+  readonly startTimeSec: number;
+  readonly endTimeSec: number;
+  readonly chord: string;
+  readonly root: string;
+  readonly quality: string;
+  readonly confidence: number;
+  readonly status: AudioEpistemicStatus;
+  readonly alternativeChord?: string | null;
+}
+
+export interface PythonWorkerMeasureAnalysis {
+  readonly measureNumber: number;
+  readonly startTimeSec: number;
+  readonly endTimeSec: number;
+  readonly timeSignature: string | null;
+  readonly keySignature: string | null;
+  readonly measureConfidence: number;
+  readonly status: AudioEpistemicStatus;
+  readonly chordsDetected: Array<{
+    readonly chord: string;
+    readonly beat: number;
+    readonly tickOffset: number;
+    readonly confidence: number;
+    readonly status?: AudioEpistemicStatus;
+    readonly alternativeChord?: string | null;
+  }>;
+  readonly notesDetected: Array<{
+    readonly step: string;
+    readonly alter?: number;
+    readonly octave: number;
+    readonly midiPitch?: number;
+    readonly noteName?: string;
+    readonly duration: string;
+    readonly durationTicks: number;
+    readonly startTick: number;
+    readonly isRest: boolean;
+    readonly confidence: number;
+  }>;
+  readonly flags: string[];
+}
+
+export interface PythonWorkerSectionSegment {
+  readonly id: string;
+  readonly label: string;
+  readonly type: string;
+  readonly startMeasure: number;
+  readonly measureCount: number;
+  readonly startTimeSec: number;
+  readonly endTimeSec: number;
+  readonly confidence: number;
+}
+
+export interface PythonWorkerTargetEvaluation {
+  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly status: AudioTargetEligibilityStatus;
+  readonly generatable: boolean;
+  readonly confidence: number;
+  readonly reason: string;
+}
+
+export interface PythonWorkerAnalysisResult {
+  readonly contractVersion: string;
+  readonly workerVersion: string;
+  readonly analysisVersion: string;
+  readonly verifiedSha256: string;
+  readonly fileSizeBytes: number;
+  readonly detectedFormat: string;
+  readonly mimeType: string;
+  readonly durationSeconds: number;
+  readonly originalSampleRateHz: number | null;
+  readonly analysisSampleRateHz: number;
+  readonly originalChannels: number;
+  readonly stereoCorrelation: number | null;
+  readonly channelBalanceDb: number | null;
+  readonly resampled: boolean;
+  readonly rmsDb: number;
+  readonly peakDb: number;
+  readonly activeFrameRatio: number;
+  readonly harmonicEnergyRatio: number;
+  readonly percussiveEnergyRatio: number;
+  readonly bpm: number | null;
+  readonly bpmExact: number | null;
+  readonly bpmConfidence: number;
+  readonly bpmStatus: AudioEpistemicStatus;
+  readonly key: string | null;
+  readonly keyMode: string | null;
+  readonly keyConfidence: number;
+  readonly keyStatus: AudioEpistemicStatus;
+  readonly keyAlternatives: Array<{ key: string; mode: string; correlation: number }>;
+  readonly timeSignature: string | null;
+  readonly meterConfidence: number;
+  readonly meterStatus: AudioEpistemicStatus;
+  readonly chromaDistribution: Record<string, number>;
+  readonly chordTimeline: PythonWorkerChordSegment[];
+  readonly sections: PythonWorkerSectionSegment[];
+  readonly measures: PythonWorkerMeasureAnalysis[];
+  readonly polyphonyIndex: number;
+  readonly monophonicSalience: number;
+  readonly noteExtractionStatus: AudioEpistemicStatus;
+  readonly noteExtractionReason: string;
+  readonly totalNotesDetected: number;
+  readonly totalChordsDetected: number;
+  readonly overallConfidence: number;
+  readonly overallStatus: 'ANALYSIS_COMPLETED' | 'ANALYSIS_PARTIAL' | 'UNSUPPORTED';
+  readonly targetEvaluations: PythonWorkerTargetEvaluation[];
+  readonly stages: PythonWorkerStageTelemetry[];
+  readonly warnings: string[];
+  readonly pythonVersion: string;
+}
+
 export class PythonWorkerError extends Error {
   public readonly errorCode: string;
 
@@ -205,6 +331,58 @@ export class PythonAudioWorkerBridge {
     );
 
     return data as unknown as PythonWorkerInspectResult;
+  }
+
+  /**
+   * Solicita al worker local de Python la ejecución secuencial de las 10 etapas de análisis DSP (WS-AUDIO-02).
+   */
+  public async analyzeAudio(
+    jobId: string,
+    sourcePath: string,
+    expectedSha256: string,
+    options: Omit<InspectAudioOptions, 'derivativeWavPath'> = {}
+  ): Promise<PythonWorkerAnalysisResult> {
+    if (!sourcePath || typeof sourcePath !== 'string' || sourcePath.includes('\0')) {
+      throw new ValidationError('Ruta de audio fuente inválida (vacía o contiene byte nulo).');
+    }
+
+    if (DISALLOWED_PROTOCOL_PREFIX_RE.test(sourcePath.trim())) {
+      throw new ValidationError(
+        `Ruta de audio fuente rechazada: no se permiten URIs o protocolos externos (${sourcePath}).`
+      );
+    }
+
+    if (!SHA256_HEX_RE.test(expectedSha256)) {
+      throw new ValidationError(
+        'Checksum SHA-256 esperado inválido: debe ser una cadena hexadecimal de 64 caracteres.'
+      );
+    }
+
+    if (options.signal?.aborted) {
+      throw new ValidationError('Ejecución del worker de análisis cancelada por AbortSignal.');
+    }
+
+    const resolvedSource = path.resolve(sourcePath);
+    const pythonExe = this.resolvePythonExecutable();
+    const timeoutMs = options.timeoutMs ?? 90000;
+
+    const requestPayload = {
+      contractVersion: '1.0',
+      jobId,
+      command: 'ANALYZE_AUDIO',
+      sourcePath: resolvedSource,
+      expectedSha256,
+    };
+
+    const data = await this.executeSubprocess(
+      pythonExe,
+      requestPayload,
+      timeoutMs,
+      options.onProgress,
+      options.signal
+    );
+
+    return data as unknown as PythonWorkerAnalysisResult;
   }
 
   private executeSubprocess(

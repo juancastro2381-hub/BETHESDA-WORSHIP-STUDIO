@@ -18,6 +18,12 @@ import { UnauthorizedError, ForbiddenError, ValidationError } from '../../../dom
 import { ROLE_PERMISSIONS, type Permission, type UserRole } from '../../../domain/auth-types.ts';
 import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 import { globalPythonAudioWorkerBridge } from '../../../infrastructure/python-worker/python-audio-worker-bridge.ts';
+import { AudioTranscriptionService } from '../../../application/audio-transcription-service.ts';
+import { CanonicalMusicPayload } from '../../../../../frontend/src/core/canonical-model/canonical-music-payload.ts';
+import { Timeline } from '../../../../../frontend/src/core/canonical-model/timeline.ts';
+import { TempoMap } from '../../../../../frontend/src/core/canonical-model/tempo-map.ts';
+import { CANONICAL_TPQN } from '../../../../../frontend/src/core/canonical-model/types.ts';
+import { CanonicalSerializer } from '../../../domain/canonical-serializer.ts';
 
 const AUDIO_UPLOAD_HTTP_BODY_LIMIT = 80 * 1024 * 1024; // 80 MiB (cubre 50 MiB binarios o ~67 MiB Base64)
 
@@ -291,6 +297,61 @@ const AudioIdParamSchema = z.object({
   id: z.string().uuid(),
 });
 
+const AudioDraftParamSchema = z.object({
+  id: z.string().uuid(),
+  proposalId: z.string().uuid(),
+});
+
+const AudioDraftExportParamSchema = z.object({
+  id: z.string().uuid(),
+  proposalId: z.string().uuid(),
+  format: z.enum(['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY']),
+});
+
+const SupportedInstrumentSchema = z.enum(['GUITAR', 'BASS', 'PIANO', 'VOCAL']);
+
+const AnalyzeAudioBodySchema = z
+  .object({
+    verifiedLyrics: z.string().max(20000).optional(),
+    selectedInstrument: SupportedInstrumentSchema.optional(),
+    titleOverride: z.string().min(1).max(255).optional(),
+    keyOverride: z.string().max(16).optional(),
+    bpmOverride: z.number().int().min(20).max(300).optional(),
+    timeSignatureOverride: z.string().max(16).optional(),
+  })
+  .default({});
+
+const UpdateAudioDraftBodySchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+  key: z.string().max(16).optional(),
+  bpm: z.number().int().min(20).max(300).optional(),
+  timeSignature: z.string().max(16).optional(),
+  proposedChordPro: z.string().max(100000).optional(),
+  verifiedLyrics: z.string().max(20000).optional(),
+  selectedInstrument: SupportedInstrumentSchema.optional(),
+  reason: z.string().max(1000).optional(),
+});
+
+const ReviewAudioDraftBodySchema = z.object({
+  decision: z.enum(['REJECTED', 'CORRECTION_REQUESTED', 'APPROVED_FOR_IMPORT']),
+  notes: z.string().max(1000).optional(),
+});
+
+const ApproveAudioDraftBodySchema = z
+  .object({
+    targetSongId: z.string().uuid().optional(),
+    versionName: z.string().min(1).max(255).optional(),
+    versionDescription: z.string().max(1000).optional(),
+    setAsCurrent: z.boolean().optional(),
+    reviewNotes: z.string().max(1000).optional(),
+  })
+  .default({});
+
+const CreateAudioDraftSongBodySchema = z.object({
+  title: z.string().min(1).max(255),
+  artist: z.string().max(255).optional(),
+});
+
 const ReconcileRecoveryBodySchema = z
   .object({
     purgeOrphanFiles: z.boolean().optional().default(false),
@@ -308,6 +369,11 @@ export const globalAudioService = new AudioService(
   new LocalFileSystemAudioStorageProvider(env.AUDIO_STORAGE_PATH, env.MAX_AUDIO_FILE_SIZE_BYTES),
   new DrizzleSongRepository(),
   env.MAX_AUDIO_FILE_SIZE_BYTES,
+  globalPythonAudioWorkerBridge
+);
+
+export const globalAudioTranscriptionService = new AudioTranscriptionService(
+  new LocalFileSystemAudioStorageProvider(env.AUDIO_STORAGE_PATH, env.MAX_AUDIO_FILE_SIZE_BYTES),
   globalPythonAudioWorkerBridge
 );
 
@@ -678,6 +744,256 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(204).send();
+    }
+  );
+
+  // =========================================================================
+  // WS-AUDIO-02, WS-AUDIO-03 & GATE 4 HUMAN REVIEW ENDPOINTS
+  // =========================================================================
+
+  // 6. POST /api/v1/audio/songs/draft - Crear contenedor de canción en estado DRAFT para asociar nuevo audio sin inventar notación
+  fastify.post(
+    '/audio/songs/draft',
+    {
+      preHandler: [authGuard.requirePermission('songs:create', true)],
+    },
+    async (request, reply) => {
+      const body = CreateAudioDraftSongBodySchema.parse(request.body);
+      const songRepo = new DrizzleSongRepository();
+      const emptyTimeline = new Timeline({
+        tpqn: CANONICAL_TPQN,
+        tempoMap: new TempoMap([]),
+        measureCount: 0,
+        totalDurationTicks: 0,
+      });
+      const placeholderCanonical = new CanonicalMusicPayload({
+        title: body.title.trim(),
+        timeline: emptyTimeline,
+        sections: [],
+        measures: [],
+        instrumentTracks: [],
+        metadata: {
+          isAudioContainerDraft: true,
+          approvalStatus: 'AUDIO_PRESERVED',
+          ...(body.artist ? { artist: body.artist.trim() } : {}),
+        },
+      });
+      const created = await songRepo.create({
+        title: body.title.trim(),
+        artist: body.artist?.trim() ?? null,
+        defaultKey: null,
+        defaultBpm: null,
+        timeSignature: null,
+        status: 'DRAFT',
+        versionName: 'Contenedor de Audio (Sin Transcribir)',
+        versionDescription: 'Canción creada para asociar grabación de audio original (Cero Fabricación).',
+        sourceFormat: 'INTERNAL',
+        canonicalPayload: CanonicalSerializer.serialize(placeholderCanonical),
+      });
+
+      return reply.status(201).send({
+        data: created,
+      });
+    }
+  );
+
+  // 7. POST /api/v1/audio/:id/analyze - Ejecutar análisis Python (WS-AUDIO-02) y transcripción a borradores (WS-AUDIO-03)
+  fastify.post(
+    '/audio/:id/analyze',
+    {
+      preHandler: [authGuard.requirePermission('songs:create', true)],
+    },
+    async (request, reply) => {
+      const { id } = AudioIdParamSchema.parse(request.params);
+      const body = AnalyzeAudioBodySchema.parse(request.body ?? {});
+      const user = request.user!;
+
+      const draft = await globalAudioTranscriptionService.analyzeAndTranscribeAudioAsset(
+        id,
+        {
+          id: user.sub,
+          role: user.role,
+          email: user.email,
+        },
+        body
+      );
+
+      return reply.status(201).send({
+        data: draft,
+      });
+    }
+  );
+
+  // 8. GET /api/v1/audio/:id/drafts - Listar borradores de transcripción de un activo de audio
+  fastify.get(
+    '/audio/:id/drafts',
+    {
+      preHandler: [authGuard.requirePermission('songs:read', true)],
+    },
+    async (request, reply) => {
+      const { id } = AudioIdParamSchema.parse(request.params);
+      const user = request.user!;
+      const drafts = await globalAudioTranscriptionService.listDraftsByAudioAsset(id, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+
+      return reply.status(200).send({
+        data: drafts,
+      });
+    }
+  );
+
+  // 9. GET /api/v1/songs/:songId/audio-drafts - Listar borradores derivados de audio para una canción
+  fastify.get(
+    '/songs/:songId/audio-drafts',
+    {
+      preHandler: [authGuard.requirePermission('songs:read', true)],
+    },
+    async (request, reply) => {
+      const { songId } = SongIdParamSchema.parse(request.params);
+      const user = request.user!;
+      const drafts = await globalAudioTranscriptionService.listDraftsBySongId(songId, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+
+      return reply.status(200).send({
+        data: drafts,
+      });
+    }
+  );
+
+  // 10. GET /api/v1/audio/:id/drafts/:proposalId - Obtener borrador de audio específico
+  fastify.get(
+    '/audio/:id/drafts/:proposalId',
+    {
+      preHandler: [authGuard.requirePermission('songs:read', true)],
+    },
+    async (request, reply) => {
+      const { id, proposalId } = AudioDraftParamSchema.parse(request.params);
+      const user = request.user!;
+      const draft = await globalAudioTranscriptionService.getDraftById(id, proposalId, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+
+      return reply.status(200).send({
+        data: draft,
+      });
+    }
+  );
+
+  // 11. PATCH /api/v1/audio/:id/drafts/:proposalId - Editar borrador propuesto durante Revisión Humana
+  fastify.patch(
+    '/audio/:id/drafts/:proposalId',
+    {
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
+    },
+    async (request, reply) => {
+      const { id, proposalId } = AudioDraftParamSchema.parse(request.params);
+      const body = UpdateAudioDraftBodySchema.parse(request.body ?? {});
+      const user = request.user!;
+
+      const updated = await globalAudioTranscriptionService.updateDraft(id, proposalId, body, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+
+      return reply.status(200).send({
+        data: updated,
+      });
+    }
+  );
+
+  // 12. POST /api/v1/audio/:id/drafts/:proposalId/review - Registrar decisión de revisión (REJECTED / CORRECTION_REQUESTED / APPROVED_FOR_IMPORT)
+  fastify.post(
+    '/audio/:id/drafts/:proposalId/review',
+    {
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
+    },
+    async (request, reply) => {
+      const { id, proposalId } = AudioDraftParamSchema.parse(request.params);
+      const body = ReviewAudioDraftBodySchema.parse(request.body);
+      const user = request.user!;
+
+      const reviewed = await globalAudioTranscriptionService.reviewDraftDecision(
+        id,
+        proposalId,
+        body.decision,
+        {
+          id: user.sub,
+          role: user.role,
+          email: user.email,
+        },
+        body.notes
+      );
+
+      return reply.status(200).send({
+        data: reviewed,
+      });
+    }
+  );
+
+  // 13. POST /api/v1/audio/:id/drafts/:proposalId/approve - Aprobar borrador y publicar nueva versión controlada en song_versions
+  fastify.post(
+    '/audio/:id/drafts/:proposalId/approve',
+    {
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
+    },
+    async (request, reply) => {
+      const { id, proposalId } = AudioDraftParamSchema.parse(request.params);
+      const body = ApproveAudioDraftBodySchema.parse(request.body ?? {});
+      const user = request.user!;
+
+      const result = await globalAudioTranscriptionService.approveAndPublishDraft(
+        id,
+        proposalId,
+        body,
+        {
+          id: user.sub,
+          role: user.role,
+          email: user.email,
+        }
+      );
+
+      return reply.status(201).send({
+        data: result,
+      });
+    }
+  );
+
+  // 14. GET /api/v1/audio/:id/drafts/:proposalId/export/:format - Exportar artefacto de un formato objetivo si es generable
+  fastify.get(
+    '/audio/:id/drafts/:proposalId/export/:format',
+    {
+      preHandler: [authGuard.requirePermission('songs:read', true)],
+    },
+    async (request, reply) => {
+      const { id, proposalId, format } = AudioDraftExportParamSchema.parse(request.params);
+      const instrumentQuery = (request.query as Record<string, unknown>)?.['instrument'];
+      const parsedInstrument = SupportedInstrumentSchema.safeParse(instrumentQuery);
+      const user = request.user!;
+
+      const artifact = await globalAudioTranscriptionService.exportDraftArtifact(
+        id,
+        proposalId,
+        format,
+        parsedInstrument.success ? parsedInstrument.data : undefined,
+        {
+          id: user.sub,
+          role: user.role,
+          email: user.email,
+        }
+      );
+
+      return reply.status(200).send({
+        data: artifact,
+      });
     }
   );
 };

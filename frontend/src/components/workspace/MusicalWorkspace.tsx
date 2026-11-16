@@ -23,7 +23,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useMusicalWorkspace } from '../../core/workspace/use-musical-workspace.ts';
 import { useSetlistExecution } from '../../core/workspace/use-setlist-execution.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
-import { BethesdaApiClient } from '../../core/api/api-client.ts';
+import { BethesdaApiClient, type BackendVersionItem } from '../../core/api/api-client.ts';
 import { type UserViewPreferenceData } from '../../core/api/preference-types.ts';
 import { type FrontendReadingFormat } from '../../core/api/setlist-types.ts';
 import { type ViewRepresentation } from '../../core/projection/types.ts';
@@ -158,6 +158,11 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   // Decisión 2 (Opción A): Memoria volátil de sesión para caché de canciones canónicas
   const songCacheRef = useRef<Map<string, CanonicalMusicPayload>>(new Map());
   const [songLoading, setSongLoading] = useState<boolean>(false);
+  const [persistedSongVersions, setPersistedSongVersions] = useState<BackendVersionItem[]>([]);
+  const [activeVersionId, setActiveVersionId] = useState<string | undefined>(undefined);
+  const [persistedSongStatus, setPersistedSongStatus] = useState<'DRAFT' | 'APPROVED' | 'ARCHIVED' | undefined>(
+    undefined
+  );
 
   // Referencia al contenedor de partitura y controlador de Autoscroll (WP-05)
   const viewportRef = useRef<HTMLElement | null>(null);
@@ -352,11 +357,87 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const activeReadingFormat: FrontendReadingFormat =
     state.primaryRepresentation === 'TABLATURE'
       ? 'TAB'
-      : state.primaryRepresentation === 'STANDARD_NOTATION'
+      : state.primaryRepresentation === 'STANDARD_NOTATION' || state.primaryRepresentation === 'GRAND_STAFF'
       ? 'SCORE'
       : state.primaryRepresentation === 'CHORDS'
       ? 'CHORD_SHEET'
       : 'LYRICS';
+
+  const activeReadingFormatLabel =
+    activeReadingFormat === 'SCORE'
+      ? 'Partitura'
+      : activeReadingFormat === 'CHORD_SHEET'
+      ? state.secondaryRepresentations.includes('LYRICS')
+        ? 'Cifrado con Letra'
+        : 'Cifrado Armónico'
+      : activeReadingFormat === 'TAB'
+      ? 'Tablatura'
+      : 'Letra Sola';
+
+  // Cargar una canción persistida específica en el Atril Digital (resolviendo la discrepancia de asociación de WS-AUDIO)
+  const handleOpenPersistedSongInStand = useCallback(
+    async (songId: string, options?: { audioId?: string; versionId?: string }) => {
+      setSongLoading(true);
+      setStandFormatWarning(null);
+      try {
+        const [songRes, versionsList] = await Promise.all([
+          client.getSong(songId),
+          client.listSongVersions(songId).catch(() => [] as BackendVersionItem[]),
+        ]);
+
+        let targetVersion = songRes.version;
+        if (options?.versionId && versionsList.length > 0) {
+          const matched = versionsList.find((v) => v.id === options.versionId);
+          if (matched) {
+            targetVersion = matched;
+          }
+        }
+
+        const canonical = CanonicalMusicPayload.fromJSON(targetVersion.canonicalPayload);
+        songCacheRef.current.set(songId, canonical);
+        setPersistedSongVersions(versionsList);
+        setActiveVersionId(targetVersion.id);
+        setPersistedSongStatus(songRes.song.status);
+
+        selectPersistedSong(canonical, {
+          isPersisted: true,
+          songId: songRes.song.id,
+          versionNumber: targetVersion.versionNumber,
+        });
+
+        if (setlistExecution.loadedSetlist) {
+          setlistExecution.notifyOffSetlistSongSelected(songRes.song.title);
+        }
+        setShowConversionCenter(false);
+        setShowDbModal(false);
+        setShowUploader(false);
+      } catch (err) {
+        console.error('Error al abrir la canción asociada en el Atril Digital:', err);
+      } finally {
+        setSongLoading(false);
+      }
+    },
+    [client, selectPersistedSong, setlistExecution]
+  );
+
+  // Conmutar entre versiones históricas o aprobadas de la canción activa en el Atril Digital
+  const handleSelectSongVersion = useCallback(
+    async (versionId: string) => {
+      const currentSongId = persistedMeta?.songId;
+      if (!currentSongId) return;
+      const matched = persistedSongVersions.find((v) => v.id === versionId);
+      if (!matched) return;
+
+      const canonical = CanonicalMusicPayload.fromJSON(matched.canonicalPayload);
+      setActiveVersionId(matched.id);
+      selectPersistedSong(canonical, {
+        isPersisted: true,
+        songId: currentSongId,
+        versionNumber: matched.versionNumber,
+      });
+    },
+    [persistedMeta?.songId, persistedSongVersions, selectPersistedSong]
+  );
 
   const handleQuickSelectFormat = useCallback(
     (format: FrontendReadingFormat) => {
@@ -575,15 +656,15 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         <DatabaseSongsModal
           activeSong={activeSong}
           onSelectSong={(dbSong, meta) => {
-            if (meta) {
-              selectPersistedSong(dbSong, meta);
+            if (meta?.songId) {
+              void handleOpenPersistedSongInStand(meta.songId);
             } else {
               selectSong(dbSong);
+              if (setlistExecution.loadedSetlist) {
+                setlistExecution.notifyOffSetlistSongSelected(dbSong.title);
+              }
+              setShowDbModal(false);
             }
-            if (setlistExecution.loadedSetlist) {
-              setlistExecution.notifyOffSetlistSongSelected(dbSong.title);
-            }
-            setShowDbModal(false);
           }}
           onClose={() => setShowDbModal(false)}
         />
@@ -611,6 +692,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             importSong(payload, { format: 'CHORD_PRO', sourceName: meta?.title });
             setShowConversionCenter(false);
           }}
+          onOpenPersistedSongInStand={handleOpenPersistedSongInStand}
           apiClient={client}
         />
       ) : setlistExecution.loadedSetlist &&
@@ -640,6 +722,11 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             versionNumber={persistedMeta?.versionNumber}
             persistedSongId={persistedMeta?.songId}
             isVisualDocument={isVisualDocument}
+            activeReadingFormatLabel={activeReadingFormatLabel}
+            songStatus={persistedSongStatus}
+            availableVersions={persistedSongVersions}
+            activeVersionId={activeVersionId}
+            onSelectVersion={(vid) => void handleSelectSongVersion(vid)}
           />
 
           {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
@@ -718,9 +805,28 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               />
             ) : activeSong.measures.length === 0 ? (
               <div className="workspace-empty-state" role="alert">
-                <div className="empty-icon">𝄞</div>
-                <h3>Canción Sin Contenido Musical</h3>
-                <p>La canción seleccionada no contiene compases ni eventos musicales canónicos.</p>
+                <div className="empty-icon">🎙️</div>
+                <h3>{activeSong.title} — Audio Preservado (Sin Notación Aprobada Aún)</h3>
+                <p>
+                  El audio original asociado a esta canción está disponible en el reproductor superior, pero aún no se
+                  ha aprobado una versión transcrita (ChordPro / MusicXML / Tablatura) mediante Revisión Humana.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowConversionCenter(true)}
+                  style={{
+                    marginTop: '12px',
+                    padding: '8px 16px',
+                    background: '#7c3aed',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  🔬 Abrir Centro de Conversión para Analizar y Revisar Borrador Musical
+                </button>
               </div>
             ) : derivedView ? (
               <MusicalScoreRenderer

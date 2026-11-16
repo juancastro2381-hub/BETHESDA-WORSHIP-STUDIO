@@ -135,4 +135,18 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
   );
+
+  // 8. PUT /api/v1/songs/:songId/versions/:versionId/activate - Establecer una versión como versión actual de la canción
+  fastify.put(
+    '/:songId/versions/:versionId/activate',
+    { preHandler: [authGuard.requirePermission('songs:update_draft', true)] },
+    async (request, reply) => {
+      const params = VersionIdParamSchema.parse(request.params);
+      await songService.setCurrentVersion(params.songId, params.versionId);
+      const updatedSong = await songService.getSong(params.songId);
+      return reply.status(200).send({
+        data: updatedSong,
+      });
+    }
+  );
 };

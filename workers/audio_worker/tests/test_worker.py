@@ -14,7 +14,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
-from fixtures import real_mp3_via_ffmpeg, synth_id3v2, synth_mp3_frames, synth_wav  # noqa: E402
+from fixtures import (  # noqa: E402
+    real_mp3_via_ffmpeg,
+    synth_id3v2,
+    synth_monophonic_melody_wav,
+    synth_mp3_frames,
+    synth_polyphonic_chords_wav,
+    synth_silent_wav,
+    synth_wav,
+)
 from signature_inspector import inspect_audio_signature  # noqa: E402
 
 MAIN = HERE.parent / "main.py"
@@ -193,4 +201,94 @@ def test_isolated_derivative_wav_preserves_original_sha(tmp_path: Path):
     assert d["derivativePcmBytes"] is not None and d["derivativePcmBytes"] > 44
     assert d["derivativePcmSha256"] == hashlib.sha256(deriv.read_bytes()).hexdigest()
     assert hashlib.sha256(mp3.read_bytes()).hexdigest() == sha
+
+
+def test_ws_audio_02_analyze_monophonic_melody_extracts_verified_notes(tmp_path: Path):
+    wav = tmp_path / "melody_120bpm.wav"
+    data = synth_monophonic_melody_wav(sample_rate=22050, bpm=120)
+    wav.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j-analyze-mono",
+        "command": "ANALYZE_AUDIO",
+        "sourcePath": str(wav),
+        "expectedSha256": sha,
+    })
+    res = out[-1]
+    assert res["type"] == "RESULT", res
+    d = res["data"]
+    assert d["verifiedSha256"] == sha
+    assert len(d["stages"]) == 10
+    assert d["bpm"] is not None and 110 <= d["bpm"] <= 130
+    assert d["key"] in ("C", "Am", "G", "Em")
+    assert d["timeSignature"] in ("4/4", "3/4", "6/8")
+    assert d["totalNotesDetected"] > 0
+    assert d["noteExtractionStatus"] in ("DETECTED", "ESTIMATED")
+    evals = {t["format"]: t for t in d["targetEvaluations"]}
+    assert evals["MIDI"]["generatable"] is True
+    assert evals["TABLATURE"]["generatable"] is True
+    assert evals["CHORD_PRO"]["generatable"] is True
+    assert evals["MUSIC_XML"]["generatable"] is True
+    assert hashlib.sha256(wav.read_bytes()).hexdigest() == sha
+
+
+def test_ws_audio_02_analyze_polyphonic_chords_recognizes_harmony_without_fabricating_notes(tmp_path: Path):
+    wav = tmp_path / "polyphonic_chords.wav"
+    data = synth_polyphonic_chords_wav(sample_rate=22050, bpm=120)
+    wav.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j-analyze-poly",
+        "command": "ANALYZE_AUDIO",
+        "sourcePath": str(wav),
+        "expectedSha256": sha,
+    })
+    res = out[-1]
+    assert res["type"] == "RESULT", res
+    d = res["data"]
+    assert len(d["stages"]) == 10
+    assert d["totalChordsDetected"] > 0
+    assert d["key"] in ("C", "Am")
+    assert d["totalNotesDetected"] == 0
+    assert d["noteExtractionStatus"] in ("AMBIGUOUS", "UNSUPPORTED")
+    evals = {t["format"]: t for t in d["targetEvaluations"]}
+    assert evals["CHORD_PRO"]["generatable"] is True
+    assert evals["MUSIC_XML"]["generatable"] is True
+    assert evals["MIDI"]["generatable"] is False
+    assert evals["MIDI"]["status"] == "NOT_GENERATABLE"
+    assert evals["TABLATURE"]["generatable"] is False
+    assert evals["TABLATURE"]["status"] == "NOT_GENERATABLE"
+
+
+def test_ws_audio_02_analyze_silent_audio_returns_unsupported_without_fabrication(tmp_path: Path):
+    wav = tmp_path / "silent.wav"
+    data = synth_silent_wav(duration_s=2.0)
+    wav.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    out = run_worker({
+        "contractVersion": "1.0",
+        "jobId": "j-analyze-silent",
+        "command": "ANALYZE_AUDIO",
+        "sourcePath": str(wav),
+        "expectedSha256": sha,
+    })
+    res = out[-1]
+    assert res["type"] == "RESULT", res
+    d = res["data"]
+    assert d["overallStatus"] == "UNSUPPORTED"
+    assert d["bpm"] is None
+    assert d["key"] is None
+    assert d["timeSignature"] is None
+    assert d["totalChordsDetected"] == 0
+    assert d["totalNotesDetected"] == 0
+    evals = {t["format"]: t for t in d["targetEvaluations"]}
+    assert evals["CHORD_PRO"]["generatable"] is False
+    assert evals["MIDI"]["generatable"] is False
+    assert evals["TABLATURE"]["generatable"] is False
+
 

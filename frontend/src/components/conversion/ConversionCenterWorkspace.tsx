@@ -23,6 +23,7 @@ import { useAuth } from '../../core/auth/use-auth.ts';
 import {
   FormatCapabilitiesEvaluator,
   ConversionEngine,
+  type AudioDynamicCapabilityState,
   type ConversionExportResult,
   type ConversionOptions,
   type ConversionSourceCategory,
@@ -35,6 +36,7 @@ import {
 import { CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
 
 export interface ConversionCenterWorkspaceProps {
+  readonly initialSongId?: string | undefined;
   readonly onOpenInMusicStand?: (
     payload: CanonicalMusicPayload,
     meta?: { title: string; artist?: string }
@@ -50,6 +52,7 @@ export interface ConversionCenterWorkspaceProps {
 const CREATE_NEW_SONG_OPTION = '__CREATE_NEW_SONG__';
 
 export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps> = ({
+  initialSongId,
   onOpenInMusicStand,
   onOpenPersistedSongInStand,
   onClose,
@@ -117,8 +120,12 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const [isSavingDraftEdits, setIsSavingDraftEdits] = useState<boolean>(false);
   const [isSubmittingReviewDecision, setIsSubmittingReviewDecision] = useState<boolean>(false);
   const [reviewActionFeedback, setReviewActionFeedback] = useState<string | null>(null);
+  const [showAllChords, setShowAllChords] = useState<boolean>(false);
+  const [isLoadingPersistedAudioState, setIsLoadingPersistedAudioState] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const hasAutoRehydratedRef = useRef<boolean>(false);
+  const lastAutoMatchedFileKeyRef = useRef<string | null>(null);
 
   const normalizeTitleForMatch = (raw: string): string =>
     raw
@@ -128,36 +135,168 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       .replace(/[^a-z0-9]+/g, ' ')
       .trim();
 
-  // Cargar lista de canciones para vincular audio si el usuario está autenticado
+  const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
+    const chunkSize = 0x8000;
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength));
+      chunks.push(String.fromCharCode(...slice));
+    }
+    return window.btoa(chunks.join(''));
+  };
+
+  const inferAudioMimeTypeFromFilename = (filename: string, rawType?: string): string => {
+    const cleaned = (rawType ?? '').toLowerCase().split(';')[0]!.trim();
+    if (cleaned && cleaned !== 'application/octet-stream' && cleaned !== 'binary/octet-stream') {
+      return cleaned;
+    }
+    const lower = filename.toLowerCase().trim();
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.flac')) return 'audio/flac';
+    if (lower.endsWith('.ogg') || lower.endsWith('.opus')) return 'audio/ogg';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.aac')) return 'audio/aac';
+    return 'audio/mpeg';
+  };
+
+  const populateReviewFormFromDraft = useCallback(
+    async (draft: AudioDraftProposalDTO) => {
+      setActiveAudioDraft(draft);
+      setAudioWorkflowState(draft.workflowState);
+      setReviewTitle(draft.title || '');
+      setReviewKey(draft.detectedKey || '');
+      setReviewBpm(draft.detectedBpm ? String(draft.detectedBpm) : '');
+      setReviewTimeSig(draft.detectedTimeSignature || '');
+      setReviewInstrument(draft.selectedInstrument || 'GUITAR');
+      setReviewVerifiedLyrics(draft.verifiedLyrics || '');
+      setReviewChordPro(draft.proposedChordPro || '');
+      setShowAllChords(false);
+      try {
+        const streamUrl = await client.getAudioPlaybackStreamUrl(draft.audioAssetId);
+        setAudioPlaybackUrl(streamUrl);
+      } catch {
+        setAudioPlaybackUrl(null);
+      }
+    },
+    [client]
+  );
+
+  const loadPersistedAudioStateForSong = useCallback(
+    async (songId: string, knownSongTitle?: string): Promise<boolean> => {
+      if (!user || !songId || songId === CREATE_NEW_SONG_OPTION) return false;
+      setIsLoadingPersistedAudioState(true);
+      try {
+        const [assets, drafts] = await Promise.all([
+          client.getSongAudioAssets(songId).catch(() => []),
+          client.listSongAudioDrafts(songId).catch(() => []),
+        ]);
+
+        if (drafts.length > 0) {
+          const latestDraft = drafts[0]!;
+          setAudioPreservationSuccess({
+            audioId: latestDraft.audioAssetId,
+            songId: latestDraft.songId,
+            checksumSha256: latestDraft.sourceSha256,
+            filename: latestDraft.sourceFilename,
+            songTitle: knownSongTitle || latestDraft.songTitle,
+          });
+          await populateReviewFormFromDraft(latestDraft);
+          return true;
+        }
+
+        if (assets.length > 0) {
+          const latestAsset = assets[0]!;
+          setAudioPreservationSuccess({
+            audioId: latestAsset.id,
+            songId,
+            checksumSha256: latestAsset.checksumSha256,
+            filename: latestAsset.filename,
+            songTitle: knownSongTitle || latestAsset.title,
+          });
+          setAudioWorkflowState('AUDIO_PRESERVED');
+          setActiveAudioDraft(null);
+          try {
+            const streamUrl = await client.getAudioPlaybackStreamUrl(latestAsset.id);
+            setAudioPlaybackUrl(streamUrl);
+          } catch {
+            setAudioPlaybackUrl(null);
+          }
+          return true;
+        }
+
+        return false;
+      } finally {
+        setIsLoadingPersistedAudioState(false);
+      }
+    },
+    [user, client, populateReviewFormFromDraft]
+  );
+
+  // Cargar lista de canciones y rehidratar audio/propuesta persistida una sola vez al abrir
   useEffect(() => {
-    if (sourceCategory === 'AUDIO_RECORDING' && user) {
-      client
-        .listSongs({ limit: 50 })
-        .then((res) => {
-          if (res && res.items) {
-            const mapped = res.items.map((s) => ({ id: s.id, title: s.title }));
-            setSongList(mapped);
-            const fileBase = selectedFile ? selectedFile.name.replace(/\.[^/.]+$/, '').trim() : '';
-            const normalizedFile = normalizeTitleForMatch(fileBase);
-            const exactMatch = normalizedFile
-              ? mapped.find((s) => normalizeTitleForMatch(s.title) === normalizedFile)
-              : undefined;
-            if (exactMatch) {
-              setSelectedSongId(exactMatch.id);
-            } else {
-              // Evitar asociar silenciosamente el audio a una canción no relacionada (Sección 2 y 3.D)
-              setSelectedSongId(CREATE_NEW_SONG_OPTION);
+    if (!user) return;
+    let isMounted = true;
+    client
+      .listSongs({ limit: 50 })
+      .then(async (res) => {
+        if (!isMounted || !res || !res.items) return;
+        const mapped = res.items.map((s) => ({ id: s.id, title: s.title }));
+        setSongList(mapped);
+
+        if (!hasAutoRehydratedRef.current && !selectedFile) {
+          hasAutoRehydratedRef.current = true;
+          const preferredCandidate = initialSongId
+            ? mapped.find((s) => s.id === initialSongId) ?? { id: initialSongId, title: '' }
+            : mapped[0];
+          if (preferredCandidate) {
+            const foundAudioOrDraft = await loadPersistedAudioStateForSong(
+              preferredCandidate.id,
+              preferredCandidate.title || undefined
+            );
+            if (isMounted && foundAudioOrDraft) {
+              setSelectedSongId(preferredCandidate.id);
+              setSourceCategory('AUDIO_RECORDING');
             }
           }
-        })
-        .catch((e) => console.warn('No se pudo cargar la lista de canciones para preservación de audio:', e));
+        }
+      })
+      .catch((e) => console.warn('No se pudo cargar la lista de canciones para preservación de audio:', e));
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user, client, initialSongId, selectedFile, loadPersistedAudioStateForSong]);
+
+  // Emparejar explícitamente por título cuando el usuario sube un archivo de audio
+  useEffect(() => {
+    if (!user || !selectedFile || sourceCategory !== 'AUDIO_RECORDING' || songList.length === 0) {
+      return;
     }
-  }, [sourceCategory, user, client, selectedFile]);
+    const fileKey = `${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`;
+    if (lastAutoMatchedFileKeyRef.current === fileKey) {
+      return;
+    }
+    lastAutoMatchedFileKeyRef.current = fileKey;
+
+    const fileBase = selectedFile.name.replace(/\.[^/.]+$/, '').trim();
+    const normalizedFile = normalizeTitleForMatch(fileBase);
+    const exactMatch = normalizedFile
+      ? songList.find((s) => normalizeTitleForMatch(s.title) === normalizedFile)
+      : undefined;
+
+    if (exactMatch) {
+      setSelectedSongId(exactMatch.id);
+      void loadPersistedAudioStateForSong(exactMatch.id, exactMatch.title);
+    } else {
+      // Evitar asociar silenciosamente el audio a una canción no relacionada (Sección 2 y 3.D)
+      setSelectedSongId(CREATE_NEW_SONG_OPTION);
+    }
+  }, [user, selectedFile, sourceCategory, songList, loadPersistedAudioStateForSong]);
 
   // Evaluar capacidades ante cambio de archivo
   useEffect(() => {
     if (!selectedFile) {
-      setSourceCategory(null);
       setCapabilities([]);
       setExportResult(null);
       setConversionStatus('IDLE');
@@ -178,17 +317,26 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     const firstAvailable = caps.find((c) => c.isAvailable);
     if (firstAvailable) {
       setSelectedTarget(firstAvailable.format);
+    } else if (detected === 'AUDIO_RECORDING') {
+      setSelectedTarget('CHORD_PRO');
     }
   }, [selectedFile, fileRawText, fileRawBytes]);
 
   // Manejo de carga de archivos
   const processUploadedFile = useCallback((file: File) => {
+    lastAutoMatchedFileKeyRef.current = null;
     setSelectedFile(file);
     setExportResult(null);
     setConversionStatus('IDLE');
     setProgress(0);
     setErrorMessage(null);
     setSavedToCatalog(false);
+    setAudioPreservationSuccess(null);
+    setAudioWorkflowState('IDLE');
+    setActiveAudioDraft(null);
+    setAudioPlaybackUrl(null);
+    setReviewActionFeedback(null);
+    setShowAllChords(false);
 
     const isBinaryFormat =
       file.name.endsWith('.mid') ||
@@ -250,6 +398,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   );
 
   const handleClearFile = useCallback(() => {
+    lastAutoMatchedFileKeyRef.current = null;
     setSelectedFile(null);
     setFileRawText(null);
     setFileRawBytes(null);
@@ -265,56 +414,11 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setActiveAudioDraft(null);
     setAudioPlaybackUrl(null);
     setReviewActionFeedback(null);
+    setShowAllChords(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   }, []);
-
-  const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
-    const chunkSize = 0x8000;
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength));
-      chunks.push(String.fromCharCode(...slice));
-    }
-    return window.btoa(chunks.join(''));
-  };
-
-  const inferAudioMimeTypeFromFilename = (filename: string, rawType?: string): string => {
-    const cleaned = (rawType ?? '').toLowerCase().split(';')[0]!.trim();
-    if (cleaned && cleaned !== 'application/octet-stream' && cleaned !== 'binary/octet-stream') {
-      return cleaned;
-    }
-    const lower = filename.toLowerCase().trim();
-    if (lower.endsWith('.mp3')) return 'audio/mpeg';
-    if (lower.endsWith('.wav')) return 'audio/wav';
-    if (lower.endsWith('.flac')) return 'audio/flac';
-    if (lower.endsWith('.ogg') || lower.endsWith('.opus')) return 'audio/ogg';
-    if (lower.endsWith('.m4a')) return 'audio/mp4';
-    if (lower.endsWith('.aac')) return 'audio/aac';
-    return 'audio/mpeg';
-  };
-
-  const populateReviewFormFromDraft = useCallback(
-    async (draft: AudioDraftProposalDTO) => {
-      setActiveAudioDraft(draft);
-      setAudioWorkflowState(draft.workflowState);
-      setReviewTitle(draft.title || '');
-      setReviewKey(draft.detectedKey || '');
-      setReviewBpm(draft.detectedBpm ? String(draft.detectedBpm) : '');
-      setReviewTimeSig(draft.detectedTimeSignature || '');
-      setReviewInstrument(draft.selectedInstrument || 'GUITAR');
-      setReviewVerifiedLyrics(draft.verifiedLyrics || '');
-      setReviewChordPro(draft.proposedChordPro || '');
-      try {
-        const streamUrl = await client.getAudioPlaybackStreamUrl(draft.audioAssetId);
-        setAudioPlaybackUrl(streamUrl);
-      } catch {
-        setAudioPlaybackUrl(null);
-      }
-    },
-    [client]
-  );
 
   const ensureTargetSongForAudio = async (
     defaultTitle: string
@@ -339,19 +443,72 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     filename: string;
     songTitle: string;
   } | null> => {
-    if (!selectedFile || !fileRawBytes) {
-      setErrorMessage('Seleccione un archivo de audio válido antes de preservar.');
-      return null;
-    }
     if (!user) {
       setErrorMessage('Su sesión ha expirado o no ha iniciado sesión. Inicie sesión nuevamente para preservar audio.');
       return null;
     }
+
+    if (audioPreservationSuccess && !selectedFile) {
+      return {
+        ...audioPreservationSuccess,
+        songTitle: audioPreservationSuccess.songTitle || 'Catálogo',
+      };
+    }
+
+    if (!selectedFile || !fileRawBytes) {
+      setErrorMessage('Seleccione un archivo de audio válido antes de preservar.');
+      return null;
+    }
+
     setIsPreservingAudio(true);
     setErrorMessage(null);
     setReviewActionFeedback(null);
     try {
       const normalizedTitle = selectedFile.name.replace(/\.[^/.]+$/, '').trim() || selectedFile.name;
+
+      // Verificar si la canción seleccionada ya posee este archivo preservado (evitar duplicados)
+      if (selectedSongId && selectedSongId !== CREATE_NEW_SONG_OPTION) {
+        const existingSongEntry = songList.find((s) => s.id === selectedSongId);
+        if (
+          audioPreservationSuccess &&
+          audioPreservationSuccess.songId === selectedSongId &&
+          audioPreservationSuccess.filename === selectedFile.name
+        ) {
+          setReviewActionFeedback(
+            `ℹ️ Audio ya preservado previamente en esta canción (ID: ${audioPreservationSuccess.audioId.slice(0, 8)}...). Se reutiliza sin duplicar.`
+          );
+          return {
+            ...audioPreservationSuccess,
+            songTitle: existingSongEntry?.title || audioPreservationSuccess.songTitle || normalizedTitle,
+          };
+        }
+
+        const existingAssets = await client.getSongAudioAssets(selectedSongId).catch(() => []);
+        const matchingAsset = existingAssets.find(
+          (a) => a.filename === selectedFile.name && a.fileSizeBytes === selectedFile.size
+        );
+        if (matchingAsset) {
+          const preservedExisting = {
+            audioId: matchingAsset.id,
+            songId: selectedSongId,
+            checksumSha256: matchingAsset.checksumSha256,
+            filename: matchingAsset.filename,
+            songTitle: existingSongEntry?.title || matchingAsset.title,
+          };
+          setAudioPreservationSuccess(preservedExisting);
+          const existingDrafts = await client.listAudioDrafts(matchingAsset.id).catch(() => []);
+          if (existingDrafts.length > 0) {
+            await populateReviewFormFromDraft(existingDrafts[0]!);
+          } else {
+            setAudioWorkflowState('AUDIO_PRESERVED');
+          }
+          setReviewActionFeedback(
+            `ℹ️ Activo de audio ya existente en PostgreSQL (${matchingAsset.checksumSha256.slice(0, 12)}...). Reutilizado sin subir duplicado.`
+          );
+          return preservedExisting;
+        }
+      }
+
       const targetSong = await ensureTargetSongForAudio(normalizedTitle);
       const b64 = uint8ArrayToBase64(fileRawBytes);
       const resolvedMimeType = inferAudioMimeTypeFromFilename(selectedFile.name, selectedFile.type);
@@ -381,7 +538,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     }
   };
 
-  const handleAnalyzeAndTranscribeAudio = async () => {
+  const handleAnalyzeAndTranscribeAudio = async (forceReanalyze = false) => {
     if (!user) {
       setErrorMessage('Inicie sesión para ejecutar el análisis acústico y la transcripción musical.');
       return;
@@ -396,8 +553,25 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     }
 
     setIsAnalyzingAudio(true);
-    setAudioWorkflowState('ANALYSIS_RUNNING');
     try {
+      const hasManualOverrides =
+        Boolean(keyOverride.trim()) ||
+        Boolean(bpmOverride.trim()) ||
+        Boolean(timeSignatureOverride.trim());
+
+      if (!forceReanalyze && !hasManualOverrides) {
+        const existingDrafts = await client.listAudioDrafts(preserved.audioId).catch(() => []);
+        if (existingDrafts.length > 0) {
+          const existingDraft = existingDrafts[0]!;
+          await populateReviewFormFromDraft(existingDraft);
+          setReviewActionFeedback(
+            `ℹ️ Se recuperó la propuesta existente persistida en base de datos (ID: ${existingDraft.proposalId.slice(0, 8)}...) sin duplicar la ejecución. Use «Re-ejecutar Análisis Python» si desea generar un nuevo borrador.`
+          );
+          return;
+        }
+      }
+
+      setAudioWorkflowState('ANALYSIS_RUNNING');
       const parsedBpm = bpmOverride ? parseInt(bpmOverride, 10) : undefined;
       const draft = await client.analyzeAndTranscribeAudio(preserved.audioId, {
         ...(keyOverride.trim() ? { keyOverride: keyOverride.trim() } : {}),
@@ -867,11 +1041,41 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   }, [exportResult, onOpenInMusicStand, onClose]);
 
   const sourceSummary = sourceCategory
-    ? FormatCapabilitiesEvaluator.getSourceCapabilitySummary(sourceCategory, selectedFile?.name)
+    ? FormatCapabilitiesEvaluator.getSourceCapabilitySummary(
+        sourceCategory,
+        selectedFile?.name || audioPreservationSuccess?.filename
+      )
     : null;
-  const canConvert = capabilities.some((c) => c.isAvailable);
-  const currentTargetCap = capabilities.find((c) => c.format === selectedTarget);
+  const isAudioWorkflowActive =
+    sourceCategory === 'AUDIO_RECORDING' ||
+    audioPreservationSuccess !== null ||
+    activeAudioDraft !== null;
+  const displayedCapabilities = isAudioWorkflowActive
+    ? FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+        workflowState: audioWorkflowState,
+        draft: activeAudioDraft,
+      })
+    : capabilities;
+  const canConvert = displayedCapabilities.some((c) => c.isAvailable);
+  const currentTargetCap = displayedCapabilities.find((c) => c.format === selectedTarget);
   const isTargetAvailable = Boolean(currentTargetCap?.isAvailable);
+
+  const getDynamicAudioStateBadgeClass = (state: AudioDynamicCapabilityState): string => {
+    switch (state) {
+      case 'APPROVED':
+      case 'DRAFT_READY':
+        return 'badge-state-supported';
+      case 'IMPLEMENTED':
+      case 'AUDIO_PRESERVED':
+      case 'ANALYSIS_RUNNING':
+      case 'REVIEW_REQUIRED':
+        return 'badge-state-partially-supported';
+      case 'NOT_GENERATABLE':
+      case 'FAILED':
+      default:
+        return 'badge-state-not-supported';
+    }
+  };
 
   const isPermanentFailure =
     Boolean(errorMessage) &&
@@ -1070,16 +1274,16 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
         <div className="health-item">
           <span className="health-item-label">Compatibilidad:</span>
           <span className="health-item-val">
-            {!selectedFile
+            {!selectedFile && !isAudioWorkflowActive
               ? '⚪ Esperando archivo...'
+              : isAudioWorkflowActive
+              ? `🎙️ Audio Scope 1C (${audioWorkflowState})`
               : sourceSummary?.state === 'SUPPORTED'
               ? `🟢 Formato Soportado (${sourceSummary.label})`
               : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
               ? `⚠️ Soporte Parcial (${sourceSummary.label})`
               : sourceSummary?.state === 'NOT_SUPPORTED'
               ? `❌ No Soportado (${sourceSummary.label})`
-              : sourceSummary?.state === 'PLANNED_AUDIO_WORKSTREAM'
-              ? `🎙️ Preservación de Audio Disponible (WS-AUDIO-01)`
               : `⏱️ Planificado Fase 2B (${sourceSummary?.label})`}
           </span>
         </div>
@@ -1094,36 +1298,15 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
               <span className="step-num">A</span> Archivo Fuente Musical
             </h3>
 
-            {!selectedFile ? (
-              <div
-                className={`dropzone ${isDragging ? 'drag-over' : ''}`}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                role="button"
-                tabIndex={0}
-                aria-label="Zona de arrastre de archivos musicales"
-              >
-                <div className="dropzone-icon">📁</div>
-                <div className="dropzone-primary-text">
-                  Arrastre su archivo musical aquí o <span className="highlight-browse">examine</span>
-                </div>
-                <div className="dropzone-secondary-text">
-                  Formatos soportados: MusicXML (.musicxml, .xml), MIDI (.mid), ChordPro (.cho, .crd), PDF, Imagen, Audio (MP3, WAV, FLAC, OGG, M4A)
-                </div>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  style={{ display: 'none' }}
-                  onChange={handleFileInputChange}
-                  accept=".musicxml,.xml,.mxl,.mid,.midi,.cho,.chordpro,.crd,.pro,.pdf,.png,.jpg,.jpeg,.mp3,.wav,.m4a,.flac,.ogg,.aac"
-                />
-              </div>
-            ) : (
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              onChange={handleFileInputChange}
+              accept=".musicxml,.xml,.mxl,.mid,.midi,.cho,.chordpro,.crd,.pro,.pdf,.png,.jpg,.jpeg,.mp3,.wav,.m4a,.flac,.ogg,.aac"
+            />
+
+            {selectedFile ? (
               <div className="selected-file-card">
                 <div className="file-info-col">
                   <div className="file-name-row">
@@ -1147,20 +1330,109 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   ✕ Quitar
                 </button>
               </div>
+            ) : audioPreservationSuccess || activeAudioDraft ? (
+              <div className="selected-file-card">
+                <div className="file-info-col">
+                  <div className="file-name-row">
+                    <span className="file-icon">🎙️</span>
+                    <span
+                      className="file-name"
+                      title={activeAudioDraft?.sourceFilename || audioPreservationSuccess?.filename}
+                    >
+                      {activeAudioDraft?.sourceFilename || audioPreservationSuccess?.filename}
+                    </span>
+                  </div>
+                  <div className="file-meta-row" style={{ flexWrap: 'wrap' }}>
+                    <span>
+                      Canción: <strong>{activeAudioDraft?.songTitle || audioPreservationSuccess?.songTitle}</strong>
+                    </span>
+                    <span className="separator">•</span>
+                    <span>
+                      Asset ID:{' '}
+                      <code>
+                        {(activeAudioDraft?.audioAssetId || audioPreservationSuccess?.audioId || '').slice(0, 8)}...
+                      </code>
+                    </span>
+                    {activeAudioDraft && (
+                      <>
+                        <span className="separator">•</span>
+                        <span>
+                          Propuesta: <code>{activeAudioDraft.proposalId.slice(0, 8)}...</code>
+                        </span>
+                      </>
+                    )}
+                    <span className="separator">•</span>
+                    <span>
+                      SHA-256:{' '}
+                      <code>
+                        {(activeAudioDraft?.sourceSha256 || audioPreservationSuccess?.checksumSha256 || '').slice(0, 14)}...
+                      </code>
+                    </span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn-remove-file"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Subir otro archivo desde su equipo"
+                  >
+                    📁 Cambiar / Subir Otro Archivo
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-remove-file"
+                    onClick={handleClearFile}
+                    title="Cerrar vista de activo actual"
+                  >
+                    ✕ Quitar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                className={`dropzone ${isDragging ? 'drag-over' : ''}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                role="button"
+                tabIndex={0}
+                aria-label="Zona de arrastre de archivos musicales"
+              >
+                <div className="dropzone-icon">📁</div>
+                <div className="dropzone-primary-text">
+                  {isLoadingPersistedAudioState
+                    ? 'Cargando estado de audio y propuestas persistidas...'
+                    : (
+                      <>
+                        Arrastre su archivo musical aquí o <span className="highlight-browse">examine</span>
+                      </>
+                    )}
+                </div>
+                <div className="dropzone-secondary-text">
+                  Formatos soportados: MusicXML (.musicxml, .xml), MIDI (.mid), ChordPro (.cho, .crd), PDF, Imagen, Audio (MP3, WAV, FLAC, OGG, M4A)
+                </div>
+              </div>
             )}
 
-            {selectedFile && sourceSummary?.advisoryNotice && (
+            {(selectedFile || isAudioWorkflowActive) && (sourceSummary?.advisoryNotice || isAudioWorkflowActive) && (
               <div
                 className={`capability-advisory-banner ${
-                  sourceSummary.state === 'NOT_SUPPORTED'
+                  isAudioWorkflowActive
+                    ? 'advisory-info'
+                    : sourceSummary?.state === 'NOT_SUPPORTED'
                     ? 'advisory-blocked'
-                    : sourceSummary.state === 'PARTIALLY_SUPPORTED'
+                    : sourceSummary?.state === 'PARTIALLY_SUPPORTED'
                     ? 'advisory-warning'
                     : 'advisory-info'
                 }`}
               >
                 <span className="advisory-icon">
-                  {sourceCategory === 'AUDIO_RECORDING'
+                  {sourceCategory === 'AUDIO_RECORDING' || isAudioWorkflowActive
                     ? '🎙️'
                     : sourceCategory === 'PDF_SCORE' || sourceCategory === 'IMAGE_SCORE'
                     ? '📄'
@@ -1171,14 +1443,17 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     : 'ℹ️'}
                 </span>
                 <div className="advisory-content">
-                  <strong>{sourceSummary.label}:</strong> {sourceSummary.advisoryNotice}
+                  <strong>{sourceSummary?.label ?? 'Grabación de Audio (MP3, WAV, M4A, FLAC, OGG)'}:</strong>{' '}
+                  {isAudioWorkflowActive
+                    ? 'Audio reconocido por su firma binaria. Flujo Scope 1C activo: 1) Preservación duradera con SHA-256 y streaming en Atril Digital (WS-AUDIO-01), 2) Análisis acústico Python de 10 etapas DSP (WS-AUDIO-02), y 3) Transcripción a borradores con Revisión Humana obligatoria (WS-AUDIO-03) bajo el principio de Cero Fabricación.'
+                    : sourceSummary?.advisoryNotice}
                 </div>
               </div>
             )}
           </div>
 
           {/* SECCIÓN B: Detección Automática y Capacidades */}
-          {selectedFile && (
+          {(selectedFile || isAudioWorkflowActive) && (
             <div className="conversion-card section-capabilities">
               <h3 className="section-title">
                 <span className="step-num">B</span> Detección de Origen y Capacidades
@@ -1193,96 +1468,88 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                   {sourceCategory === 'TXT_LYRICS' && '📝 Solo Letra / Texto'}
                   {sourceCategory === 'PDF_SCORE' && '📄 Partitura en PDF'}
                   {sourceCategory === 'IMAGE_SCORE' && '🖼️ Partitura en Imagen'}
-                  {sourceCategory === 'AUDIO_RECORDING' && '🎙️ Grabación de Audio'}
+                  {(sourceCategory === 'AUDIO_RECORDING' || isAudioWorkflowActive) && '🎙️ Grabación de Audio'}
                   {sourceCategory === 'VIDEO_REFERENCE' && '🎥 Video de Referencia'}
                   {sourceCategory === 'TABLATURE_ASCII' && '🎸 Tablatura ASCII'}
                   {sourceCategory === 'WRITTEN_NOTES' && '📝 Notas Escritas / JSON'}
                   {sourceCategory === 'UNKNOWN_UNSUPPORTED' && '❓ Formato No Reconocido'}
                 </span>
-                {sourceSummary && (
+                {isAudioWorkflowActive ? (
                   <span
-                    className={`cap-badge ${getCapabilityStateBadgeClass(sourceSummary.state)}`}
+                    className={`cap-badge ${
+                      audioWorkflowState === 'APPROVED' || audioWorkflowState === 'DRAFT_READY'
+                        ? 'badge-state-supported'
+                        : audioWorkflowState === 'FAILED' || audioWorkflowState === 'REJECTED'
+                        ? 'badge-state-not-supported'
+                        : 'badge-state-partially-supported'
+                    }`}
                     style={{ marginLeft: '8px' }}
                   >
-                    {getCapabilityStateBadgeLabel(sourceSummary.state)}
+                    {audioWorkflowState === 'IDLE' ? 'IMPLEMENTED' : audioWorkflowState}
                   </span>
+                ) : (
+                  sourceSummary && (
+                    <span
+                      className={`cap-badge ${getCapabilityStateBadgeClass(sourceSummary.state)}`}
+                      style={{ marginLeft: '8px' }}
+                    >
+                      {getCapabilityStateBadgeLabel(sourceSummary.state)}
+                    </span>
+                  )
                 )}
               </div>
 
               <div className="capabilities-matrix-list">
-                {sourceCategory === 'AUDIO_RECORDING' && activeAudioDraft ? (
-                  (['CHORD_PRO', 'MUSIC_XML', 'MIDI', 'TABLATURE', 'LYRICS_ONLY'] as const).map((fmtKey) => {
-                    const targetInfo = activeAudioDraft.targets[fmtKey];
-                    if (!targetInfo) return null;
-                    const labelMap: Record<string, string> = {
-                      CHORD_PRO: 'ChordPro / Cifrado',
-                      MUSIC_XML: 'MusicXML 4.0',
-                      MIDI: 'MIDI Estándar (SMF 1)',
-                      TABLATURE: `Tablatura (${activeAudioDraft.selectedInstrument === 'BASS' ? 'Bajo' : 'Guitarra'})`,
-                      LYRICS_ONLY: 'Solo Letra (TXT)',
-                    };
-                    const badgeClass =
-                      activeAudioDraft.workflowState === 'APPROVED' && targetInfo.generatable
-                        ? 'badge-state-supported'
-                        : targetInfo.status === 'DRAFT_READY'
-                        ? 'badge-state-supported'
-                        : targetInfo.status === 'REVIEW_REQUIRED'
-                        ? 'badge-state-partially-supported'
-                        : 'badge-state-not-supported';
-                    const badgeText =
-                      activeAudioDraft.workflowState === 'APPROVED' && targetInfo.generatable
-                        ? 'APPROVED'
-                        : targetInfo.status;
-                    return (
-                      <div key={fmtKey} className="capability-row">
-                        <span className="cap-format-name">{labelMap[fmtKey]}</span>
-                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                          <span className={`cap-badge ${badgeClass}`}>{badgeText}</span>
-                          {targetInfo.generatable && (
+                {displayedCapabilities.map((cap) => (
+                  <div key={cap.format} className="capability-row">
+                    <span className="cap-format-name">{cap.label}</span>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      {isAudioWorkflowActive && cap.dynamicAudioState ? (
+                        <>
+                          <span className={`cap-badge ${getDynamicAudioStateBadgeClass(cap.dynamicAudioState)}`}>
+                            {cap.dynamicAudioState}
+                          </span>
+                          {cap.confidencePercent !== undefined && (
                             <span className="cap-badge badge-ai-draft">
-                              {Math.round(targetInfo.confidence * 100)}% CONFIANZA
+                              {cap.confidencePercent}% CONFIANZA
                             </span>
                           )}
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  capabilities.map((cap) => (
-                    <div key={cap.format} className="capability-row">
-                      <span className="cap-format-name">{cap.label}</span>
-                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                        <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
-                          {sourceCategory === 'AUDIO_RECORDING'
-                            ? audioWorkflowState !== 'IDLE'
-                              ? audioWorkflowState
-                              : 'REQUIERE ANÁLISIS PYTHON (WS-AUDIO-02/03)'
-                            : getCapabilityStateBadgeLabel(cap.capabilityState)}
-                        </span>
-                        <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
-                          {sourceCategory === 'AUDIO_RECORDING'
-                            ? 'BORRADOR REVISIÓN HUMANA'
-                            : getBadgeLabel(cap.statusBadge)}
-                        </span>
-                      </div>
+                          {(cap.dynamicAudioState === 'DRAFT_READY' ||
+                            cap.dynamicAudioState === 'REVIEW_REQUIRED') && (
+                            <span className="cap-badge badge-draft">BORRADOR REVISIÓN HUMANA</span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
+                            {getCapabilityStateBadgeLabel(cap.capabilityState)}
+                          </span>
+                          <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
+                            {getBadgeLabel(cap.statusBadge)}
+                          </span>
+                        </>
+                      )}
                     </div>
-                  ))
-                )}
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
           {/* SECCIÓN C: Selector de Formato Objetivo */}
-          {selectedFile && (
+          {(selectedFile || isAudioWorkflowActive) && (
             <div className="conversion-card section-targets">
               <h3 className="section-title">
                 <span className="step-num">C</span> Formato Objetivo
               </h3>
 
               <div className="target-formats-grid">
-                {capabilities.map((cap) => {
+                {displayedCapabilities.map((cap) => {
                   const isBlocked = !cap.isAvailable;
-                  const isSelected = selectedTarget === cap.format;
+                  const isSelected =
+                    isAudioWorkflowActive && activeAudioDraft
+                      ? previewTargetFormat === cap.format
+                      : selectedTarget === cap.format;
 
                   return (
                     <div
@@ -1293,6 +1560,9 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                       onClick={() => {
                         if (!isBlocked) {
                           setSelectedTarget(cap.format);
+                          if (isAudioWorkflowActive && cap.format !== 'ENGRAVED_PDF') {
+                            setPreviewTargetFormat(cap.format);
+                          }
                         }
                       }}
                       role="radio"
@@ -1301,13 +1571,28 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     >
                       <div className="target-card-header">
                         <span className="target-card-label">{cap.label}</span>
-                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                          <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
-                            {getCapabilityStateBadgeLabel(cap.capabilityState)}
-                          </span>
-                          <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
-                            {getBadgeLabel(cap.statusBadge)}
-                          </span>
+                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+                          {isAudioWorkflowActive && cap.dynamicAudioState ? (
+                            <>
+                              <span className={`cap-badge ${getDynamicAudioStateBadgeClass(cap.dynamicAudioState)}`}>
+                                {cap.dynamicAudioState}
+                              </span>
+                              {cap.confidencePercent !== undefined && (
+                                <span className="cap-badge badge-ai-draft">
+                                  {cap.confidencePercent}%
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <span className={`cap-badge ${getCapabilityStateBadgeClass(cap.capabilityState)}`}>
+                                {getCapabilityStateBadgeLabel(cap.capabilityState)}
+                              </span>
+                              <span className={`cap-badge ${getBadgeClass(cap.statusBadge)}`}>
+                                {getBadgeLabel(cap.statusBadge)}
+                              </span>
+                            </>
+                          )}
                         </div>
                       </div>
                       <p className="target-card-desc">{cap.description}</p>
@@ -1322,7 +1607,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
           )}
 
           {/* SECCIÓN D: Opciones de Conversión */}
-          {selectedFile && (
+          {(selectedFile || isAudioWorkflowActive) && (
             <div className="conversion-card section-options">
               <h3 className="section-title">
                 <span className="step-num">D</span> Opciones de Conversión
@@ -1408,7 +1693,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </div>
               </div>
 
-              {sourceCategory === 'AUDIO_RECORDING' ? (
+              {sourceCategory === 'AUDIO_RECORDING' || isAudioWorkflowActive ? (
                 <div
                   className="audio-preservation-panel"
                   style={{
@@ -1461,11 +1746,36 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                       id="audio-target-song"
                       className="option-input"
                       value={selectedSongId}
-                      onChange={(e) => setSelectedSongId(e.target.value)}
+                      onChange={(e) => {
+                        const newSongId = e.target.value;
+                        setSelectedSongId(newSongId);
+                        if (newSongId === CREATE_NEW_SONG_OPTION) {
+                          if (!selectedFile) {
+                            setAudioPreservationSuccess(null);
+                            setActiveAudioDraft(null);
+                            setAudioPlaybackUrl(null);
+                            setAudioWorkflowState('IDLE');
+                          }
+                          return;
+                        }
+                        const songEntry = songList.find((s) => s.id === newSongId);
+                        void loadPersistedAudioStateForSong(newSongId, songEntry?.title).then((found) => {
+                          if (!found && !selectedFile) {
+                            setAudioPreservationSuccess(null);
+                            setActiveAudioDraft(null);
+                            setAudioPlaybackUrl(null);
+                            setAudioWorkflowState('IDLE');
+                          }
+                        });
+                      }}
                       disabled={isPreservingAudio || isAnalyzingAudio}
                     >
                       <option value={CREATE_NEW_SONG_OPTION}>
-                        ✨ Crear nueva canción en catálogo: «{selectedFile.name.replace(/\.[^/.]+$/, '').trim() || selectedFile.name}»
+                        ✨ Crear nueva canción en catálogo: «
+                        {(selectedFile?.name || audioPreservationSuccess?.filename || 'Nueva Canción desde Audio')
+                          .replace(/\.[^/.]+$/, '')
+                          .trim()}
+                        »
                       </option>
                       {songList.map((s) => (
                         <option key={s.id} value={s.id}>
@@ -1525,10 +1835,13 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                       type="button"
                       className="btn-execute-conversion"
                       onClick={() => void handlePreserveAudio()}
-                      disabled={isPreservingAudio || isAnalyzingAudio || !user}
+                      disabled={isPreservingAudio || isAnalyzingAudio || !user || (!selectedFile && !audioPreservationSuccess)}
                       style={{
                         background: '#2563eb',
-                        cursor: isPreservingAudio || isAnalyzingAudio || !user ? 'not-allowed' : 'pointer',
+                        cursor:
+                          isPreservingAudio || isAnalyzingAudio || !user || (!selectedFile && !audioPreservationSuccess)
+                            ? 'not-allowed'
+                            : 'pointer',
                       }}
                     >
                       {isPreservingAudio
@@ -1541,11 +1854,14 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                     <button
                       type="button"
                       className="btn-execute-conversion"
-                      onClick={() => void handleAnalyzeAndTranscribeAudio()}
-                      disabled={isPreservingAudio || isAnalyzingAudio || !user}
+                      onClick={() => void handleAnalyzeAndTranscribeAudio(false)}
+                      disabled={isPreservingAudio || isAnalyzingAudio || !user || (!selectedFile && !audioPreservationSuccess)}
                       style={{
                         background: '#7c3aed',
-                        cursor: isPreservingAudio || isAnalyzingAudio || !user ? 'not-allowed' : 'pointer',
+                        cursor:
+                          isPreservingAudio || isAnalyzingAudio || !user || (!selectedFile && !audioPreservationSuccess)
+                            ? 'not-allowed'
+                            : 'pointer',
                       }}
                     >
                       {isAnalyzingAudio
@@ -1554,6 +1870,22 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                         ? '🔒 Inicie sesión para analizar y transcribir'
                         : '🔬 Paso 2: Analizar Audio con Python y Generar Borradores Musicales (WS-AUDIO-02/03)'}
                     </button>
+
+                    {activeAudioDraft && (
+                      <button
+                        type="button"
+                        className="btn-execute-conversion"
+                        onClick={() => void handleAnalyzeAndTranscribeAudio(true)}
+                        disabled={isPreservingAudio || isAnalyzingAudio || !user}
+                        style={{
+                          background: '#475569',
+                          fontSize: '0.82rem',
+                          cursor: isPreservingAudio || isAnalyzingAudio || !user ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        🔄 Re-ejecutar Análisis Python (Generar Nuevo Borrador)
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -1598,7 +1930,7 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
         {/* COLUMNA DERECHA: Progreso, Revisión Humana y Exportación */}
         <div className="conversion-panel-right">
           {/* PANEL DE REVISIÓN HUMANA OBLIGATORIA PARA BORRADORES DE AUDIO (WS-AUDIO-02, WS-AUDIO-03 & GATE 4) */}
-          {sourceCategory === 'AUDIO_RECORDING' && activeAudioDraft && (
+          {isAudioWorkflowActive && activeAudioDraft && (
             <div className="conversion-card section-audio-human-review">
               <h3 className="section-title">
                 <span className="step-num">E</span> Revisión Humana Obligatoria de Transcripción de Audio (Gate 4)
@@ -1735,23 +2067,59 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
               {/* 3. Línea de Tiempo de Acordes Reconocidos */}
               {activeAudioDraft.analysisSummary.chordTimeline.length > 0 && (
                 <div style={{ marginBottom: '14px' }}>
-                  <div style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '6px', color: '#cbd5e1' }}>
-                    🎸 Línea de Tiempo de Acordes Reconocidos ({activeAudioDraft.analysisSummary.chordTimeline.length} segmentos):
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '8px',
+                      marginBottom: '6px',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#cbd5e1' }}>
+                      🎸 Línea de Tiempo de Acordes Reconocidos (
+                      {activeAudioDraft.analysisSummary.chordTimeline.length} segmentos):
+                    </div>
+                    {activeAudioDraft.analysisSummary.chordTimeline.length > 32 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllChords((prev) => !prev)}
+                        style={{
+                          padding: '3px 8px',
+                          background: 'rgba(59,130,246,0.2)',
+                          border: '1px solid rgba(59,130,246,0.4)',
+                          borderRadius: '4px',
+                          color: '#93c5fd',
+                          fontSize: '0.74rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {showAllChords
+                          ? 'Mostrar primeros 32 segmentos'
+                          : `Ver todos (${activeAudioDraft.analysisSummary.chordTimeline.length} segmentos)`}
+                      </button>
+                    )}
                   </div>
                   <div
                     style={{
                       display: 'flex',
                       gap: '6px',
                       overflowX: 'auto',
+                      flexWrap: showAllChords ? 'wrap' : 'nowrap',
                       paddingBottom: '6px',
-                      maxHeight: '95px',
+                      maxHeight: showAllChords ? '260px' : '115px',
+                      overflowY: showAllChords ? 'auto' : 'hidden',
                     }}
                   >
-                    {activeAudioDraft.analysisSummary.chordTimeline.slice(0, 32).map((seg, idx) => (
+                    {(showAllChords
+                      ? activeAudioDraft.analysisSummary.chordTimeline
+                      : activeAudioDraft.analysisSummary.chordTimeline.slice(0, 32)
+                    ).map((seg, idx) => (
                       <div
                         key={idx}
                         style={{
-                          minWidth: '88px',
+                          minWidth: '112px',
                           padding: '6px 8px',
                           background: 'rgba(30, 41, 59, 0.85)',
                           borderRadius: '5px',
@@ -1759,16 +2127,31 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                             seg.status === 'DETECTED'
                               ? '1px solid rgba(34,197,94,0.45)'
                               : '1px solid rgba(251,191,36,0.45)',
-                          fontSize: '0.75rem',
+                          fontSize: '0.73rem',
                         }}
                       >
-                        <div style={{ fontWeight: 700, fontSize: '0.9rem', color: '#f8fafc' }}>{seg.chord}</div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px' }}>
+                          <span style={{ fontWeight: 700, fontSize: '0.9rem', color: '#f8fafc' }}>{seg.chord}</span>
+                          <span
+                            style={{
+                              fontSize: '0.66rem',
+                              color: seg.status === 'DETECTED' ? '#86efac' : '#fde68a',
+                            }}
+                          >
+                            {seg.status}
+                          </span>
+                        </div>
                         <div style={{ color: '#94a3b8' }}>
                           Compás {seg.measureNumber} • T{seg.beat}
                         </div>
                         <div style={{ color: '#60a5fa' }}>
-                          {seg.startTimeSec.toFixed(1)}s ({Math.round(seg.confidence * 100)}%)
+                          {seg.startTimeSec.toFixed(1)}s–{seg.endTimeSec.toFixed(1)}s ({Math.round(seg.confidence * 100)}%)
                         </div>
+                        {seg.alternativeChord && (
+                          <div style={{ color: '#cbd5e1', fontSize: '0.68rem' }}>
+                            Alt: {seg.alternativeChord}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1987,20 +2370,43 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                             🎹 Archivo binario MIDI SMF 1 verificado ({selectedArt.filename}). Use el botón de descarga para abrirlo en su DAW.
                           </div>
                         ) : (
-                          <pre
-                            style={{
-                              maxHeight: '200px',
-                              overflowY: 'auto',
-                              fontSize: '0.76rem',
-                              background: '#090d16',
-                              padding: '8px',
-                              borderRadius: '4px',
-                              margin: 0,
-                              color: '#e2e8f0',
-                            }}
-                          >
-                            <code>{selectedArt.content.slice(0, 2500)}</code>
-                          </pre>
+                          <>
+                            {previewTargetFormat === 'MUSIC_XML' &&
+                              activeAudioDraft.analysisSummary.totalNotesDetected === 0 && (
+                                <div
+                                  role="note"
+                                  style={{
+                                    padding: '8px 10px',
+                                    marginBottom: '8px',
+                                    background: 'rgba(59, 130, 246, 0.14)',
+                                    border: '1px solid rgba(59, 130, 246, 0.35)',
+                                    borderRadius: '5px',
+                                    fontSize: '0.78rem',
+                                    color: '#bfdbfe',
+                                  }}
+                                >
+                                  ℹ️ Guion Armónico Estructural MusicXML 4.0: Contiene los{' '}
+                                  {activeAudioDraft.proposedCanonicalPayload?.measures?.length ?? 0} compases,
+                                  métrica, armadura, tempo y {activeAudioDraft.analysisSummary.totalChordsDetected}{' '}
+                                  acordes <code>&lt;harmony&gt;</code>, con 0 notas melódicas inventadas. No constituye
+                                  una partitura melódica en pentagrama tradicional.
+                                </div>
+                              )}
+                            <pre
+                              style={{
+                                maxHeight: '200px',
+                                overflowY: 'auto',
+                                fontSize: '0.76rem',
+                                background: '#090d16',
+                                padding: '8px',
+                                borderRadius: '4px',
+                                margin: 0,
+                                color: '#e2e8f0',
+                              }}
+                            >
+                              <code>{selectedArt.content.slice(0, 2500)}</code>
+                            </pre>
+                          </>
                         )
                       ) : null}
                     </div>
@@ -2009,6 +2415,22 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
               </div>
 
               {/* 6. Acciones de Aprobación, Solicitud de Corrección y Rechazo (Gate 4 & Protección Canónica) */}
+              {activeAudioDraft.workflowState === 'REJECTED' && (
+                <div
+                  role="alert"
+                  style={{
+                    padding: '8px 10px',
+                    marginBottom: '10px',
+                    background: 'rgba(239,68,68,0.14)',
+                    border: '1px solid rgba(239,68,68,0.4)',
+                    borderRadius: '5px',
+                    fontSize: '0.78rem',
+                    color: '#fca5a5',
+                  }}
+                >
+                  🛑 Propuesta rechazada: las propuestas rechazadas no pueden aprobarse ni publicarse al contenido canónico. Puede re-ejecutar el análisis si requiere generar un nuevo borrador.
+                </div>
+              )}
               <div
                 style={{
                   display: 'flex',
@@ -2021,19 +2443,37 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 <button
                   type="button"
                   onClick={() => void handleApproveAndPublishAudioDraft()}
-                  disabled={isSubmittingReviewDecision}
+                  disabled={
+                    isSubmittingReviewDecision ||
+                    activeAudioDraft.workflowState === 'REJECTED' ||
+                    activeAudioDraft.reviewStatus === 'REJECTED' ||
+                    activeAudioDraft.reviewStatus === 'COMMITTED'
+                  }
                   style={{
                     padding: '8px 14px',
-                    background: '#16a34a',
+                    background:
+                      activeAudioDraft.workflowState === 'REJECTED' ||
+                      activeAudioDraft.reviewStatus === 'REJECTED' ||
+                      activeAudioDraft.reviewStatus === 'COMMITTED'
+                        ? '#475569'
+                        : '#16a34a',
                     color: '#fff',
                     border: 'none',
                     borderRadius: '6px',
                     fontWeight: 700,
                     fontSize: '0.84rem',
-                    cursor: isSubmittingReviewDecision ? 'not-allowed' : 'pointer',
+                    cursor:
+                      isSubmittingReviewDecision ||
+                      activeAudioDraft.workflowState === 'REJECTED' ||
+                      activeAudioDraft.reviewStatus === 'REJECTED' ||
+                      activeAudioDraft.reviewStatus === 'COMMITTED'
+                        ? 'not-allowed'
+                        : 'pointer',
                   }}
                 >
-                  ✅ Aprobar Borrador y Publicar Versión al Atril Digital
+                  {activeAudioDraft.reviewStatus === 'COMMITTED'
+                    ? '✅ Borrador Ya Aprobado y Publicado'
+                    : '✅ Aprobar Borrador y Publicar Versión al Atril Digital'}
                 </button>
 
                 <button

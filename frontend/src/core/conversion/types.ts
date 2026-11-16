@@ -28,6 +28,16 @@ export type StatusBadge =
   | 'BLOCKED_ZERO_FABRICATION'
   | 'DEFERRED_PHASE';
 
+export type AudioDynamicCapabilityState =
+  | 'IMPLEMENTED'
+  | 'AUDIO_PRESERVED'
+  | 'ANALYSIS_RUNNING'
+  | 'DRAFT_READY'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'NOT_GENERATABLE'
+  | 'FAILED';
+
 export type ConversionSourceCategory =
   | 'STRUCTURED_MUSICXML'
   | 'STRUCTURED_MIDI'
@@ -111,5 +121,7 @@ export interface FormatCapabilityInfo {
   statusBadge: StatusBadge;
   description: string;
   blockingReason?: string | undefined;
+  dynamicAudioState?: AudioDynamicCapabilityState | undefined;
+  confidencePercent?: number | undefined;
 }
 

@@ -35,17 +35,18 @@ The worker executes strictly out of process with bounded duration (`MAX_ANALYSIS
 
 ---
 
-## 3. Empirical Results on Project Owner Test Recording (`El Señor Esta en Este Lugar.mp3`)
+## 3. Empirical Results Verified in PostgreSQL (`El Señor Esta en Este Lugar.mp3`)
 
-Executed against `backend/storage/audio/4762e3ee-1edd-42e9-84b9-e9c9fbfa2270.mp3` (`SHA-256: df8a0a15ea5b59911c409dc90618758b84df290dbbedec65fa1c2ad0444c2887`):
+Executed live via `POST /api/v1/audio/098bf5d6-67d2-4442-91b6-b7e36b1c8d11/analyze` and persisted in `omr_proposals` (`id: a99f9a24-65f9-46d9-bb46-eb2f5b85e622`, `job_id: 707b544f-2898-4180-99a0-e8606b4347e7`, `song_id: d8f1d90f-0ec4-4053-b29f-1e73ccddb618`, `workflowState: "DRAFT_READY"`, `reviewStatus: "PENDING_REVIEW"`):
 
-- **Duration & Format:** `355.45s` (`MP3`, `44,100 Hz` -> `22,050 Hz`, `2` channels, `stereoCorrelation = 0.653`, `channelBalanceDb = -0.09 dB`).
-- **Preprocessing & HPSS:** `rmsDb = -15.67 dBFS`, `activeFrameRatio = 99.9%`, `harmonicEnergyRatio = 48.32%`, `percussiveEnergyRatio = 23.69%`.
-- **Tempo (BPM):** `70 BPM` (`bpmExact = 69.93`, `bpmConfidence = 0.90`, `bpmStatus = DETECTED`, `414` beats tracked).
-- **Key & Tonal Center:** `Em` (`NATURAL_MINOR`, `keyConfidence = 0.879`, `keyStatus = DETECTED`; alternatives: `Em` `r=0.852`, `E` `r=0.593`, `Bm` `r=0.592`).
-- **Meter:** `4/4` (`meterConfidence = 0.95`, `meterStatus = DETECTED`).
-- **Chord Timeline & Structure:** `174` time-aligned chord segments across `104` measures and `13` sections.
-- **Polyphony & Zero-Fabrication Gate:** `polyphonyIndex = 0.757`, `monophonicSalience = 0.520`, `noteExtractionStatus = AMBIGUOUS`, `totalNotesDetected = 0` (`CHORD_PRO` and `MUSIC_XML` harmonic lead sheet enabled; `MIDI` and `TABLATURE` truthfully marked `NOT_GENERATABLE`).
+- **Preserved Asset Identity:** `audio_assets.id = 098bf5d6-67d2-4442-91b6-b7e36b1c8d11`, `storage_path = backend/storage/audio/b7b2484e-22fd-4b03-b698-fa9bc62bcefa.mp3`, `file_size_bytes = 8,532,773`, `SHA-256 = df8a0a15ea5b59911c409dc90618758b84df290dbbedec65fa1c2ad0444c2887` (duplicate upload prevention confirmed against historical `a294b5b5-214d-4966-b9e0-d2205e53ca40`).
+- **Duration & Format:** `355.451s` (`MP3`, `44,100 Hz` -> `22,050 Hz`, `2` channels, `stereoCorrelation = 0.653`, `channelBalanceDb = -0.09 dB`).
+- **Preprocessing & HPSS:** `rmsDb = -15.67 dBFS`, `peakDb = 0 dBFS`, `activeFrameRatio = 99.9%`, `harmonicEnergyRatio = 48.32%`, `percussiveEnergyRatio = 23.69%`.
+- **Tempo (BPM):** `70 BPM` (`bpmExact = 69.93`, `bpmConfidence = 0.90` / `90.0%`, `bpmStatus = DETECTED`).
+- **Key & Tonal Center:** `Em` (`NATURAL_MINOR`, `keyConfidence = 0.833` / `83.3%`, `keyStatus = DETECTED`; alternatives: `Em` `r=0.843`, `E` `r=0.621`, `Bm` `r=0.615`). *(Note: Post-implementation audit compared against an earlier intermediate draft estimate (`87.9%`, `174` chords, `0.757` polyphony) and reconciled to these exact persisted PostgreSQL values.)*
+- **Meter:** `4/4` (`meterConfidence = 0.95` / `95.0%`, `meterStatus = DETECTED`).
+- **Chord Timeline & Structure:** `168` time-aligned chord segments (`65` `DETECTED`, `102` `ESTIMATED`, `1` `AMBIGUOUS`) across `104` measures (`omr_proposal_measures = 104` rows) and `13` sections.
+- **Polyphony & Zero-Fabrication Gate:** `polyphonyIndex = 0.748`, `monophonicSalience = 0.520`, `noteExtractionStatus = AMBIGUOUS`, `totalNotesDetected = 0`, `overallConfidence = 0.807` (`80.7%`), all `10` pipeline stages completed (`overallStatus = ANALYSIS_COMPLETED`). `CHORD_PRO` (`DRAFT_READY`) and harmonic structural `MUSIC_XML` (`REVIEW_REQUIRED`) were generated; `MIDI` and `TABLATURE` are truthfully marked `NOT_GENERATABLE`.
 
 ---
 

@@ -687,6 +687,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
       {/* 3. Discriminación de Vista: Centro de Conversión vs Momento Litúrgico vs Partitura */}
       {showConversionCenter ? (
         <ConversionCenterWorkspace
+          initialSongId={persistedMeta?.songId}
           onClose={() => setShowConversionCenter(false)}
           onOpenInMusicStand={(payload, meta) => {
             importSong(payload, { format: 'CHORD_PRO', sourceName: meta?.title });

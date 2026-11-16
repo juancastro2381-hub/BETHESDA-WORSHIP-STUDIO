@@ -265,5 +265,120 @@ describe('FormatCapabilitiesEvaluator Tests', () => {
       assert.strictEqual(cap.capabilityState, 'NOT_SUPPORTED');
     }
   });
+
+  it('should compute dynamic Scope 1C audio workflow capability states without legacy Phase 2B labels', () => {
+    const assertNoLegacyPhase2B = (caps: ReturnType<typeof FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities>) => {
+      for (const c of caps) {
+        assert.notStrictEqual(c.capabilityState, 'PLANNED_PHASE_2B');
+        assert.notStrictEqual(c.statusBadge, 'DEFERRED_PHASE');
+        assert.ok(c.dynamicAudioState);
+      }
+    };
+
+    // 1. IDLE -> IMPLEMENTED (5 Scope 1C formats) + ENGRAVED_PDF NOT_GENERATABLE
+    const idleCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({ workflowState: 'IDLE', draft: null });
+    assertNoLegacyPhase2B(idleCaps);
+    assert.strictEqual(idleCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'IMPLEMENTED');
+    assert.strictEqual(idleCaps.find((c) => c.format === 'ENGRAVED_PDF')?.dynamicAudioState, 'NOT_GENERATABLE');
+
+    // 2. AUDIO_PRESERVED
+    const preservedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'AUDIO_PRESERVED',
+      draft: null,
+    });
+    assertNoLegacyPhase2B(preservedCaps);
+    assert.strictEqual(preservedCaps.find((c) => c.format === 'MUSIC_XML')?.dynamicAudioState, 'AUDIO_PRESERVED');
+
+    // 3. ANALYSIS_RUNNING
+    const runningCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'ANALYSIS_RUNNING',
+      draft: null,
+    });
+    assertNoLegacyPhase2B(runningCaps);
+    assert.strictEqual(runningCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'ANALYSIS_RUNNING');
+
+    // 4. Polyphonic draft (El Señor Esta en Este Lugar.mp3 profile: 168 chords, 0 notes, polyphony 0.748)
+    const polyphonicDraft = {
+      workflowState: 'DRAFT_READY',
+      selectedInstrument: 'GUITAR',
+      analysisSummary: {
+        totalNotesDetected: 0,
+        totalChordsDetected: 168,
+      },
+      targets: {
+        CHORD_PRO: {
+          format: 'CHORD_PRO',
+          status: 'DRAFT_READY' as const,
+          generatable: true,
+          confidence: 0.631,
+          reason: '168 acordes en 104 compases listos para revisión humana.',
+        },
+        MUSIC_XML: {
+          format: 'MUSIC_XML',
+          status: 'REVIEW_REQUIRED' as const,
+          generatable: true,
+          confidence: 0.631,
+          reason: 'Guion armónico MusicXML 4.0 sin notas inventadas.',
+        },
+        MIDI: {
+          format: 'MIDI',
+          status: 'NOT_GENERATABLE' as const,
+          generatable: false,
+          confidence: 0,
+          reason: 'Polifonía alta, 0 notas melódicas.',
+        },
+        TABLATURE: {
+          format: 'TABLATURE',
+          status: 'NOT_GENERATABLE' as const,
+          generatable: false,
+          confidence: 0,
+          reason: 'Sin notas individuales.',
+        },
+        LYRICS_ONLY: {
+          format: 'LYRICS_ONLY',
+          status: 'REVIEW_REQUIRED' as const,
+          generatable: false,
+          confidence: 0,
+          reason: 'Requiere letra verificada por humano.',
+        },
+      },
+    };
+
+    const draftCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'DRAFT_READY',
+      draft: polyphonicDraft,
+    });
+    assertNoLegacyPhase2B(draftCaps);
+    assert.strictEqual(draftCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'DRAFT_READY');
+    assert.strictEqual(draftCaps.find((c) => c.format === 'CHORD_PRO')?.isAvailable, true);
+    assert.strictEqual(draftCaps.find((c) => c.format === 'MUSIC_XML')?.dynamicAudioState, 'REVIEW_REQUIRED');
+    assert.strictEqual(draftCaps.find((c) => c.format === 'MUSIC_XML')?.isAvailable, true);
+    assert.ok(
+      draftCaps.find((c) => c.format === 'MUSIC_XML')?.description.includes('no constituye una partitura melódica')
+    );
+    assert.strictEqual(draftCaps.find((c) => c.format === 'MIDI')?.dynamicAudioState, 'NOT_GENERATABLE');
+    assert.strictEqual(draftCaps.find((c) => c.format === 'MIDI')?.isAvailable, false);
+    assert.strictEqual(draftCaps.find((c) => c.format === 'TABLATURE')?.dynamicAudioState, 'NOT_GENERATABLE');
+    assert.strictEqual(draftCaps.find((c) => c.format === 'LYRICS_ONLY')?.dynamicAudioState, 'REVIEW_REQUIRED');
+    assert.strictEqual(draftCaps.find((c) => c.format === 'LYRICS_ONLY')?.isAvailable, false);
+
+    // 5. APPROVED draft -> generatable targets become APPROVED
+    const approvedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'APPROVED',
+      draft: { ...polyphonicDraft, workflowState: 'APPROVED' },
+    });
+    assertNoLegacyPhase2B(approvedCaps);
+    assert.strictEqual(approvedCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'APPROVED');
+    assert.strictEqual(approvedCaps.find((c) => c.format === 'MUSIC_XML')?.dynamicAudioState, 'APPROVED');
+    assert.strictEqual(approvedCaps.find((c) => c.format === 'MIDI')?.dynamicAudioState, 'NOT_GENERATABLE');
+
+    // 6. FAILED state
+    const failedCaps = FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities({
+      workflowState: 'FAILED',
+      draft: null,
+    });
+    assertNoLegacyPhase2B(failedCaps);
+    assert.strictEqual(failedCaps.find((c) => c.format === 'CHORD_PRO')?.dynamicAudioState, 'FAILED');
+  });
 });
 

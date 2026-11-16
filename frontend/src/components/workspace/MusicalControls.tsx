@@ -64,6 +64,17 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
   onSelectReadingFormat,
   onSavePreference,
 }) => {
+  const totalNotesCount = activeSong ? activeSong.getAllNotes().length : 0;
+  const totalChordsCount = activeSong ? activeSong.getAllChords().length : 0;
+  const totalLyricsCount = activeSong ? activeSong.getAllLyrics().length : 0;
+  const isHarmonicChordOnlyLeadSheet = Boolean(
+    activeSong &&
+      activeSong.measures.length > 0 &&
+      totalChordsCount > 0 &&
+      totalNotesCount === 0 &&
+      totalLyricsCount === 0
+  );
+
   return (
     <section className="musical-controls-section" aria-label="Controles de Visualización y Atril">
       {activeSong && onSelectReadingFormat && (
@@ -78,6 +89,25 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
             onSelectFormat={onSelectReadingFormat}
             onSavePreference={onSavePreference}
           />
+          {isHarmonicChordOnlyLeadSheet && activeSong && (
+            <div
+              role="note"
+              style={{
+                marginTop: '8px',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                background: 'rgba(59, 130, 246, 0.14)',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                color: '#bfdbfe',
+                fontSize: '0.8rem',
+              }}
+            >
+              🎸 Vista Activa: Guion Armónico / Lead Sheet de Acordes ({totalChordsCount} acordes en{' '}
+              {activeSong.measures.length} compases, 0 notas melódicas). Las opciones «Partitura»,
+              «Cifrado con Letra», «Letra Sola» y «Tablatura» permanecen deshabilitadas hasta que
+              exista su contenido requerido (Principio de Cero Fabricación).
+            </div>
+          )}
         </div>
       )}
 

@@ -38,3 +38,23 @@ Every generated output is persisted in PostgreSQL (`omr_proposals`, `omr_proposa
    - Lists all audio-derived drafts for an audio asset or catalog song.
 3. **`GET /api/v1/audio/:id/drafts/:proposalId/export/:format`** (`songs:read`):
    - Exports a specific target artifact (`CHORD_PRO`, `MUSIC_XML`, `MIDI`, `TABLATURE`, `LYRICS_ONLY`) when `generatable === true`, or returns `400 VALIDATION_ERROR` with the exact musical blocking reason when `NOT_GENERATABLE`.
+
+---
+
+## 4. Persisted Output Verification on Real Recording (`El Señor Esta en Este Lugar.mp3`)
+
+Verified directly against persisted `omr_proposals` row `a99f9a24-65f9-46d9-bb46-eb2f5b85e622` (`audio_assets.id = 098bf5d6-67d2-4442-91b6-b7e36b1c8d11`, `song_id = d8f1d90f-0ec4-4053-b29f-1e73ccddb618`):
+
+| Target Format | Persisted Status | Generatable | Verified Content & Structural Validation | Epistemic Limitation |
+| :--- | :--- | :---: | :--- | :--- |
+| **`CHORD_PRO`** | `DRAFT_READY` | `true` (`63.1%`) | `1,610` chars; `{title}`, `{key: Em}`, `{tempo: 70}`, `{time: 4/4}`, confidence comments, `13` sections, `168` bracketed chord markers, `0` fabricated lyrics (`chordProHasLyrics: false`). | Uncertain chords (`102` `ESTIMATED`, `1` `AMBIGUOUS`) flagged in timeline UI with confidence % and alternatives. |
+| **`MUSIC_XML`** | `REVIEW_REQUIRED` | `true` (`63.1%`) | `28,411` chars; valid XML parsed by `xml.etree.ElementTree` (`<score-partwise version="4.0">`, `1` part, `104` `<measure>`, `168` `<harmony>`, `0` `<pitch>`, `0` `<rest>`). | Structural harmonic lead-sheet MusicXML only; explicitly distinguished in UI from a traditional melodic staff score. |
+| **`MIDI`** | `NOT_GENERATABLE` | `false` (`0%`) | `content: null` (`0` bytes). | Full-band polyphonic mix (`polyphonyIndex = 0.748`, `monophonicSalience = 0.520`, `totalNotesDetected = 0`); blocked by Zero Fabrication. |
+| **`TABLATURE`** | `NOT_GENERATABLE` | `false` (`0%`) | `content: null` (`0` bytes). | No verified instrument-specific melodic/bass note events; fret positions are never invented from chord names. |
+| **`LYRICS_ONLY`** | `REVIEW_REQUIRED` | `false` (`0%`) | `content: null` (`0` bytes). | Audio DSP never invents vocal lyrics; enabled once reviewer supplies verified lyrics in Human Review. |
+
+---
+
+## 5. Post-Implementation UI Capability Consistency Fix
+
+`FormatCapabilitiesEvaluator.getAudioWorkflowCapabilities()` (`frontend/src/core/conversion/format-capabilities.ts`) was added and integrated into both **Section B (Detection & Capabilities)** and **Section C (Target Format)** of `ConversionCenterWorkspace.tsx`, eliminating legacy `PLANNED_PHASE_2B` / `DEFERRED_PHASE` labels on audio recordings and projecting truthful states (`IMPLEMENTED`, `AUDIO_PRESERVED`, `ANALYSIS_RUNNING`, `DRAFT_READY`, `REVIEW_REQUIRED`, `APPROVED`, `NOT_GENERATABLE`, `FAILED`), along with automatic rehydration of preserved audio assets and proposals across page reloads.

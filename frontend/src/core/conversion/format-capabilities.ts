@@ -9,12 +9,49 @@
 
 import { type CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 import {
+  type AudioDynamicCapabilityState,
+  type CapabilityState,
   type ConversionSourceCategory,
   type ConversionTargetFormat,
   type FormatCapabilityInfo,
   type SourceCapabilitySummary,
+  type StatusBadge,
 } from './types.ts';
 import { hasAudioExtension, inspectAudioSignature } from './audio-signature.ts';
+
+export interface AudioWorkflowCapabilityContext {
+  readonly workflowState:
+    | 'IDLE'
+    | 'AUDIO_PRESERVED'
+    | 'ANALYSIS_QUEUED'
+    | 'ANALYSIS_RUNNING'
+    | 'ANALYSIS_COMPLETED'
+    | 'ANALYSIS_PARTIAL'
+    | 'TRANSCRIPTION_RUNNING'
+    | 'DRAFT_READY'
+    | 'REVIEW_REQUIRED'
+    | 'APPROVED'
+    | 'REJECTED'
+    | 'FAILED';
+  readonly draft?: {
+    readonly workflowState: string;
+    readonly selectedInstrument?: string;
+    readonly analysisSummary?: {
+      readonly totalNotesDetected: number;
+      readonly totalChordsDetected: number;
+    };
+    readonly targets: Record<
+      string,
+      {
+        readonly format: string;
+        readonly status: 'DRAFT_READY' | 'REVIEW_REQUIRED' | 'NOT_GENERATABLE';
+        readonly generatable: boolean;
+        readonly confidence: number;
+        readonly reason: string;
+      }
+    >;
+  } | null;
+}
 
 export class FormatCapabilitiesEvaluator {
   /**
@@ -683,6 +720,210 @@ export class FormatCapabilitiesEvaluator {
     }
 
     return [musicXmlCap, midiCap, chordProCap, lyricsCap, pdfCap, tabCap];
+  }
+
+  /**
+   * Matriz dinámica y verídica de capacidades para fuentes de audio (Scope 1C: WS-AUDIO-01/02/03).
+   * Refleja el estado real del flujo y del borrador devuelto por el backend sin etiquetas estáticas "Fase 2B".
+   */
+  public static getAudioWorkflowCapabilities(
+    context: AudioWorkflowCapabilityContext
+  ): FormatCapabilityInfo[] {
+    const baseDefs: Array<{
+      format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+      label: string;
+      extension: string;
+      mimeType: string;
+      idleDescription: string;
+      draftDescription: string;
+    }> = [
+      {
+        format: 'CHORD_PRO',
+        label: 'ChordPro / Cifrado',
+        extension: '.cho',
+        mimeType: 'text/plain',
+        idleDescription:
+          'Extracción armónica de acordes alineados por compás y sección (requiere análisis Python WS-AUDIO-02).',
+        draftDescription:
+          'Cifrado armónico con línea de tiempo de acordes detectados y directivas de sección.',
+      },
+      {
+        format: 'MUSIC_XML',
+        label: 'MusicXML 4.0',
+        extension: '.musicxml',
+        mimeType: 'application/vnd.recordare.musicxml+xml',
+        idleDescription:
+          'Guion armónico MusicXML 4.0 con compases y acordes (incluye notas melódicas únicamente si son verificables).',
+        draftDescription:
+          'Partitura estructural MusicXML 4.0 con compases, métrica, armadura y eventos verificados.',
+      },
+      {
+        format: 'MIDI',
+        label: 'MIDI Estándar (SMF 1)',
+        extension: '.mid',
+        mimeType: 'audio/midi',
+        idleDescription:
+          'Secuencia MIDI SMF 1; se genera únicamente cuando existen eventos de notas monofónicas verificadas (Cero Fabricación).',
+        draftDescription: 'Archivo MIDI estándar generado a partir de eventos de notas verificados.',
+      },
+      {
+        format: 'TABLATURE',
+        label: `Tablatura (${context.draft?.selectedInstrument === 'BASS' ? 'Bajo' : 'Guitarra'})`,
+        extension: '.tab',
+        mimeType: 'text/plain',
+        idleDescription:
+          'Digitación de guitarra/bajo generable solo cuando existen notas verificadas por instrumento.',
+        draftDescription: 'Tablatura calculada desde eventos de notas verificados para cuerda.',
+      },
+      {
+        format: 'LYRICS_ONLY',
+        label: 'Solo Letra (TXT)',
+        extension: '.txt',
+        mimeType: 'text/plain',
+        idleDescription:
+          'Texto lírico limpio; permanece no generable hasta que el revisor humano suministre letra verificada.',
+        draftDescription: 'Texto lírico verificado por revisión humana sin marcado técnico.',
+      },
+    ];
+
+    const isRunning =
+      context.workflowState === 'ANALYSIS_RUNNING' ||
+      context.workflowState === 'TRANSCRIPTION_RUNNING' ||
+      context.workflowState === 'ANALYSIS_QUEUED';
+    const isFailed = context.workflowState === 'FAILED';
+
+    const scope1cCaps: FormatCapabilityInfo[] = baseDefs.map((def) => {
+      if (context.draft) {
+        const t = context.draft.targets[def.format];
+        let dynamicState: AudioDynamicCapabilityState;
+        if (isRunning) {
+          dynamicState = 'ANALYSIS_RUNNING';
+        } else if (isFailed) {
+          dynamicState = 'FAILED';
+        } else if (context.draft.workflowState === 'APPROVED' && t?.generatable) {
+          dynamicState = 'APPROVED';
+        } else if (t?.generatable && t.status === 'DRAFT_READY') {
+          dynamicState = 'DRAFT_READY';
+        } else if (t?.status === 'REVIEW_REQUIRED') {
+          dynamicState = 'REVIEW_REQUIRED';
+        } else {
+          dynamicState = 'NOT_GENERATABLE';
+        }
+
+        const isAvailable = Boolean(t?.generatable);
+        const confidencePercent = isAvailable ? Math.round((t?.confidence || 0) * 100) : undefined;
+        const capState: CapabilityState = isAvailable
+          ? dynamicState === 'REVIEW_REQUIRED'
+            ? 'PARTIALLY_SUPPORTED'
+            : 'SUPPORTED'
+          : 'NOT_SUPPORTED';
+        const statusBadge: StatusBadge =
+          dynamicState === 'APPROVED'
+            ? 'CONVERTED'
+            : isAvailable
+            ? 'AI_DRAFT'
+            : 'BLOCKED_ZERO_FABRICATION';
+
+        const isHarmonicOnlyMusicXml =
+          def.format === 'MUSIC_XML' && context.draft.analysisSummary?.totalNotesDetected === 0;
+
+        const description = isHarmonicOnlyMusicXml
+          ? 'Guion armónico estructural MusicXML 4.0 con compases y acordes <harmony> (sin notas melódicas inventadas; no constituye una partitura melódica tradicional).'
+          : def.draftDescription;
+
+        return {
+          format: def.format,
+          label: def.label,
+          extension: def.extension,
+          mimeType: def.mimeType,
+          isAvailable,
+          capabilityState: capState,
+          statusBadge,
+          description,
+          blockingReason: !isAvailable
+            ? t?.reason || 'No generable con la evidencia acústica actual (Cero Fabricación).'
+            : undefined,
+          dynamicAudioState: dynamicState,
+          confidencePercent,
+        };
+      }
+
+      if (isRunning) {
+        return {
+          format: def.format,
+          label: def.label,
+          extension: def.extension,
+          mimeType: def.mimeType,
+          isAvailable: false,
+          capabilityState: 'PARTIALLY_SUPPORTED',
+          statusBadge: 'AI_DRAFT',
+          description: def.idleDescription,
+          blockingReason: 'Análisis acústico Python (10 etapas DSP) en ejecución...',
+          dynamicAudioState: 'ANALYSIS_RUNNING',
+        };
+      }
+
+      if (isFailed) {
+        return {
+          format: def.format,
+          label: def.label,
+          extension: def.extension,
+          mimeType: def.mimeType,
+          isAvailable: false,
+          capabilityState: 'NOT_SUPPORTED',
+          statusBadge: 'BLOCKED_ZERO_FABRICATION',
+          description: def.idleDescription,
+          blockingReason: 'El flujo de audio reportó un error. Verifique el diagnóstico e intente nuevamente.',
+          dynamicAudioState: 'FAILED',
+        };
+      }
+
+      if (context.workflowState === 'AUDIO_PRESERVED') {
+        return {
+          format: def.format,
+          label: def.label,
+          extension: def.extension,
+          mimeType: def.mimeType,
+          isAvailable: false,
+          capabilityState: 'PARTIALLY_SUPPORTED',
+          statusBadge: 'AI_DRAFT',
+          description: def.idleDescription,
+          blockingReason:
+            'Audio preservado en el servidor. Ejecute el Paso 2 (Análisis Python DSP) para evaluar y generar borradores según la evidencia acústica real.',
+          dynamicAudioState: 'AUDIO_PRESERVED',
+        };
+      }
+
+      return {
+        format: def.format,
+        label: def.label,
+        extension: def.extension,
+        mimeType: def.mimeType,
+        isAvailable: false,
+        capabilityState: 'PARTIALLY_SUPPORTED',
+        statusBadge: 'AI_DRAFT',
+        description: def.idleDescription,
+        blockingReason:
+          'Pipeline WS-AUDIO-02/03 implementado y listo. Preserve el audio y ejecute el análisis Python para evaluar este formato.',
+        dynamicAudioState: 'IMPLEMENTED',
+      };
+    });
+
+    const engravedPdfCap: FormatCapabilityInfo = {
+      format: 'ENGRAVED_PDF',
+      label: 'Partitura Grabada (PDF)',
+      extension: '.pdf',
+      mimeType: 'application/pdf',
+      isAvailable: false,
+      capabilityState: 'NOT_SUPPORTED',
+      statusBadge: 'BLOCKED_ZERO_FABRICATION',
+      description: 'Partitura visual grabada en PDF (no aplica directamente sobre fuentes de audio).',
+      blockingReason:
+        'La generación directa de PDF grabado desde audio no es aplicable; utilice MusicXML 4.0 o el Atril Digital.',
+      dynamicAudioState: 'NOT_GENERATABLE',
+    };
+
+    return [...scope1cCaps, engravedPdfCap];
   }
 
   /**

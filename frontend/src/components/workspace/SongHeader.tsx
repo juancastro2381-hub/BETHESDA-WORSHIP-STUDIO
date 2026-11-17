@@ -8,6 +8,7 @@
 import React from 'react';
 import { type CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
 import { type BackendVersionItem } from '../../core/api/api-client.ts';
+import { extractAuthoritativeSongMetadata } from '../../core/workspace/canonical-metadata-projection.ts';
 import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 
 export interface SongHeaderProps {
@@ -41,23 +42,27 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
   activeVersionId,
   onSelectVersion,
 }) => {
-  const tempoBpm = song.timeline.tempoMap.events[0]?.bpm ?? (song.metadata?.['bpm'] as number | undefined) ?? null;
-  const firstMeasure = song.measures[0];
-  const timeSig = firstMeasure?.timeSignature
-    ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
-    : (song.metadata?.['timeSignature'] as string | undefined) ?? '—';
-  const totalMeasures = song.measures.length;
-  const totalSections = song.sections.length;
-  const totalChords = song.measures.reduce((acc, m) => acc + m.chords.length, 0);
-  const totalNotes = song.measures.reduce((acc, m) => acc + m.getAllNotes().length, 0);
+  const authMeta = extractAuthoritativeSongMetadata(song, {
+    concertKeyOverride: concertKey,
+    songStatus,
+    versionNumber,
+  });
+  const tempoBpm = authMeta.tempoBpm;
+  const tempoSuffix =
+    authMeta.tempoOrigin === 'AUDIO_DERIVED'
+      ? ' (Audio)'
+      : authMeta.tempoOrigin === 'MANUAL_OVERRIDE'
+      ? ' (Manual)'
+      : '';
+  const timeSig = authMeta.timeSignature ?? '—';
+  const totalMeasures = authMeta.measureCount;
+  const totalSections = authMeta.sectionCount;
+  const totalChords = authMeta.chordCount;
+  const totalNotes = authMeta.noteCount;
 
-  const meta = (song.metadata ?? {}) as Record<string, unknown>;
-  const audioFilename = typeof meta['audioFilename'] === 'string' ? meta['audioFilename'] : null;
-  const isAudioDerived = Boolean(meta['isAudioDerived']);
-  const approvalStatus =
-    typeof meta['approvalStatus'] === 'string'
-      ? meta['approvalStatus']
-      : songStatus ?? (isPersisted ? 'APPROVED' : undefined);
+  const audioFilename = authMeta.audioFilename;
+  const isAudioDerived = authMeta.isAudioDerived;
+  const approvalStatus = authMeta.approvalStatus ?? (isPersisted ? 'APPROVED' : undefined);
 
   return (
     <header className="workspace-song-header" aria-label="Metadatos de la Canción Activa">
@@ -151,8 +156,8 @@ export const SongHeader: React.FC<SongHeaderProps> = ({
           <span className="badge-meta badge-key" title="Tonalidad canónica de concierto">
             Tono: {concertKey}
           </span>
-          <span className="badge-meta badge-tempo" title="Tempo constante">
-            ♩ = {tempoBpm ? `${tempoBpm} BPM` : 'No esp.'}
+          <span className="badge-meta badge-tempo" title="Tempo autoritativo de la versión activa">
+            ♩ = {tempoBpm ? `${tempoBpm} BPM${tempoSuffix}` : 'No esp.'}
           </span>
           <span className="badge-meta badge-meter" title="Métrica de compás">
             {timeSig}

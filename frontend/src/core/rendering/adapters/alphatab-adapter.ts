@@ -170,15 +170,28 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
           voiceBeatsMap.set(note.voice, beats);
         }
 
-        const tabCoord = measure.tablature.find(
-          (t) =>
-            t.canonicalPitch.midiNumber === note.canonicalPitch.midiNumber &&
-            t.durationTicks === note.durationTicks
-        );
+        const tabCoord =
+          measure.tablature.find((t) => t.noteId && t.noteId === note.id) ??
+          measure.tablature.find(
+            (t) =>
+              t.canonicalPitch.midiNumber === note.canonicalPitch.midiNumber &&
+              t.durationTicks === note.durationTicks
+          );
+
+        if (isTabRequested && !tabCoord) {
+          this.addDiagnostic(
+            'WARNING',
+            'TABLATURE_NOTE_OUT_OF_RANGE',
+            `La nota ${note.writtenPitch.toString()} en compás ${measure.measureNumber} no tiene digitación válida en ${view.instrumentProfile.name}; no se fabrica posición artificial.`
+          );
+          if (!isNotationRequested) {
+            continue;
+          }
+        }
 
         const noteData: AlphaTabNoteData = {
-          string: tabCoord ? tabCoord.stringNumber : 1,
-          fret: tabCoord ? tabCoord.fret : 0,
+          string: tabCoord ? tabCoord.stringNumber : 0,
+          fret: tabCoord ? tabCoord.fret : -1,
           pitchMidi: note.writtenPitch.midiNumber,
           canonicalPitch: note.canonicalPitch.toString(),
           writtenPitch: note.writtenPitch.toString(),

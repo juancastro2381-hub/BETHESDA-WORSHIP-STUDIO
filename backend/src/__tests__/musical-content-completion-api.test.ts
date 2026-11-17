@@ -453,7 +453,7 @@ describe('Musical Content Completion & Intelligent Stand Format Enablement API',
       1
     );
 
-    // 11. Agregar letra verificada alineada por compás y aprobar como v4 -> habilita CHORD_CHART y LYRICS_ONLY
+    // 11. Agregar letra verificada con encabezados de metadatos (deben filtrarse) alineada por compás y aprobar como v4 -> habilita CHORD_CHART y LYRICS_ONLY
     const alignedLyricsPropRes = await app.inject({
       method: 'POST',
       url: `/api/v1/songs/${created.song.id}/completion/proposals`,
@@ -463,7 +463,11 @@ describe('Musical Content Completion & Intelligent Stand Format Enablement API',
         sourceKind: 'LYRICS_TEXT',
         filename: 'letra_oficial.txt',
         lyricsData: {
-          lyricsText: '[Verso 1]\nEl Señor está aquí\nTe adoramos hoy',
+          lyricsText:
+            'Canción Lead Sheet Test\n' +
+            'Canción original de prueba\n' +
+            'Tonalidad: Sol mayor (G) | Compás: 4/4 | Tempo: 96 BPM\n' +
+            '[Verso 1]\nEl Señor está aquí\nTe adoramos hoy',
           alignmentMode: 'BY_MEASURE',
           sourceOrigin: 'TXT_IMPORT',
           verifiedByHuman: true,
@@ -473,6 +477,36 @@ describe('Musical Content Completion & Intelligent Stand Format Enablement API',
     assert.strictEqual(alignedLyricsPropRes.statusCode, 201, alignedLyricsPropRes.body);
     const lyrPropId = alignedLyricsPropRes.json().data.proposalId;
     createdProposalIds.push(lyrPropId);
+
+    // Verificar que las líneas de encabezado/metadatos NO fueron convertidas en sílabas líricas
+    const previewHeaderFilterRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/songs/${created.song.id}/completion/validate-preview`,
+      headers: { authorization: `Bearer ${musicianToken}`, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        targetFormat: 'CHORD_CHART',
+        sourceKind: 'LYRICS_TEXT',
+        filename: 'letra_oficial.txt',
+        lyricsData: {
+          lyricsText:
+            'Canción Lead Sheet Test\n' +
+            'Canción original de prueba\n' +
+            'Tonalidad: Sol mayor (G) | Compás: 4/4 | Tempo: 96 BPM\n' +
+            '[Verso 1]\nEl Señor está aquí',
+          alignmentMode: 'BY_MEASURE',
+          sourceOrigin: 'TXT_IMPORT',
+          verifiedByHuman: true,
+        },
+      }),
+    });
+    assert.strictEqual(previewHeaderFilterRes.statusCode, 200);
+    const previewLyricsTokens = previewHeaderFilterRes
+      .json()
+      .data.candidateCanonicalPayload.measures.flatMap((m: any) => m.lyrics.map((l: any) => l.text));
+    assert.strictEqual(previewLyricsTokens.includes('original'), false);
+    assert.strictEqual(previewLyricsTokens.includes('prueba'), false);
+    assert.strictEqual(previewLyricsTokens.includes('96'), false);
+    assert.strictEqual(previewLyricsTokens.includes('Señor'), true);
 
     const approveLyrRes = await app.inject({
       method: 'POST',

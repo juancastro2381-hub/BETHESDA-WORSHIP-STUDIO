@@ -18,6 +18,7 @@ import { type TuningDefinition, type ViewRepresentation } from './types.ts';
 export const STANDARD_GUITAR_TUNING: TuningDefinition = {
   id: 'standard_guitar_6',
   name: 'Guitarra Estándar (E A D G B E)',
+  maxFret: 20,
   // Cuerdas de la 1ª (más aguda) a la 6ª (más grave):
   stringPitches: [
     new Pitch(NoteName.E, 4), // 1: E4 (MIDI 64)
@@ -29,9 +30,17 @@ export const STANDARD_GUITAR_TUNING: TuningDefinition = {
   ],
 };
 
+export const ELECTRIC_GUITAR_TUNING: TuningDefinition = {
+  ...STANDARD_GUITAR_TUNING,
+  id: 'electric_guitar_6',
+  name: 'Guitarra Eléctrica Estándar (E A D G B E)',
+  maxFret: 22,
+};
+
 export const STANDARD_BASS_TUNING: TuningDefinition = {
   id: 'standard_bass_4',
   name: 'Bajo Estándar 4 Cuerdas (E A D G)',
+  maxFret: 20,
   // Cuerdas de la 1ª (más aguda) a la 4ª (más grave):
   stringPitches: [
     new Pitch(NoteName.G, 2), // 1: G2 (MIDI 43)
@@ -181,7 +190,7 @@ export class InstrumentRegistry {
           'SECTION_MARKERS',
         ],
         defaultRepresentations: ['TABLATURE', 'CHORDS'],
-        tuning: STANDARD_GUITAR_TUNING,
+        tuning: ELECTRIC_GUITAR_TUNING,
       })
     );
 

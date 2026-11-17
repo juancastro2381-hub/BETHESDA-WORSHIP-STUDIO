@@ -8502,10 +8502,25 @@ body {
   border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
-.fmt-status-pill.status-review_required {
+.fmt-status-pill.status-review_required,
+.fmt-status-pill.status-partial {
   background: rgba(245, 158, 11, 0.2);
   color: #fcd34d;
   border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.bethesda-lyrics-only-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0;
+}
+
+.bethesda-lyrics-only-line {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.65;
+  color: inherit;
 }
 
 .fmt-status-pill.status-missing_content,

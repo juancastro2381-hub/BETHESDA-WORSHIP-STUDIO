@@ -39,12 +39,16 @@ export interface TuningDefinition {
    * Ej. Guitarra estándar: [E4, B3, G3, D3, A2, E2] (cuerdas 1 a 6).
    */
   readonly stringPitches: readonly Pitch[];
+  /** Límite físico de trastes del instrumento (p. ej. 20 para acústica/bajo, 22 para eléctrica) */
+  readonly maxFret?: number | undefined;
 }
 
 /**
  * Coordenada de tablatura proyectada para una nota musical.
  */
 export interface TabPosition {
+  /** ID de la nota canónica origen cuando aplica */
+  readonly noteId?: string | undefined;
   /** Número de cuerda (1-indexed: 1 = cuerda más aguda) */
   readonly stringNumber: number;
   /** Número de traste digitado (0 = al aire; con cejilla, relativo al traste de cejilla) */
@@ -57,6 +61,8 @@ export interface TabPosition {
   readonly voice: number;
   /** Referencia de la afinación utilizada */
   readonly tuningReference: string;
+  /** Indica si la digitación proviene de fuente explícita o override humano verificado */
+  readonly isExplicitSource?: boolean | undefined;
 }
 
 /**

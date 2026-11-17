@@ -19,9 +19,39 @@ export class MusicXmlGenerator {
 
     const fifths = view.writtenKey.keySignature.accidentalCount;
     const mode = view.writtenKey.mode.toLowerCase();
+    const resolvedBpm = view.timeline.tempoMap.events[0]?.bpm ?? null;
+
+    let prevTimeSig: string | null = null;
+    let prevKeySig: string | null = null;
+    let prevClef: string | null = null;
 
     const partsXml = view.measures
-      .map((measure, idx) => MusicXmlGenerator.generateMeasure(measure, idx === 0, isGrandStaff, fifths, mode))
+      .map((measure, idx) => {
+        const curTimeSig = measure.timeSignature
+          ? `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`
+          : null;
+        const curKeySig = measure.writtenKeySignature
+          ? `${measure.writtenKeySignature.keySignature.accidentalCount}_${measure.writtenKeySignature.mode}`
+          : null;
+        const curClef = measure.clefs[0] ?? 'TREBLE';
+        const includeAttrs =
+          idx === 0 ||
+          (curTimeSig !== null && curTimeSig !== prevTimeSig) ||
+          (curKeySig !== null && curKeySig !== prevKeySig) ||
+          curClef !== prevClef;
+        if (curTimeSig) prevTimeSig = curTimeSig;
+        if (curKeySig) prevKeySig = curKeySig;
+        prevClef = curClef;
+        return MusicXmlGenerator.generateMeasure(
+          measure,
+          idx === 0,
+          includeAttrs,
+          isGrandStaff,
+          fifths,
+          mode,
+          resolvedBpm
+        );
+      })
       .join('\n');
 
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -44,19 +74,29 @@ ${partsXml}
   private static generateMeasure(
     measure: DerivedMeasure,
     isFirst: boolean,
+    includeAttributes: boolean,
     isGrandStaff: boolean,
     fifths: number,
-    mode: string
+    mode: string,
+    resolvedBpm: number | null
   ): string {
     const num = measure.measureNumber;
     let xml = `    <measure number="${num}">\n`;
 
-    if (isFirst) {
+    if (includeAttributes) {
+      const mFifths = measure.writtenKeySignature
+        ? measure.writtenKeySignature.keySignature.accidentalCount
+        : fifths;
+      const mMode = measure.writtenKeySignature
+        ? measure.writtenKeySignature.mode.toLowerCase()
+        : mode;
       xml += `      <attributes>\n`;
-      xml += `        <divisions>480</divisions>\n`;
+      if (isFirst) {
+        xml += `        <divisions>480</divisions>\n`;
+      }
       xml += `        <key>\n`;
-      xml += `          <fifths>${fifths}</fifths>\n`;
-      xml += `          <mode>${mode}</mode>\n`;
+      xml += `          <fifths>${mFifths}</fifths>\n`;
+      xml += `          <mode>${mMode}</mode>\n`;
       xml += `        </key>\n`;
       if (measure.timeSignature) {
         xml += `        <time>\n`;
@@ -65,17 +105,25 @@ ${partsXml}
         xml += `        </time>\n`;
       }
 
-      if (isGrandStaff) {
-        xml += `        <staves>2</staves>\n`;
-        xml += `        <clef number="1">\n          <sign>G</sign>\n          <line>2</line>\n        </clef>\n`;
-        xml += `        <clef number="2">\n          <sign>F</sign>\n          <line>4</line>\n        </clef>\n`;
-      } else {
-        const clef = measure.clefs[0] ?? 'TREBLE';
-        const sign = clef === 'BASS' ? 'F' : 'G';
-        const line = clef === 'BASS' ? '4' : '2';
-        xml += `        <clef>\n          <sign>${sign}</sign>\n          <line>${line}</line>\n        </clef>\n`;
+      if (isFirst) {
+        if (isGrandStaff) {
+          xml += `        <staves>2</staves>\n`;
+          xml += `        <clef number="1">\n          <sign>G</sign>\n          <line>2</line>\n        </clef>\n`;
+          xml += `        <clef number="2">\n          <sign>F</sign>\n          <line>4</line>\n        </clef>\n`;
+        } else {
+          const clef = measure.clefs[0] ?? 'TREBLE';
+          const sign = clef === 'BASS' ? 'F' : 'G';
+          const line = clef === 'BASS' ? '4' : '2';
+          xml += `        <clef>\n          <sign>${sign}</sign>\n          <line>${line}</line>\n        </clef>\n`;
+        }
       }
       xml += `      </attributes>\n`;
+    }
+
+    if (isFirst && typeof resolvedBpm === 'number' && resolvedBpm > 0) {
+      xml += `      <direction placement="above">\n`;
+      xml += `        <sound tempo="${resolvedBpm}"/>\n`;
+      xml += `      </direction>\n`;
     }
 
     // Agregar acordes (harmony)

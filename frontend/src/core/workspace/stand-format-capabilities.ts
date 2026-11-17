@@ -18,6 +18,7 @@ export type CanonicalStandFormatName = 'PARTITURE' | 'CHORDS_WITH_LYRICS' | 'LYR
 
 export type StandFormatAvailabilityStatus =
   | 'AVAILABLE'
+  | 'PARTIAL'
   | 'MISSING_CONTENT'
   | 'INCOMPLETE'
   | 'VALIDATION_REQUIRED'
@@ -118,6 +119,8 @@ export interface SongContentSummary {
   readonly restCount: number;
   readonly chordCount: number;
   readonly lyricSyllableCount: number;
+  readonly measuresWithLyrics: number;
+  readonly lyricCoverageRatio: number;
   readonly hasUnalignedLyrics: boolean;
   readonly detectedChordCount: number;
   readonly estimatedChordCount: number;
@@ -166,6 +169,8 @@ export class StandFormatCapabilityResolver {
     const allRests = song.getAllRests();
     const allChords = song.getAllChords();
     const allLyrics = song.getAllLyrics();
+    const measuresWithLyrics = song.measures.filter((m) => m.lyrics.length > 0).length;
+    const lyricCoverageRatio = song.measures.length > 0 ? measuresWithLyrics / song.measures.length : 0;
     const meta = (song.metadata ?? {}) as Record<string, unknown>;
     const unalignedLyrics = Array.isArray(meta['unalignedLyrics']) ? meta['unalignedLyrics'] : [];
     const hasUnalignedLyrics =
@@ -189,6 +194,8 @@ export class StandFormatCapabilityResolver {
       restCount: allRests.length,
       chordCount: allChords.length,
       lyricSyllableCount: allLyrics.length,
+      measuresWithLyrics,
+      lyricCoverageRatio,
       hasUnalignedLyrics,
       detectedChordCount,
       estimatedChordCount,
@@ -614,8 +621,13 @@ export class StandFormatCapabilityResolver {
       };
     }
 
-    const reviewRequired = !isApproved && (isDraft || hasPending || meta['lyricAlignmentStatus'] === 'ALIGNED_PENDING_REVIEW');
-    const leadSheetState: LeadSheetCompletionState = isApproved
+    const isPartialLyrics = summary.measureCount >= 16 && summary.lyricCoverageRatio < 0.25;
+    const reviewRequired =
+      isPartialLyrics ||
+      (!isApproved && (isDraft || hasPending || meta['lyricAlignmentStatus'] === 'ALIGNED_PENDING_REVIEW'));
+    const leadSheetState: LeadSheetCompletionState = isPartialLyrics
+      ? 'LYRICS_ALIGNED_AWAITING_REVIEW'
+      : isApproved
       ? 'COMPLETE_AND_APPROVED'
       : reviewRequired
       ? 'LYRICS_ALIGNED_AWAITING_REVIEW'
@@ -625,21 +637,47 @@ export class StandFormatCapabilityResolver {
       format: 'CHORD_CHART',
       canonicalFormat: 'CHORDS_WITH_LYRICS',
       label: 'Cifrado con Letra',
-      availabilityStatus: isApproved ? 'APPROVED' : reviewRequired ? 'REVIEW_REQUIRED' : 'AVAILABLE',
+      availabilityStatus: isPartialLyrics
+        ? 'PARTIAL'
+        : isApproved
+        ? 'APPROVED'
+        : reviewRequired
+        ? 'REVIEW_REQUIRED'
+        : 'AVAILABLE',
       isAvailable: true,
       requiredContent,
-      missingContent: [],
+      missingContent: isPartialLyrics
+        ? [`Letra completa (solo ${summary.measuresWithLyrics} de ${summary.measureCount} compases contienen texto lírico)`]
+        : [],
       validationErrors: [],
-      validationWarnings: reviewRequired
+      validationWarnings: isPartialLyrics
+        ? [
+            `Cobertura lírica parcial (${summary.measuresWithLyrics}/${summary.measureCount} compases). No debe considerarse letra completa hasta cubrir las secciones faltantes.`,
+          ]
+        : reviewRequired
         ? ['Lead Sheet alineado en revisión; requiere aprobación humana para publicación oficial.']
         : [],
       evidenceStatus: isApproved && chordEvidence === 'IMPORTED' ? 'HUMAN_VERIFIED' : chordEvidence,
       reviewRequired,
-      approvalStatus: isApproved ? 'APPROVED' : reviewRequired ? 'PENDING_REVIEW' : 'NOT_APPLICABLE',
-      approvalScope: isApproved ? 'COMPLETE_AND_APPROVED' : 'LEAD_SHEET_DRAFT',
+      approvalStatus: isPartialLyrics
+        ? 'PENDING_REVIEW'
+        : isApproved
+        ? 'APPROVED'
+        : reviewRequired
+        ? 'PENDING_REVIEW'
+        : 'NOT_APPLICABLE',
+      approvalScope: isPartialLyrics
+        ? 'PARTIAL_LYRICS_COVERAGE'
+        : isApproved
+        ? 'COMPLETE_AND_APPROVED'
+        : 'LEAD_SHEET_DRAFT',
       blockingReason: '',
-      shortRestrictionExplanation: '',
-      nextRecommendedAction: reviewRequired
+      shortRestrictionExplanation: isPartialLyrics
+        ? `Letra parcial (${summary.measuresWithLyrics}/${summary.measureCount} compases).`
+        : '',
+      nextRecommendedAction: isPartialLyrics
+        ? 'Completar y alinear las secciones faltantes de letra'
+        : reviewRequired
         ? 'Aprobar publicación oficial del Lead Sheet'
         : 'Lead Sheet disponible para lectura',
       leadSheetState,
@@ -743,7 +781,9 @@ export class StandFormatCapabilityResolver {
       };
     }
 
-    const reviewRequired = !isApproved && (isDraft || hasPending || meta['lyricsVerifiedByHuman'] === false);
+    const isPartialLyrics = summary.measureCount >= 16 && summary.lyricCoverageRatio < 0.25;
+    const reviewRequired =
+      isPartialLyrics || !isApproved && (isDraft || hasPending || meta['lyricsVerifiedByHuman'] === false);
     const evidenceStatus: MusicalContentEvidenceStatus = isApproved || meta['lyricsVerifiedByHuman'] === true
       ? 'HUMAN_VERIFIED'
       : this.resolveBaseEvidence(meta, 'IMPORTED');
@@ -752,21 +792,43 @@ export class StandFormatCapabilityResolver {
       format: 'LYRICS_ONLY',
       canonicalFormat: 'LYRICS_ONLY',
       label: 'Letra Sola',
-      availabilityStatus: isApproved ? 'APPROVED' : reviewRequired ? 'REVIEW_REQUIRED' : 'AVAILABLE',
+      availabilityStatus: isPartialLyrics
+        ? 'PARTIAL'
+        : isApproved
+        ? 'APPROVED'
+        : reviewRequired
+        ? 'REVIEW_REQUIRED'
+        : 'AVAILABLE',
       isAvailable: true,
       requiredContent,
-      missingContent: [],
+      missingContent: isPartialLyrics
+        ? [`Letra completa (${summary.measuresWithLyrics}/${summary.measureCount} compases cubiertos)`]
+        : [],
       validationErrors: [],
-      validationWarnings: reviewRequired
+      validationWarnings: isPartialLyrics
+        ? [`Solo ${summary.measuresWithLyrics} de ${summary.measureCount} compases tienen letra; revise si faltan estrofas o coros.`]
+        : reviewRequired
         ? ['Letra en borrador pendiente de aprobación para versión canónica oficial.']
         : [],
       evidenceStatus,
       reviewRequired,
-      approvalStatus: isApproved ? 'APPROVED' : reviewRequired ? 'PENDING_REVIEW' : 'NOT_APPLICABLE',
-      approvalScope: isApproved ? 'LYRICS_APPROVED' : 'LYRICS_DRAFT',
+      approvalStatus: isPartialLyrics
+        ? 'PENDING_REVIEW'
+        : isApproved
+        ? 'APPROVED'
+        : reviewRequired
+        ? 'PENDING_REVIEW'
+        : 'NOT_APPLICABLE',
+      approvalScope: isPartialLyrics ? 'PARTIAL_LYRICS' : isApproved ? 'LYRICS_APPROVED' : 'LYRICS_DRAFT',
       blockingReason: '',
-      shortRestrictionExplanation: '',
-      nextRecommendedAction: reviewRequired ? 'Aprobar publicación oficial de la letra' : 'Letra lista para lectura',
+      shortRestrictionExplanation: isPartialLyrics
+        ? `Letra parcial (${summary.measuresWithLyrics}/${summary.measureCount} compases).`
+        : '',
+      nextRecommendedAction: isPartialLyrics
+        ? 'Completar las secciones faltantes de letra'
+        : reviewRequired
+        ? 'Aprobar publicación oficial de la letra'
+        : 'Letra lista para lectura',
     };
   }
 

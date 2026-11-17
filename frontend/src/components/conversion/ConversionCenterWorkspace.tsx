@@ -105,7 +105,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
   const [audioWorkflowState, setAudioWorkflowState] = useState<AudioConversionWorkflowStateDTO | 'IDLE'>('IDLE');
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState<boolean>(false);
   const [activeAudioDraft, setActiveAudioDraft] = useState<AudioDraftProposalDTO | null>(null);
-  const [audioPlaybackUrl, setAudioPlaybackUrl] = useState<string | null>(null);
   const [reviewTitle, setReviewTitle] = useState<string>('');
   const [reviewKey, setReviewKey] = useState<string>('');
   const [reviewBpm, setReviewBpm] = useState<string>('');
@@ -187,14 +186,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
       } else {
         setSelectedApprovedFormats(generatableFormats);
       }
-      try {
-        const streamUrl = await client.getAudioPlaybackStreamUrl(draft.audioAssetId);
-        setAudioPlaybackUrl(streamUrl);
-      } catch {
-        setAudioPlaybackUrl(null);
-      }
     },
-    [client]
+    []
   );
 
   const loadPersistedAudioStateForSong = useCallback(
@@ -231,12 +224,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
           });
           setAudioWorkflowState('AUDIO_PRESERVED');
           setActiveAudioDraft(null);
-          try {
-            const streamUrl = await client.getAudioPlaybackStreamUrl(latestAsset.id);
-            setAudioPlaybackUrl(streamUrl);
-          } catch {
-            setAudioPlaybackUrl(null);
-          }
           return true;
         }
 
@@ -349,7 +336,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setAudioPreservationSuccess(null);
     setAudioWorkflowState('IDLE');
     setActiveAudioDraft(null);
-    setAudioPlaybackUrl(null);
     setReviewActionFeedback(null);
     setShowAllChords(false);
 
@@ -427,7 +413,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
     setAudioPreservationSuccess(null);
     setAudioWorkflowState('IDLE');
     setActiveAudioDraft(null);
-    setAudioPlaybackUrl(null);
     setReviewActionFeedback(null);
     setShowAllChords(false);
     if (fileInputRef.current) {
@@ -1780,7 +1765,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           if (!selectedFile) {
                             setAudioPreservationSuccess(null);
                             setActiveAudioDraft(null);
-                            setAudioPlaybackUrl(null);
                             setAudioWorkflowState('IDLE');
                           }
                           return;
@@ -1790,7 +1774,6 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           if (!found && !selectedFile) {
                             setAudioPreservationSuccess(null);
                             setActiveAudioDraft(null);
-                            setAudioPlaybackUrl(null);
                             setAudioWorkflowState('IDLE');
                           }
                         });
@@ -2011,16 +1994,13 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                 </div>
               )}
 
-              {/* 1. Reproductor del Audio Original Preservado */}
-              {audioPlaybackUrl && (
-                <div style={{ marginBottom: '14px', padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
-                  <div style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '6px' }}>
-                    🎧 <strong>Audio Original Preservado:</strong> {activeAudioDraft.sourceFilename} (SHA-256:{' '}
-                    <code>{activeAudioDraft.sourceSha256.slice(0, 16)}...</code>)
-                  </div>
-                  <audio controls src={audioPlaybackUrl} style={{ width: '100%', height: '36px' }} preload="metadata" />
+              {/* 1. Registro de Procedencia del Audio Privado Preservado */}
+              <div style={{ marginBottom: '14px', padding: '10px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+                <div style={{ fontSize: '0.82rem', color: '#94a3b8' }}>
+                  🔒 <strong>Fuente Privada Preservada (Auditoría Scope 1C):</strong> {activeAudioDraft.sourceFilename} (SHA-256:{' '}
+                  <code>{activeAudioDraft.sourceSha256.slice(0, 16)}...</code>)
                 </div>
-              )}
+              </div>
 
               {/* 2. Resumen de Análisis Acústico Python (WS-AUDIO-02) */}
               <div
@@ -2222,8 +2202,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                               seg.status === 'DETECTED'
                                 ? '1px solid rgba(34,197,94,0.45)'
                                 : seg.status === 'AMBIGUOUS' || seg.status === 'UNSUPPORTED'
-                                ? '1px solid rgba(239,68,68,0.5)'
-                                : '1px solid rgba(251,191,36,0.45)',
+                                  ? '1px solid rgba(239,68,68,0.5)'
+                                  : '1px solid rgba(251,191,36,0.45)',
                             fontSize: '0.73rem',
                           }}
                         >
@@ -2236,8 +2216,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                                   seg.status === 'DETECTED'
                                     ? '#86efac'
                                     : seg.status === 'AMBIGUOUS' || seg.status === 'UNSUPPORTED'
-                                    ? '#fca5a5'
-                                    : '#fde68a',
+                                      ? '#fca5a5'
+                                      : '#fde68a',
                               }}
                             >
                               {seg.status}
@@ -2616,8 +2596,8 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
                           {!isGeneratable
                             ? '(Bloqueado: NOT_GENERATABLE)'
                             : fmt === 'MUSIC_XML' && activeAudioDraft.analysisSummary.totalNotesDetected === 0
-                            ? '(Guion estructural)'
-                            : '(Generable)'}
+                              ? '(Guion estructural)'
+                              : '(Generable)'}
                         </span>
                       </label>
                     );

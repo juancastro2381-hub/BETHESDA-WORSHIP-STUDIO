@@ -47,7 +47,6 @@ import { DatabaseSongsModal } from './DatabaseSongsModal.tsx';
 import { SetlistsModal } from './SetlistsModal.tsx';
 import { SetlistNavigationToolbar } from './SetlistNavigationToolbar.tsx';
 import { ServiceMomentCard } from './ServiceMomentCard.tsx';
-import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
 import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
@@ -799,12 +798,6 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             availableVersions={persistedSongVersions}
             activeVersionId={activeVersionId}
             onSelectVersion={(vid) => void handleSelectSongVersion(vid)}
-          />
-
-          {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
-          <AudioPlayerBar
-            songId={persistedMeta?.songId ?? (activeSong as any)?.id}
-            songTitle={activeSong.title}
           />
 
           {/* 4. MusicalControls: Instrumento, Representaciones, Capo, Transposición y Cifrado */}

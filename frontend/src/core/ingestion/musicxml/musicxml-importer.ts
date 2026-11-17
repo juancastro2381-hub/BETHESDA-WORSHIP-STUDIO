@@ -256,7 +256,7 @@ export class MusicXmlImporter implements MusicImporter {
 
         // Leer <direction> para tempos y secciones
         for (const dir of mEl.childrenNamed('direction')) {
-          // Tempo
+          // Tempo desde <sound tempo="..."> o <direction-type><metronome><per-minute>
           const soundEl = dir.child('sound');
           if (soundEl) {
             const tempoAttr = soundEl.attr('tempo');
@@ -268,16 +268,32 @@ export class MusicXmlImporter implements MusicImporter {
             }
           }
 
-          // Marcadores de ensayo / secciones (rehearsal)
           const dirType = dir.child('direction-type');
-          const rehearsalText = dirType?.childText('rehearsal') ?? dirType?.childText('words');
-          if (rehearsalText) {
-            const sectionType = this.deduceSectionType(rehearsalText);
+          const metronomeEl = dirType?.child('metronome');
+          if (metronomeEl) {
+            const perMinText = metronomeEl.childText('per-minute');
+            if (perMinText) {
+              const parsedBpm = parseFloat(perMinText);
+              if (parsedBpm > 0 && !tempoEvents.some((t) => t.tick === (currentMeasureStartTick ?? 0))) {
+                tempoEvents.push(new TempoEvent(currentMeasureStartTick ?? 0, parsedBpm));
+              }
+            }
+          }
+
+          // Marcadores de ensayo / secciones (rehearsal o words explícitamente reconocidos como sección)
+          const rehearsalOnly = dirType?.childText('rehearsal')?.trim();
+          const wordsText = dirType?.childText('words')?.trim();
+          const candidateSectionLabel =
+            rehearsalOnly ||
+            (wordsText && this.isExplicitSectionLabel(wordsText) ? wordsText : undefined);
+
+          if (candidateSectionLabel) {
+            const sectionType = this.deduceSectionType(candidateSectionLabel);
             sections.push(
               new Section({
                 id: `sec_${measureNum}_${sectionType.toLowerCase()}`,
                 type: sectionType,
-                label: rehearsalText,
+                label: candidateSectionLabel,
                 startMeasure: measureNum,
                 measureCount: 1, // Se actualizará al final
                 startTick: currentMeasureStartTick,
@@ -569,17 +585,20 @@ export class MusicXmlImporter implements MusicImporter {
             if (!voiceEventsMap.has(voiceId)) voiceEventsMap.set(voiceId, []);
             voiceEventsMap.get(voiceId)?.push(note);
 
-            // Sílaba Lírica vinculada a la nota
-            const lyricEl = child.child('lyric');
-            if (lyricEl) {
+            // Sílaba Lírica vinculada a la nota (soporta múltiples <lyric>, priorizando verso 1 / principal)
+            const lyricElements = child.childrenNamed('lyric');
+            const primaryLyricEl =
+              lyricElements.find((el) => (el.attr('number') ?? '1') === '1') ?? lyricElements[0];
+            if (primaryLyricEl) {
+              const textParts = primaryLyricEl
+                .childrenNamed('text')
+                .map((t) => t.text)
+                .filter((t) => t.length > 0);
+              const text = textParts.length > 0 ? textParts.join(' ') : primaryLyricEl.childText('text') ?? '';
+              const syllabic = primaryLyricEl.childText('syllabic')?.trim().toLowerCase();
+              const isHyphenated = syllabic === 'begin' || syllabic === 'middle';
 
-              // Sílaba Lírica vinculada a la nota
-              const lyricEl = child.child('lyric');
-              if (lyricEl) {
-                const text = lyricEl.childText('text') ?? '';
-                const syllabic = lyricEl.childText('syllabic');
-                const isHyphenated = syllabic === 'begin' || syllabic === 'middle';
-
+              if (text.length > 0) {
                 lyricSyllables.push(
                   new LyricSyllable({
                     id: `syl_m${measureNum}_${lyricSequence}`,
@@ -800,18 +819,38 @@ export class MusicXmlImporter implements MusicImporter {
 
       // Mapear kind a cualidad
       let chordStr = rootNote.toString();
-      if (kindText.includes('minor-seventh') || kindAttr === 'm7') {
+      if (kindText.includes('minor-ninth') || kindAttr === 'm9') {
+        chordStr += 'm9';
+      } else if (kindText.includes('major-ninth') || kindAttr === 'maj9') {
+        chordStr += 'maj9';
+      } else if (kindText.includes('dominant-ninth') || kindAttr === '9') {
+        chordStr += '9';
+      } else if (kindText.includes('minor-seventh') || kindAttr === 'm7') {
         chordStr += 'm7';
       } else if (kindText.includes('major-seventh') || kindAttr === 'maj7') {
         chordStr += 'maj7';
+      } else if (kindText.includes('diminished-seventh') || kindAttr === 'dim7') {
+        chordStr += 'dim7';
+      } else if (kindText.includes('half-diminished') || kindAttr.includes('m7b5')) {
+        chordStr += 'm7b5';
+      } else if (kindText.includes('diminished') || kindAttr === 'dim') {
+        chordStr += 'dim';
+      } else if (kindText.includes('augmented') || kindAttr === 'aug') {
+        chordStr += 'aug';
+      } else if (kindText.includes('minor-sixth') || kindAttr === 'm6') {
+        chordStr += 'm6';
+      } else if (kindText.includes('major-sixth') || kindAttr === '6') {
+        chordStr += '6';
       } else if (kindText.includes('minor') || kindAttr === 'm') {
         chordStr += 'm';
       } else if (kindText.includes('dominant') || kindAttr === '7') {
         chordStr += '7';
       } else if (kindText.includes('suspended-fourth') || kindAttr === 'sus4') {
         chordStr += 'sus4';
-      } else if (kindText.includes('half-diminished') || kindAttr.includes('m7b5')) {
-        chordStr += 'm7b5';
+      } else if (kindText.includes('suspended-second') || kindAttr === 'sus2') {
+        chordStr += 'sus2';
+      } else if (kindText === 'power' || kindAttr === '5') {
+        chordStr += '5';
       }
 
       const bassEl = harmonyEl.child('bass');
@@ -869,6 +908,13 @@ export class MusicXmlImporter implements MusicImporter {
     };
 
     return isMajor ? majorFifthsMap[fifths] ?? NoteName.C : minorFifthsMap[fifths] ?? NoteName.A;
+  }
+
+  private isExplicitSectionLabel(text: string): boolean {
+    const t = text.toUpperCase().trim();
+    return /^(INTRO|INTRODUCCI[ÓO]N|VERSO|VERSE|ESTROFA|PRE[- ]?CORO|PRE[- ]?CHORUS|CORO|CHORUS|PUENTE|BRIDGE|INTERLUDE|INTERLUDIO|SOLO|INSTRUMENTAL|OUTRO|FINAL|TAG|VAMP|CODA)\b/.test(
+      t
+    );
   }
 
   private deduceSectionType(text: string): SectionType {

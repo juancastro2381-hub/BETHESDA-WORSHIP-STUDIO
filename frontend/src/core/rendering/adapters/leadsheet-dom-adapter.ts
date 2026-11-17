@@ -50,6 +50,7 @@ export interface LeadSheetData {
   displayKey: string;
   capo: number;
   totalMelodyNotes: number;
+  includeChords: boolean;
   sections: LeadSheetSectionData[];
 }
 
@@ -115,26 +116,32 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
       );
     }
 
+    const includeChords = view.activeRepresentations.includes('CHORDS');
+
     const measuresData: LeadSheetMeasureData[] = view.measures.map((measure) => {
       const timeSigStr = measure.timeSignature
         ? `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`
         : '—';
 
-      const chordsData = measure.chords.map((c) => ({
-        startTick: c.startTick,
-        symbol: c.displayString,
-        soundingSymbol: c.soundingDisplayString,
-        fingeringSymbol: c.fingeringChord.toString(view.viewPreference.chordNotationSystem),
-      }));
+      const chordsData = includeChords
+        ? measure.chords.map((c) => ({
+            startTick: c.startTick,
+            symbol: c.displayString,
+            soundingSymbol: c.soundingDisplayString,
+            fingeringSymbol: c.fingeringChord.toString(view.viewPreference.chordNotationSystem),
+          }))
+        : [];
 
-      // Alinear acordes con sílabas
+      // Alinear acordes con sílabas (en modo LYRICS_ONLY no incluir cifrado armónico)
       const tokens: LeadSheetTokenData[] = [];
+      const sortedLyrics = [...measure.lyrics].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
-      for (const lyr of measure.lyrics) {
-        let chordSymbol = lyr.chordAbove
-          ? lyr.chordAbove.toString(view.viewPreference.chordNotationSystem)
-          : undefined;
-        if (!chordSymbol && lyr.tickOffset !== null) {
+      for (const lyr of sortedLyrics) {
+        let chordSymbol =
+          includeChords && lyr.chordAbove
+            ? lyr.chordAbove.toString(view.viewPreference.chordNotationSystem)
+            : undefined;
+        if (includeChords && !chordSymbol && lyr.tickOffset !== null) {
           const chordAtTick = chordsData.find((c) => c.startTick !== null && c.startTick === lyr.tickOffset);
           chordSymbol = chordAtTick?.symbol;
         }
@@ -146,17 +153,19 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
         });
       }
 
-      for (const ch of chordsData) {
-        const alreadyInToken = tokens.some((t) =>
-          (ch.startTick !== null && t.tickOffset === ch.startTick && t.chord === ch.symbol) ||
-          (ch.startTick === null && t.chord === ch.symbol)
-        );
-        if (!alreadyInToken) {
-          tokens.push({
-            chord: ch.symbol,
-            isHyphenated: false,
-            tickOffset: ch.startTick,
-          });
+      if (includeChords) {
+        for (const ch of chordsData) {
+          const alreadyInToken = tokens.some((t) =>
+            (ch.startTick !== null && t.tickOffset === ch.startTick && t.chord === ch.symbol) ||
+            (ch.startTick === null && t.chord === ch.symbol)
+          );
+          if (!alreadyInToken) {
+            tokens.push({
+              chord: ch.symbol,
+              isHyphenated: false,
+              tickOffset: ch.startTick,
+            });
+          }
         }
       }
 
@@ -205,11 +214,13 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
     const data: LeadSheetData = {
       title: view.songTitle,
       concertKey: view.concertKey.toString(),
-      displayKey: view.viewPreference.capoFret > 0
-        ? view.measures[0]?.chords[0]?.fingeringChord.root.toString() ?? view.concertKey.toString()
-        : view.concertKey.toString(),
-      capo: view.capoFret,
+      displayKey:
+        includeChords && view.viewPreference.capoFret > 0
+          ? view.measures[0]?.chords[0]?.fingeringChord.root.toString() ?? view.concertKey.toString()
+          : view.concertKey.toString(),
+      capo: includeChords ? view.capoFret : 0,
       totalMelodyNotes,
+      includeChords,
       sections: sectionsData,
     };
 
@@ -277,6 +288,37 @@ export class LeadSheetDomAdapter extends BaseMusicRenderer<LeadSheetData> {
       secTitle.className = 'bethesda-section-title';
       secTitle.textContent = sec.label;
       secEl.appendChild(secTitle);
+
+      if (!data.includeChords) {
+        // Modo Letra Sola: reconstruir palabras continuas desde sílabas (begin/middle/end/single)
+        const lyricsContainer = document.createElement('div');
+        lyricsContainer.className = 'bethesda-lyrics-only-lines';
+        let hasAnyLyricInSec = false;
+
+        for (const m of sec.measures) {
+          const lyricTokens = m.tokens.filter((t) => typeof t.syllable === 'string' && t.syllable.length > 0);
+          if (lyricTokens.length === 0) continue;
+          hasAnyLyricInSec = true;
+          let lineText = '';
+          for (let idx = 0; idx < lyricTokens.length; idx++) {
+            const tok = lyricTokens[idx]!;
+            lineText += tok.syllable ?? '';
+            if (!tok.isHyphenated && idx < lyricTokens.length - 1) {
+              lineText += ' ';
+            }
+          }
+          const lineEl = document.createElement('p');
+          lineEl.className = 'bethesda-lyrics-only-line';
+          lineEl.textContent = lineText.trim();
+          lyricsContainer.appendChild(lineEl);
+        }
+
+        if (hasAnyLyricInSec) {
+          secEl.appendChild(lyricsContainer);
+          content.appendChild(secEl);
+        }
+        continue;
+      }
 
       const grid = document.createElement('div');
       grid.className = 'bethesda-measures-grid';

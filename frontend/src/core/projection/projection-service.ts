@@ -225,25 +225,52 @@ export class ProjectionService {
       // Preserva posiciones humanas/importadas explícitas en notationMetadata.tablature cuando coinciden exactamente con el pitch y afinación
       const derivedTab: TabPosition[] = [];
       if (isTabRequested && instrumentProfile.tuning) {
+        let prevFret: number | null = null;
+        let prevString: number | null = null;
+        const usedStringsByTick = new Map<number, Set<number>>();
+
         for (const note of allMeasureNotes) {
+          const tickKey = note.startTick ?? -1;
+          let usedAtTick = usedStringsByTick.get(tickKey);
+          if (!usedAtTick) {
+            usedAtTick = new Set<number>();
+            usedStringsByTick.set(tickKey, usedAtTick);
+          }
+
           const explicitPos = extractValidatedTablatureOverride(note, instrumentProfile, capoFret);
           const tabPos = explicitPos
             ? {
+                noteId: note.id,
                 stringNumber: explicitPos.stringNumber,
                 fret: explicitPos.fret,
                 canonicalPitch: note.pitch,
                 durationTicks: note.durationTicks,
                 voice: note.voice,
                 tuningReference: instrumentProfile.tuning.name,
+                isExplicitSource: true,
               }
-            : TablatureCalculator.calculatePosition(
-                note.pitch,
-                instrumentProfile.tuning,
-                capoFret,
-                note.durationTicks,
-                note.voice
-              );
+            : (() => {
+                const calculated = TablatureCalculator.calculatePosition(
+                  note.pitch,
+                  instrumentProfile.tuning!,
+                  capoFret,
+                  note.durationTicks,
+                  note.voice,
+                  {
+                    previousFret: prevFret,
+                    previousString: prevString,
+                    usedStringsAtTick: note.startTick !== null ? usedAtTick : undefined,
+                  }
+                );
+                return calculated ? { ...calculated, noteId: note.id } : null;
+              })();
+
           if (tabPos) {
+            if (note.startTick !== null) {
+              usedAtTick.add(tabPos.stringNumber);
+            }
+            prevFret = tabPos.fret;
+            prevString = tabPos.stringNumber;
             derivedTab.push(tabPos);
           } else {
             diagnostics.push({
@@ -251,6 +278,7 @@ export class ProjectionService {
               code: 'NOTE_OUT_OF_TAB_RANGE',
               message: `La nota ${note.pitch.toString()} en compás ${measure.number} excede el rango de tablatura para ${instrumentProfile.name}.`,
               context: {
+                noteId: note.id,
                 measureNumber: measure.number,
                 pitch: note.pitch.toString(),
                 midi: note.pitch.midiNumber,

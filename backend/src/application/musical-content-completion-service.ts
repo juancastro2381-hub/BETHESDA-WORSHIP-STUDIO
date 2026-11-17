@@ -1328,6 +1328,38 @@ export class MusicalContentCompletionService {
     });
   }
 
+  private normalizeTextForComparison(text: string): string {
+    return text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  private isNonLyricHeaderOrMetadataLine(line: string, normalizedTitle: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (/^[-_=*~]{3,}$/.test(trimmed)) return true;
+    if (/^(tonalidad|comp[aá]s|tempo|bpm|key|time|meter|autor|compositor|artist|artista|ccli|fuente|source|copyright)\s*:/i.test(trimmed)) {
+      return true;
+    }
+    if (
+      /\|/.test(trimmed) &&
+      /(tonalidad|comp[aá]s|tempo|bpm|key|time)/i.test(trimmed)
+    ) {
+      return true;
+    }
+    if (/^(canci[oó]n\s+original(\s+de\s+prueba)?|archivo\s+de\s+prueba|test\s+song)$/i.test(trimmed)) {
+      return true;
+    }
+    const normLine = this.normalizeTextForComparison(trimmed);
+    if (normalizedTitle && normLine === normalizedTitle) {
+      return true;
+    }
+    return false;
+  }
+
   private applyLyricsCompletion(
     base: CanonicalMusicPayload,
     fallbackTitle: string,
@@ -1338,17 +1370,31 @@ export class MusicalContentCompletionService {
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
 
+    const normalizedTitle = this.normalizeTextForComparison(base.title || fallbackTitle);
     const sectionPattern = /^\[(.+)\]$/;
     const parsedEntries: Array<{ sectionLabel?: string; text: string }> = [];
+    const strippedHeaderLines: string[] = [];
     let currentSection: string | undefined;
+    let seenFirstSection = false;
 
     for (const line of rawLines) {
       const m = line.match(sectionPattern);
       if (m) {
+        seenFirstSection = true;
         currentSection = m[1]!.trim();
+      } else if (!seenFirstSection && this.isNonLyricHeaderOrMetadataLine(line, normalizedTitle)) {
+        strippedHeaderLines.push(line);
+      } else if (this.isNonLyricHeaderOrMetadataLine(line, '')) {
+        strippedHeaderLines.push(line);
       } else {
         parsedEntries.push({ ...(currentSection ? { sectionLabel: currentSection } : {}), text: line });
       }
+    }
+
+    if (parsedEntries.length === 0) {
+      throw new ValidationError(
+        'El texto suministrado solo contiene encabezados o metadatos, pero no contiene versos ni letra real.'
+      );
     }
 
     const lyricsLines = parsedEntries.map((e) => e.text);
@@ -1357,6 +1403,7 @@ export class MusicalContentCompletionService {
       approvalStatus: 'DRAFT_REVIEW_REQUIRED',
       lyricsSource: lyricsInput.sourceOrigin ?? 'MANUAL_ENTRY',
       lyricsVerifiedByHuman: Boolean(lyricsInput.verifiedByHuman),
+      ...(strippedHeaderLines.length > 0 ? { lyricsHeaderMetadata: strippedHeaderLines } : {}),
     };
 
     // Si las letras se ingresaron SIN alineación explícita a compases de acordes: preservar en metadata sin fabricar alineación
@@ -1376,12 +1423,40 @@ export class MusicalContentCompletionService {
       });
     }
 
-    // Modo alineado por compás (explícito via measureAllocations o secuencial)
+    // Modo alineado por compás (explícito via measureAllocations, por sección coincidente o secuencial)
     const allocationMap = new Map<number, string>();
     if (lyricsInput.measureAllocations && lyricsInput.measureAllocations.length > 0) {
       for (const alloc of lyricsInput.measureAllocations) {
         if (alloc.text.trim()) {
           allocationMap.set(alloc.measureNumber, alloc.text.trim());
+        }
+      }
+    } else if (base.sections.length > 0 && parsedEntries.some((e) => e.sectionLabel)) {
+      // Alinear líneas dentro de sus secciones correspondientes en la canción existente
+      const sectionLineCounters = new Map<string, number>();
+      let fallbackMeasure = 1;
+      for (const entry of parsedEntries) {
+        const lbl = entry.sectionLabel ? this.normalizeTextForComparison(entry.sectionLabel) : '';
+        const matchedSection = lbl
+          ? base.sections.find((s) => this.normalizeTextForComparison(s.label) === lbl) ??
+            base.sections.find((s) => this.normalizeTextForComparison(s.label).includes(lbl))
+          : undefined;
+
+        if (matchedSection) {
+          const offset = sectionLineCounters.get(matchedSection.id) ?? 0;
+          const targetMeasure = matchedSection.startMeasure + offset;
+          if (targetMeasure <= matchedSection.startMeasure + matchedSection.measureCount - 1) {
+            allocationMap.set(targetMeasure, entry.text);
+          } else {
+            // Si hay más líneas que compases en la sección, concatenar en el último compás de la sección
+            const lastM = matchedSection.startMeasure + matchedSection.measureCount - 1;
+            const prev = allocationMap.get(lastM);
+            allocationMap.set(lastM, prev ? `${prev} / ${entry.text}` : entry.text);
+          }
+          sectionLineCounters.set(matchedSection.id, offset + 1);
+          fallbackMeasure = Math.max(fallbackMeasure, targetMeasure + 1);
+        } else {
+          allocationMap.set(fallbackMeasure++, entry.text);
         }
       }
     } else {

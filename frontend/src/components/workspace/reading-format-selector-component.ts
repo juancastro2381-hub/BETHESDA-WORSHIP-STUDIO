@@ -71,17 +71,19 @@ function getAvailabilityBadgeLabel(status: StandFormatAvailabilityStatus): strin
       return 'APROBADO';
     case 'AVAILABLE':
       return 'DISPONIBLE';
+    case 'PARTIAL':
+      return 'PARCIAL';
     case 'REVIEW_REQUIRED':
       return 'REVISIÓN REQUERIDA';
     case 'INCOMPLETE':
       return 'INCOMPLETO';
     case 'VALIDATION_REQUIRED':
-      return 'VALIDACIÓN REQUERIDA';
+      return 'VALIDACIÓN';
     case 'BLOCKED':
       return 'BLOQUEADO';
     case 'MISSING_CONTENT':
     default:
-      return 'CONTENIDO FALTANTE';
+      return 'FALTA CONTENIDO';
   }
 }
 

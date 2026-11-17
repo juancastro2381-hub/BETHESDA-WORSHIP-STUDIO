@@ -129,11 +129,19 @@ export const DatabaseSongsModal: React.FC<DatabaseSongsModalProps> = ({
     setSuccessMsg(null);
     try {
       const firstMeasure = activeSong.measures[0];
-      const defaultKey = firstMeasure?.keySignature ? firstMeasure.keySignature.toMusicalKey().toString() : 'C Major';
+      const defaultKey = firstMeasure?.keySignature
+        ? firstMeasure.keySignature.toMusicalKey().toString()
+        : typeof activeSong.metadata?.['key'] === 'string'
+        ? activeSong.metadata['key']
+        : 'C Major';
       const timeSignature = firstMeasure?.timeSignature
         ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
+        : typeof activeSong.metadata?.['timeSignature'] === 'string'
+        ? activeSong.metadata['timeSignature']
         : '4/4';
-      const defaultBpm = activeSong.timeline.tempoMap.events[0]?.bpm ?? 120;
+      const defaultBpm =
+        activeSong.timeline.tempoMap.events[0]?.bpm ??
+        (typeof activeSong.metadata?.['bpm'] === 'number' ? activeSong.metadata['bpm'] : 120);
 
       await client.createSong({
         title: activeSong.title,

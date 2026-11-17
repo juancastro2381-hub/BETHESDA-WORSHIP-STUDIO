@@ -821,28 +821,7 @@ export class BethesdaApiClient {
   }
 
   /**
-   * Retorna la URL de streaming base para un activo de audio.
-   */
-  public getAudioStreamUrl(audioId: string): string {
-    return `${this.baseUrl}/audio/${audioId}/stream`;
-  }
-
-  /**
-   * Obtiene una URL de streaming autenticada mediante un ticket temporal de corta duración (R1-P0).
-   * Compatible con el elemento nativo <audio> sin exponer el token de acceso JWT en URLs persistentes.
-   */
-  public async getAudioPlaybackStreamUrl(audioId: string): Promise<string> {
-    const res = await this.fetchWithAuth(`/audio/${audioId}/ticket`, { method: 'POST' });
-    if (!res.ok) {
-      throw await ApiError.fromResponse(res);
-    }
-    const json = await res.json();
-    const ticket = json.data?.ticket;
-    return `${this.baseUrl}/audio/${audioId}/stream?ticket=${encodeURIComponent(ticket)}`;
-  }
-
-  /**
-   * Descarga el archivo de audio como Blob para almacenamiento local en IndexedDB.
+   * Descarga el archivo de audio como Blob para almacenamiento o inspección privada.
    */
   public async downloadAudioBlob(audioId: string): Promise<{ blob: Blob; filename: string; mimeType: string }> {
     const res = await this.fetchWithAuth(`/audio/${audioId}/download`, { method: 'GET' });

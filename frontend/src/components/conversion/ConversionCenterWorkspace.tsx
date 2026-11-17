@@ -34,9 +34,12 @@ import {
   type SourceCapabilitySummary,
 } from '../../core/conversion/index.ts';
 import { CanonicalMusicPayload } from '../../core/canonical-model/canonical-music-payload.ts';
+import { type WorkspaceDiagnostic } from '../../core/workspace/types.ts';
+import { DiagnosticPanel } from '../workspace/DiagnosticPanel.tsx';
 
 export interface ConversionCenterWorkspaceProps {
   readonly initialSongId?: string | undefined;
+  readonly diagnostics?: readonly WorkspaceDiagnostic[] | undefined;
   readonly onOpenInMusicStand?: (
     payload: CanonicalMusicPayload,
     meta?: { title: string; artist?: string }
@@ -53,6 +56,7 @@ const CREATE_NEW_SONG_OPTION = '__CREATE_NEW_SONG__';
 
 export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps> = ({
   initialSongId,
+  diagnostics = [],
   onOpenInMusicStand,
   onOpenPersistedSongInStand,
   onClose,
@@ -2955,6 +2959,9 @@ export const ConversionCenterWorkspace: React.FC<ConversionCenterWorkspaceProps>
           )}
         </div>
       </div>
+
+      {/* Diagnósticos del Sistema reubicados fuera del Atril Digital de lectura */}
+      <DiagnosticPanel diagnostics={diagnostics} />
     </div>
   );
 };

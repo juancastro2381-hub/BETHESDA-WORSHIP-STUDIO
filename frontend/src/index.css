@@ -8992,13 +8992,18 @@ body {
 
 @media (max-width: 767px) {
   .workspace-viewport-area {
-    height: calc(100dvh - 265px - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 210px - env(safe-area-inset-bottom, 0px));
-    min-height: 300px;
+    height: calc(100dvh - 185px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 165px - env(safe-area-inset-bottom, 0px));
+    min-height: 340px;
+  }
+
+  .bethesda-renderer-viewport {
+    padding: 0.9rem 0.75rem;
+    min-height: 320px;
   }
 
   .musical-workspace-root {
-    padding-bottom: calc(8.5rem + env(safe-area-inset-bottom, 0px));
+    padding: 0.4rem 0.5rem calc(8.25rem + env(safe-area-inset-bottom, 0px));
   }
 
   .autoscroll-control-bar {

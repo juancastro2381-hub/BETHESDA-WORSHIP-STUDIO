@@ -196,6 +196,8 @@ describe('Musical Content Completeness Remediation & Playback Removal Suite', ()
     const offlineSrc = fs.readFileSync(path.join(rootDir, 'offline/OfflineInventoryModal.tsx'), 'utf8');
 
     assert.equal(workspaceSrc.includes('<AudioPlayerBar'), false);
+    assert.equal(workspaceSrc.includes('<DiagnosticPanel'), false, 'DiagnosticPanel no debe renderizarse en la vista de lectura del músico');
+    assert.equal(convSrc.includes('<DiagnosticPanel'), true, 'DiagnosticPanel debe permanecer accesible en el centro técnico/administrativo');
     assert.equal(convSrc.includes('<audio'), false);
     assert.equal(offlineSrc.includes('<audio'), false);
   });

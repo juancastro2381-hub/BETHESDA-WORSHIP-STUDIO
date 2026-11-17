@@ -36,7 +36,6 @@ import {
   zoomOutStand,
 } from '../../core/workspace/music-stand-controller.ts';
 import { MusicalScoreRenderer } from '../../core/rendering/react/musical-score-renderer.tsx';
-import { DiagnosticPanel } from './DiagnosticPanel.tsx';
 import { MusicalControls } from './MusicalControls.tsx';
 import { RendererStatus } from './RendererStatus.tsx';
 import { ScenarioPresets } from './ScenarioPresets.tsx';
@@ -758,6 +757,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
       {showConversionCenter ? (
         <ConversionCenterWorkspace
           initialSongId={persistedMeta?.songId}
+          diagnostics={diagnostics}
           onClose={() => setShowConversionCenter(false)}
           onOpenInMusicStand={(payload, meta) => {
             importSong(payload, { format: 'CHORD_PRO', sourceName: meta?.title });
@@ -935,9 +935,6 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           </main>
         </>
       )}
-
-      {/* 7. DiagnosticPanel: Diagnósticos estructurados colapsables */}
-      {!isMusicStandMode && <DiagnosticPanel diagnostics={diagnostics} />}
 
       {/* 8. Asistente Guiado de Completitud Musical por Formato (Scope 1C Integration) */}
       <FormatCompletionWizardModal

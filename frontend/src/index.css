@@ -8628,29 +8628,49 @@ body {
 }
 
 .format-completion-modal {
-  max-width: 820px;
-  width: min(96vw, 820px);
+  max-width: 920px;
+  width: min(96vw, 920px);
 }
 
 .completion-format-tabs {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.6rem;
 }
 
 .completion-format-tab {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
   gap: 0.4rem;
-  padding: 0.55rem 0.7rem;
+  min-width: 0;
+  padding: 0.65rem 0.85rem;
   border-radius: 8px;
   background: rgba(30, 41, 59, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.22);
   color: #e2e8f0;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 600;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.completion-format-tab > span:first-child {
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.completion-format-tab .fmt-status-pill {
+  max-width: 100%;
+  font-size: 0.65rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .completion-format-tab.active {

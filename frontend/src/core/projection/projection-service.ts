@@ -27,6 +27,7 @@ import {
 } from './derived-musical-view.ts';
 import { type InstrumentProfile } from './instrument-profile.ts';
 import { TablatureCalculator } from './tablature-calculator.ts';
+import { extractValidatedTablatureOverride } from '../workspace/stand-format-capabilities.ts';
 import {
   type ProjectionDiagnostic,
   type ProjectionStatus,
@@ -221,16 +222,27 @@ export class ProjectionService {
       );
 
       // Proyectar tablatura si fue solicitada y el instrumento tiene afinación
+      // Preserva posiciones humanas/importadas explícitas en notationMetadata.tablature cuando coinciden exactamente con el pitch y afinación
       const derivedTab: TabPosition[] = [];
       if (isTabRequested && instrumentProfile.tuning) {
         for (const note of allMeasureNotes) {
-          const tabPos = TablatureCalculator.calculatePosition(
-            note.pitch,
-            instrumentProfile.tuning,
-            capoFret,
-            note.durationTicks,
-            note.voice
-          );
+          const explicitPos = extractValidatedTablatureOverride(note, instrumentProfile, capoFret);
+          const tabPos = explicitPos
+            ? {
+                stringNumber: explicitPos.stringNumber,
+                fret: explicitPos.fret,
+                canonicalPitch: note.pitch,
+                durationTicks: note.durationTicks,
+                voice: note.voice,
+                tuningReference: instrumentProfile.tuning.name,
+              }
+            : TablatureCalculator.calculatePosition(
+                note.pitch,
+                instrumentProfile.tuning,
+                capoFret,
+                note.durationTicks,
+                note.voice
+              );
           if (tabPos) {
             derivedTab.push(tabPos);
           } else {

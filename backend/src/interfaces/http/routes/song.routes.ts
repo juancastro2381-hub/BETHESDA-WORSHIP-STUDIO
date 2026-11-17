@@ -6,15 +6,20 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { env } from '../../../config/env.ts';
 import {
+  CompletionProposalParamSchema,
+  CompletionRequestBodySchema,
   CreateSongBodySchema,
   CreateVersionBodySchema,
+  FormatCapabilitiesQuerySchema,
   ImportSourceBodySchema,
   ListSongsQuerySchema,
+  ReviewCompletionProposalBodySchema,
   SongIdParamSchema,
   VersionIdParamSchema,
 } from '../schemas/song.schemas.ts';
 import { SongService } from '../../../application/song-service.ts';
 import { IngestionPersistenceService } from '../../../application/ingestion-persistence-service.ts';
+import { MusicalContentCompletionService } from '../../../application/musical-content-completion-service.ts';
 import { DrizzleSongRepository } from '../../../repositories/song-repository.ts';
 import { DrizzleSongVersionRepository } from '../../../repositories/version-repository.ts';
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
@@ -26,6 +31,7 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
   const versionRepo = new DrizzleSongVersionRepository();
   const songService = new SongService(songRepo, versionRepo);
   const ingestionService = new IngestionPersistenceService(songService);
+  const completionService = new MusicalContentCompletionService(songRepo, versionRepo);
 
   const userRepo = new DrizzleUserRepository();
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
@@ -146,6 +152,100 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
       const updatedSong = await songService.getSong(params.songId);
       return reply.status(200).send({
         data: updatedSong,
+      });
+    }
+  );
+
+  // 9. GET /api/v1/songs/:songId/format-capabilities - Evaluador autoritativo de disponibilidad de los 4 formatos del atril
+  fastify.get(
+    '/:songId/format-capabilities',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const params = SongIdParamSchema.parse(request.params);
+      const query = FormatCapabilitiesQuerySchema.parse(request.query);
+      const result = await completionService.getSongFormatCapabilities(params.songId, query);
+      return reply.status(200).send({
+        data: result,
+      });
+    }
+  );
+
+  // 10. POST /api/v1/songs/:songId/completion/validate-preview - Validar y previsualizar completitud de contenido sin mutar versión canónica
+  fastify.post(
+    '/:songId/completion/validate-preview',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const params = SongIdParamSchema.parse(request.params);
+      const body = CompletionRequestBodySchema.parse(request.body);
+      const user = request.user!;
+      const preview = await completionService.validatePreview(params.songId, body as any, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+      return reply.status(200).send({
+        data: preview,
+      });
+    }
+  );
+
+  // 11. GET /api/v1/songs/:songId/completion/proposals - Listar propuestas de completitud musical pendientes o históricas
+  fastify.get(
+    '/:songId/completion/proposals',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const params = SongIdParamSchema.parse(request.params);
+      const proposals = await completionService.listCompletionProposalsForSong(params.songId);
+      return reply.status(200).send({
+        data: proposals,
+      });
+    }
+  );
+
+  // 12. POST /api/v1/songs/:songId/completion/proposals - Preservar fuente original y crear borrador de completitud (Requiere songs:update_draft)
+  fastify.post(
+    '/:songId/completion/proposals',
+    { preHandler: [authGuard.requirePermission('songs:update_draft', true)] },
+    async (request, reply) => {
+      const params = SongIdParamSchema.parse(request.params);
+      const body = CompletionRequestBodySchema.parse(request.body);
+      const user = request.user!;
+      const proposal = await completionService.createCompletionProposal(params.songId, body as any, {
+        id: user.sub,
+        role: user.role,
+        email: user.email,
+      });
+      return reply.status(201).send({
+        data: proposal,
+      });
+    }
+  );
+
+  // 13. POST /api/v1/songs/:songId/completion/proposals/:proposalId/review - Aprobar y publicar versión v(N+1) o rechazar propuesta (WORSHIP_LEADER/ADMIN/SUPER_ADMIN)
+  fastify.post(
+    '/:songId/completion/proposals/:proposalId/review',
+    { preHandler: [authGuard.requirePermission('songs:update_draft', true)] },
+    async (request, reply) => {
+      const params = CompletionProposalParamSchema.parse(request.params);
+      const body = ReviewCompletionProposalBodySchema.parse(request.body);
+      const user = request.user!;
+      const reviewed = await completionService.reviewProposal(
+        params.songId,
+        params.proposalId,
+        body.decision,
+        {
+          id: user.sub,
+          role: user.role,
+          email: user.email,
+        },
+        {
+          notes: body.notes,
+          versionName: body.versionName,
+          setAsCurrent: body.setAsCurrent,
+        }
+      );
+      return reply.status(200).send({
+        data: reviewed,
       });
     }
   );

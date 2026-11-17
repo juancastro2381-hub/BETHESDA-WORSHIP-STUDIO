@@ -77,3 +77,82 @@ export const ImportSourceBodySchema = z.object({
   versionName: z.string().optional(),
   tags: z.array(z.string()).optional(),
 });
+
+export const StandReadingFormatIdSchema = z.enum([
+  'STAFF_NOTATION',
+  'CHORD_CHART',
+  'LYRICS_ONLY',
+  'TABLATURE',
+]);
+
+export const FormatCapabilitiesQuerySchema = z.object({
+  versionId: z.string().uuid().optional(),
+  instrumentId: z.string().min(1).max(64).optional(),
+  capoFret: z.coerce.number().int().min(0).max(12).optional(),
+});
+
+export const CompletionProposalParamSchema = z.object({
+  songId: z.string().uuid({ message: 'El parámetro songId debe ser un UUID válido.' }),
+  proposalId: z.string().uuid({ message: 'El parámetro proposalId debe ser un UUID válido.' }),
+});
+
+export const CompletionRequestBodySchema = z.object({
+  targetFormat: StandReadingFormatIdSchema,
+  sourceKind: z.enum([
+    'MUSICXML',
+    'MIDI',
+    'CHORDPRO',
+    'WRITTEN_NOTES',
+    'LYRICS_TEXT',
+    'TABLATURE_ASCII',
+    'EXISTING_NOTES_FRET_OVERRIDE',
+  ]),
+  instrumentId: z.string().min(1).max(64).optional(),
+  filename: z.string().max(255).optional(),
+  rawText: z.string().max(6_000_000).optional(),
+  dataBase64: z.string().max(21_000_000).optional(),
+  writtenNotes: z.any().optional(),
+  lyricsData: z
+    .object({
+      lyricsText: z.string().max(200_000),
+      alignmentMode: z.enum(['BY_MEASURE', 'BY_SECTION', 'UNALIGNED']),
+      measureAllocations: z
+        .array(
+          z.object({
+            measureNumber: z.number().int().positive(),
+            text: z.string().max(1000),
+          })
+        )
+        .optional(),
+      sourceOrigin: z
+        .enum(['MANUAL_ENTRY', 'TXT_IMPORT', 'UNVERIFIED_AUDIO_SPEECH'])
+        .optional(),
+      verifiedByHuman: z.boolean().optional(),
+    })
+    .optional(),
+  tablatureConfig: z
+    .object({
+      instrumentId: z.string().min(1).max(64),
+      capoFret: z.number().int().min(0).max(12).optional(),
+      fretOverrides: z
+        .array(
+          z.object({
+            noteId: z.string().min(1),
+            stringNumber: z.number().int().min(1).max(12),
+            fret: z.number().int().min(0).max(24),
+          })
+        )
+        .optional(),
+      tablatureVerified: z.boolean().optional(),
+    })
+    .optional(),
+  mergeMode: z.enum(['MERGE_INTO_SONG', 'REPLACE_DRAFT']).optional(),
+  notes: z.string().max(2000).optional(),
+});
+
+export const ReviewCompletionProposalBodySchema = z.object({
+  decision: z.enum(['APPROVED', 'REJECTED', 'CORRECTION_REQUESTED']),
+  notes: z.string().max(2000).optional(),
+  versionName: z.string().min(1).max(255).optional(),
+  setAsCurrent: z.boolean().optional(),
+});

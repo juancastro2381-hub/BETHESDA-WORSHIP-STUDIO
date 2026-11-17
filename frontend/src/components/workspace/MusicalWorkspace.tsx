@@ -54,6 +54,14 @@ import { offlineManager } from '../../core/offline/offline-manager.ts';
 import { swLifecycleManager } from '../../core/offline/sw-lifecycle-manager.ts';
 import { VisualDocumentStand } from './VisualDocumentStand.tsx';
 import { ConversionCenterWorkspace } from '../conversion/ConversionCenterWorkspace.tsx';
+import {
+  FormatCompletionWizardModal,
+  createInitialFormatCompletionDraftState,
+  type FormatCompletionUnsavedDraftState,
+} from './FormatCompletionWizardModal.tsx';
+import { type ReadingFormatId } from './reading-format-selector-component.ts';
+import { type StandFormatCapabilityDescriptor } from '../../core/workspace/stand-format-capabilities.ts';
+import { type CompletionProposalSummaryDTO } from '../../core/api/api-client.ts';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -164,6 +172,19 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     undefined
   );
 
+  // Estado de Completitud de Contenido Musical y Capacidades Autoritativas del Servidor
+  const [serverFormatCapabilities, setServerFormatCapabilities] = useState<Partial<
+    Record<ReadingFormatId, StandFormatCapabilityDescriptor>
+  > | null>(null);
+  const [completionProposals, setCompletionProposals] = useState<CompletionProposalSummaryDTO[]>([]);
+  const [completionModalOpen, setCompletionModalOpen] = useState<boolean>(false);
+  const [completionTargetFormat, setCompletionTargetFormat] =
+    useState<ReadingFormatId>('STAFF_NOTATION');
+  const [completionUnsavedDraft, setCompletionUnsavedDraft] =
+    useState<FormatCompletionUnsavedDraftState>(() =>
+      createInitialFormatCompletionDraftState()
+    );
+
   // Referencia al contenedor de partitura y controlador de Autoscroll (WP-05)
   const viewportRef = useRef<HTMLElement | null>(null);
   const autoscroll = useAutoscroll(viewportRef);
@@ -177,6 +198,56 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     diagnostics,
     supportedRepresentations,
   } = viewResult;
+
+  const loadServerFormatCapabilities = useCallback(
+    async (songId: string, instrumentId: string, capoFret: number, versionId?: string) => {
+      if (!user || isReadOnlyOffline || !offlineManager.isOnline()) return;
+      try {
+        const res = await client.getSongFormatCapabilities(songId, {
+          instrumentId,
+          capoFret,
+          ...(versionId ? { versionId } : {}),
+        });
+        setServerFormatCapabilities(res.capabilities);
+        setCompletionProposals(res.proposals);
+        setPersistedSongStatus(res.songStatus);
+      } catch {
+        // Fallback silencioso a evaluación determinista local sin bloquear lectura
+      }
+    },
+    [client, user, isReadOnlyOffline]
+  );
+
+  useEffect(() => {
+    const sid = persistedMeta?.songId;
+    if (!sid) {
+      setServerFormatCapabilities(null);
+      setCompletionProposals([]);
+      return;
+    }
+    void loadServerFormatCapabilities(sid, state.selectedInstrumentId, state.capoFret, activeVersionId);
+  }, [
+    persistedMeta?.songId,
+    state.selectedInstrumentId,
+    state.capoFret,
+    activeVersionId,
+    loadServerFormatCapabilities,
+  ]);
+
+  useEffect(() => {
+    setCompletionUnsavedDraft((prev) => ({
+      ...createInitialFormatCompletionDraftState(
+        activeSong?.title || '',
+        state.selectedInstrumentId,
+        state.capoFret
+      ),
+      tabInstrumentId:
+        prev.tabInstrumentId ||
+        (state.selectedInstrumentId === 'bass' || state.selectedInstrumentId === 'electric_guitar'
+          ? state.selectedInstrumentId
+          : 'acoustic_guitar'),
+    }));
+  }, [persistedMeta?.songId]);
 
   // Resetear autoscroll ante cambio de canción activa o transición de repertorio
   useEffect(() => {
@@ -759,6 +830,12 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               isAuthenticated={user !== null}
               onSelectReadingFormat={setReadingFormat}
               onSavePreference={handleSavePreference}
+              serverFormatCapabilities={serverFormatCapabilities}
+              songStatus={persistedSongStatus}
+              onOpenCompletionWorkflow={(fmtId) => {
+                setCompletionTargetFormat(fmtId);
+                setCompletionModalOpen(true);
+              }}
             />
           )}
 
@@ -812,22 +889,41 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
                   El audio original asociado a esta canción está disponible en el reproductor superior, pero aún no se
                   ha aprobado una versión transcrita (ChordPro / MusicXML / Tablatura) mediante Revisión Humana.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setShowConversionCenter(true)}
-                  style={{
-                    marginTop: '12px',
-                    padding: '8px 16px',
-                    background: '#7c3aed',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    fontWeight: 600,
-                  }}
-                >
-                  🔬 Abrir Centro de Conversión para Analizar y Revisar Borrador Musical
-                </button>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center', marginTop: '12px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowConversionCenter(true)}
+                    style={{
+                      padding: '8px 16px',
+                      background: '#7c3aed',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                    }}
+                  >
+                    🔬 Abrir Centro de Conversión para Analizar y Revisar Borrador Musical
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCompletionTargetFormat('CHORD_CHART');
+                      setCompletionModalOpen(true);
+                    }}
+                    style={{
+                      padding: '8px 16px',
+                      background: 'rgba(37, 99, 235, 0.25)',
+                      color: '#bfdbfe',
+                      border: '1px solid rgba(96, 165, 250, 0.45)',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                    }}
+                  >
+                    🧩 Completar Letra, Melodía o Tablatura Manualmente
+                  </button>
+                </div>
               </div>
             ) : derivedView ? (
               <MusicalScoreRenderer
@@ -848,6 +944,35 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
 
       {/* 7. DiagnosticPanel: Diagnósticos estructurados colapsables */}
       {!isMusicStandMode && <DiagnosticPanel diagnostics={diagnostics} />}
+
+      {/* 8. Asistente Guiado de Completitud Musical por Formato (Scope 1C Integration) */}
+      <FormatCompletionWizardModal
+        isOpen={completionModalOpen}
+        initialTargetFormat={completionTargetFormat}
+        song={activeSong}
+        songId={persistedMeta?.songId}
+        songStatus={persistedSongStatus}
+        instrumentProfile={instrumentProfile}
+        capoFret={state.capoFret}
+        serverCapabilities={serverFormatCapabilities}
+        pendingProposals={completionProposals}
+        canApproveAndPublish={Boolean(
+          user && ['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(user.role)
+        )}
+        isAuthenticated={user !== null}
+        apiClient={client}
+        preservedDraftState={completionUnsavedDraft}
+        onUpdateDraftState={setCompletionUnsavedDraft}
+        onClose={() => setCompletionModalOpen(false)}
+        onSongVersionUpdated={async (sid) => {
+          await handleOpenPersistedSongInStand(sid);
+          await loadServerFormatCapabilities(sid, state.selectedInstrumentId, state.capoFret);
+        }}
+        onApplyLocalPreview={(previewPayload) => {
+          importSong(previewPayload, { format: 'MUSIC_XML', sourceName: previewPayload.title });
+          setCompletionModalOpen(false);
+        }}
+      />
     </div>
   );
 };

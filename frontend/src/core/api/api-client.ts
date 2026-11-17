@@ -40,6 +40,11 @@ import type {
   UpdateUserViewPreferencePayload,
   UserViewPreferenceData,
 } from './preference-types.ts';
+import type {
+  SongContentSummary,
+  StandFormatCapabilityDescriptor,
+  StandReadingFormatId,
+} from '../workspace/stand-format-capabilities.ts';
 
 export * from './setlist-types.ts';
 export * from './preference-types.ts';
@@ -1573,6 +1578,112 @@ export class BethesdaApiClient {
     const json = await res.json();
     return json.data;
   }
+
+  // ============================================================================
+  // COMPLETITUD DE CONTENIDO MUSICAL Y FORMATOS DEL ATRIL (SCOPE 1C INTEGRATION)
+  // ============================================================================
+
+  /**
+   * Consulta las capacidades autoritativas del backend para los 4 formatos del Atril Digital.
+   */
+  public async getSongFormatCapabilities(
+    songId: string,
+    params?: {
+      versionId?: string | undefined;
+      instrumentId?: string | undefined;
+      capoFret?: number | undefined;
+    }
+  ): Promise<SongFormatCapabilitiesDTO> {
+    const query = new URLSearchParams();
+    if (params?.versionId) query.set('versionId', params.versionId);
+    if (params?.instrumentId) query.set('instrumentId', params.instrumentId);
+    if (typeof params?.capoFret === 'number') query.set('capoFret', String(params.capoFret));
+    const qs = query.toString() ? `?${query.toString()}` : '';
+
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/format-capabilities${qs}`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Valida y previsualiza una aportación de contenido musical sin modificar la versión canónica.
+   */
+  public async validateSongCompletionPreview(
+    songId: string,
+    payload: MusicalCompletionPayloadDTO
+  ): Promise<CompletionPreviewResponseDTO> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/validate-preview`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Preserva el origen suministrado y crea una propuesta en revisión (PENDING_REVIEW) en `omr_proposals`.
+   */
+  public async createSongCompletionProposal(
+    songId: string,
+    payload: MusicalCompletionPayloadDTO
+  ): Promise<CompletionProposalSummaryDTO> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/proposals`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Aprueba y publica nueva versión v(N+1), solicita corrección o rechaza una propuesta de completitud.
+   */
+  public async reviewSongCompletionProposal(
+    songId: string,
+    proposalId: string,
+    payload: {
+      decision: 'APPROVED' | 'REJECTED' | 'CORRECTION_REQUESTED';
+      notes?: string | undefined;
+      versionName?: string | undefined;
+      setAsCurrent?: boolean | undefined;
+    }
+  ): Promise<{
+    proposal: CompletionProposalSummaryDTO;
+    capabilitiesResponse: SongFormatCapabilitiesDTO;
+  }> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/proposals/${encodeURIComponent(proposalId)}/review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
 }
 
 export type AudioConversionWorkflowStateDTO =
@@ -1836,5 +1947,87 @@ export interface AudioAssetDTO {
   readonly checksumSha256: string;
   readonly durationSeconds?: number | null;
   readonly createdAt: string;
+}
+
+export type CompletionSourceKindDTO =
+  | 'MUSICXML'
+  | 'MIDI'
+  | 'CHORDPRO'
+  | 'WRITTEN_NOTES'
+  | 'LYRICS_TEXT'
+  | 'TABLATURE_ASCII'
+  | 'EXISTING_NOTES_FRET_OVERRIDE';
+
+export interface MusicalCompletionPayloadDTO {
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly instrumentId?: string;
+  readonly filename?: string;
+  readonly rawText?: string;
+  readonly dataBase64?: string;
+  readonly writtenNotes?: Record<string, unknown>;
+  readonly lyricsData?: {
+    readonly lyricsText: string;
+    readonly alignmentMode: 'BY_MEASURE' | 'BY_SECTION' | 'UNALIGNED';
+    readonly measureAllocations?: ReadonlyArray<{
+      readonly measureNumber: number;
+      readonly text: string;
+    }>;
+    readonly sourceOrigin?: 'MANUAL_ENTRY' | 'TXT_IMPORT' | 'UNVERIFIED_AUDIO_SPEECH';
+    readonly verifiedByHuman?: boolean;
+  };
+  readonly tablatureConfig?: {
+    readonly instrumentId: string;
+    readonly capoFret?: number;
+    readonly fretOverrides?: ReadonlyArray<{
+      readonly noteId: string;
+      readonly stringNumber: number;
+      readonly fret: number;
+    }>;
+    readonly tablatureVerified?: boolean;
+  };
+  readonly mergeMode?: 'MERGE_INTO_SONG' | 'REPLACE_DRAFT';
+  readonly notes?: string;
+}
+
+export interface CompletionProposalSummaryDTO {
+  readonly proposalId: string;
+  readonly songId: string;
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly reviewStatus: 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED_FOR_IMPORT' | 'REJECTED' | 'COMMITTED';
+  readonly sourceFilename: string;
+  readonly sourceHash: string;
+  readonly createdAt: string;
+  readonly reviewedAt: string | null;
+  readonly notes: string | null;
+  readonly capabilitiesPreview: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly approvedVersionId?: string | null;
+  readonly approvedVersionNumber?: number | null;
+}
+
+export interface SongFormatCapabilitiesDTO {
+  readonly songId: string;
+  readonly songStatus: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+  readonly versionId: string;
+  readonly versionNumber: number;
+  readonly instrumentId: string;
+  readonly capoFret: number;
+  readonly contentSummary: SongContentSummary;
+  readonly capabilities: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly proposals: CompletionProposalSummaryDTO[];
+}
+
+export interface CompletionPreviewResponseDTO {
+  readonly songId: string;
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly valid: boolean;
+  readonly validationErrors: readonly string[];
+  readonly validationWarnings: readonly string[];
+  readonly contentSummary: SongContentSummary;
+  readonly capabilities: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly candidateCanonicalPayload: CanonicalMusicPayloadJSON;
+  readonly diagnostics: ReadonlyArray<{ code: string; severity: string; message: string }>;
 }
 

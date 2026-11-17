@@ -16,7 +16,8 @@ import { ChordNotationControl } from './ChordNotationControl.tsx';
 import { InstrumentSelector } from './InstrumentSelector.tsx';
 import { RepresentationSelector } from './RepresentationSelector.tsx';
 import { TranspositionControl } from './TranspositionControl.tsx';
-import { ReadingFormatSelector } from './ReadingFormatSelector.tsx';
+import { ReadingFormatSelector, type ReadingFormatId } from './ReadingFormatSelector.tsx';
+import { type StandFormatCapabilityDescriptor } from '../../core/workspace/stand-format-capabilities.ts';
 
 export interface MusicalControlsProps {
   readonly selectedInstrumentId: InstrumentId;
@@ -40,6 +41,9 @@ export interface MusicalControlsProps {
   readonly isAuthenticated?: boolean | undefined;
   readonly onSelectReadingFormat?: ((primary: ViewRepresentation, secondary: ViewRepresentation[]) => void) | undefined;
   readonly onSavePreference?: ((primary: ViewRepresentation, secondary: ViewRepresentation[]) => Promise<void>) | undefined;
+  readonly serverFormatCapabilities?: Partial<Record<ReadingFormatId, StandFormatCapabilityDescriptor>> | null | undefined;
+  readonly songStatus?: 'DRAFT' | 'APPROVED' | 'ARCHIVED' | undefined;
+  readonly onOpenCompletionWorkflow?: ((formatId: ReadingFormatId) => void) | undefined;
 }
 
 export const MusicalControls: React.FC<MusicalControlsProps> = ({
@@ -63,6 +67,9 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
   isAuthenticated,
   onSelectReadingFormat,
   onSavePreference,
+  serverFormatCapabilities,
+  songStatus,
+  onOpenCompletionWorkflow,
 }) => {
   const totalNotesCount = activeSong ? activeSong.getAllNotes().length : 0;
   const totalChordsCount = activeSong ? activeSong.getAllChords().length : 0;
@@ -88,6 +95,9 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
             isAuthenticated={Boolean(isAuthenticated)}
             onSelectFormat={onSelectReadingFormat}
             onSavePreference={onSavePreference}
+            serverFormatCapabilities={serverFormatCapabilities}
+            evaluationOptions={{ songStatus, capoFret }}
+            onOpenCompletionWorkflow={onOpenCompletionWorkflow}
           />
           {isHarmonicChordOnlyLeadSheet && activeSong && (
             <div

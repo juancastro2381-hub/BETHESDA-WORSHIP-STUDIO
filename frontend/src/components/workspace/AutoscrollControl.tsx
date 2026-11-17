@@ -1,6 +1,7 @@
 /**
  * @file AutoscrollControl.tsx
- * Exclusión estricta: Cero integración o exposición de hardware externo.
+ * @description Barra flotante responsiva de control de desplazamiento automático (Autoscroll)
+ * para el Atril Digital. Opera exclusivamente sobre la lectura visual sin reproducción de audio.
  */
 
 import React, { useEffect, useCallback } from 'react';
@@ -22,7 +23,6 @@ export const AutoscrollControl: React.FC<AutoscrollControlProps> = ({
   // Atajos de teclado para accesibilidad (Espacio = Play/Pause, Escape = Stop)
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Ignorar si el foco está en un input o select
       const activeEl = document.activeElement;
       if (
         activeEl &&
@@ -53,78 +53,97 @@ export const AutoscrollControl: React.FC<AutoscrollControlProps> = ({
     return null;
   }
 
+  const isScrolling = state.status === 'SCROLLING';
+  const isPaused = state.status === 'PAUSED';
+  const isIdleOrCompleted = state.status === 'IDLE' || state.status === 'COMPLETED';
+
   return (
-    <div className="autoscroll-control-bar" role="toolbar" aria-label="Control de Desplazamiento Automático (Autoscroll)">
+    <aside
+      className={`autoscroll-control-bar status-${state.status.toLowerCase()}`}
+      role="toolbar"
+      aria-label="Controles flotantes de lectura y desplazamiento automático"
+      data-status={state.status}
+    >
       <div className="autoscroll-main-actions">
-        {state.status === 'SCROLLING' ? (
+        {isScrolling ? (
           <button
             type="button"
-            className="btn-autoscroll btn-autoscroll-pause"
+            className="btn-autoscroll btn-autoscroll-pause is-active"
             onClick={pause}
+            aria-pressed="true"
             aria-label="Pausar desplazamiento automático"
             title="Pausar desplazamiento (Barra Espaciadora)"
           >
-            ⏸ Pausar
+            <span aria-hidden="true">⏸</span>
+            <span>Pausar</span>
           </button>
-        ) : state.status === 'PAUSED' ? (
+        ) : isPaused ? (
           <button
             type="button"
             className="btn-autoscroll btn-autoscroll-resume"
             onClick={resume}
-            aria-label="Reanudar desplazamiento automático"
-            title="Reanudar desplazamiento (Barra Espaciadora)"
+            aria-pressed="false"
+            aria-label="Reanudar desplazamiento automático desde la posición actual"
+            title="Reanudar desde la posición actual (Barra Espaciadora)"
           >
-            ▶ Reanudar
+            <span aria-hidden="true">▶</span>
+            <span>Reanudar</span>
           </button>
         ) : (
           <button
             type="button"
             className="btn-autoscroll btn-autoscroll-start"
             onClick={start}
+            aria-pressed="false"
             aria-label="Iniciar desplazamiento automático"
-            title="Iniciar desplazamiento (Barra Espaciadora)"
+            title="Iniciar desplazamiento automático (Barra Espaciadora)"
           >
-            ▶ Autoscroll
-          </button>
-        )}
-
-        {(state.status === 'SCROLLING' || state.status === 'PAUSED') && (
-          <button
-            type="button"
-            className="btn-autoscroll btn-autoscroll-stop"
-            onClick={stop}
-            aria-label="Detener desplazamiento"
-            title="Detener (Escape)"
-          >
-            ⏹ Detener
+            <span aria-hidden="true">▶</span>
+            <span>Autoscroll</span>
           </button>
         )}
 
         <button
           type="button"
+          className="btn-autoscroll btn-autoscroll-stop"
+          onClick={stop}
+          disabled={isIdleOrCompleted}
+          aria-label="Detener desplazamiento automático manteniendo la posición actual"
+          title="Detener manteniendo posición actual (Escape)"
+        >
+          <span aria-hidden="true">⏹</span>
+          <span>Detener</span>
+        </button>
+
+        <button
+          type="button"
           className="btn-autoscroll btn-autoscroll-reset"
           onClick={reset}
-          aria-label="Volver al inicio de la partitura"
-          title="Volver al inicio"
+          aria-label="Volver al inicio del contenido musical"
+          title="Volver al inicio (0%)"
         >
-          ⏮ Inicio
+          <span aria-hidden="true">⏮</span>
+          <span>Inicio</span>
         </button>
       </div>
 
-      <div className="autoscroll-speed-selector" role="group" aria-label="Velocidad de desplazamiento">
+      <div className="autoscroll-speed-selector" role="group" aria-label="Selector de velocidad de lectura">
         <span className="autoscroll-speed-label">Velocidad:</span>
-        {SPEED_OPTIONS.map((speedOption) => (
-          <button
-            key={speedOption}
-            type="button"
-            className={`btn-speed-option ${state.speed === speedOption ? 'active' : ''}`}
-            onClick={() => setSpeed(speedOption)}
-            aria-pressed={state.speed === speedOption}
-            aria-label={`Velocidad ${speedOption}x`}
-          >
-            {speedOption}x
-          </button>
-        ))}
+        {SPEED_OPTIONS.map((speedOption) => {
+          const isSelected = state.speed === speedOption;
+          return (
+            <button
+              key={speedOption}
+              type="button"
+              className={`btn-speed-option ${isSelected ? 'active' : ''}`}
+              onClick={() => setSpeed(speedOption)}
+              aria-pressed={isSelected}
+              aria-label={`Velocidad ${speedOption}x`}
+            >
+              {speedOption}x
+            </button>
+          );
+        })}
       </div>
 
       <div className="autoscroll-progress-indicator" aria-live="polite">
@@ -133,6 +152,7 @@ export const AutoscrollControl: React.FC<AutoscrollControlProps> = ({
             className="progress-bar-fill"
             style={{ width: `${state.progressPercentage}%` }}
             role="progressbar"
+            aria-label="Progreso de lectura"
             aria-valuenow={state.progressPercentage}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -140,6 +160,6 @@ export const AutoscrollControl: React.FC<AutoscrollControlProps> = ({
         </div>
         <span className="progress-text">{state.progressPercentage}%</span>
       </div>
-    </div>
+    </aside>
   );
 };

@@ -3,10 +3,12 @@
  * @description Hook de React para desplazamiento vertical automático suave a velocidad constante (WP-05).
  *
  * Características:
- * - Animación por requestAnimationFrame para 60 FPS garantizados sin jank visual.
+ * - Resolución aislada sobre el viewport musical dedicado (.workspace-viewport-area o visor visual anidado).
+ * - Acumulador de subpíxeles (virtualScrollTopRef) para movimiento suave independiente de la tasa
+ *   de refresco (60Hz / 120Hz / 144Hz) incluso a velocidades lentas (0.5x).
+ * - Velocidad basada estrictamente en delta de tiempo (con límite anti-saltos de 100ms/frame).
  * - Pausa inteligente ante interacción táctil o rueda del usuario con tiempo de gracia (gracePeriodMs).
  * - Pausa automática si la pestaña del navegador pierde visibilidad (Page Visibility API).
- * - Soporte para resolución dinámica del contenedor desplazable (atril visual o partitura canónica).
  * - Limpieza absoluta de temporizadores y frames al desmontar o detener.
  */
 
@@ -21,23 +23,30 @@ import {
 
 const AVAILABLE_SPEEDS: readonly AutoscrollSpeed[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
+function isElementScrollableY(el: HTMLElement): boolean {
+  const maxScroll = el.scrollHeight - el.clientHeight;
+  if (maxScroll <= 2) return false;
+  if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+    const overflowY = window.getComputedStyle(el).overflowY;
+    return overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+  }
+  return true;
+}
+
 /**
- * Resuelve el elemento que efectivamente posee desbordamiento desplazable en el DOM.
- * Si el contenedor provisto directamente no posee scroll, busca en sus descendientes
- * (.visual-document-viewport, .score-viewport-container o [data-scrollable="true"]).
+ * Resuelve exclusivamente el viewport de lectura musical dedicado:
+ * 1. Visor visual anidado (.visual-document-viewport, .score-viewport-container) si posee desbordamiento propio.
+ * 2. El propio contenedor musical dedicado (viewportRef.current / .workspace-viewport-area).
+ *
+ * Nunca desplaza el documento raíz ni la ventana externa, manteniendo estacionaria toda la página.
  */
 export function resolveScrollTarget(element: HTMLElement | null): HTMLElement | null {
   if (!element) return null;
 
-  const rawMaxScroll = element.scrollHeight - element.clientHeight;
-  if (rawMaxScroll > 2) {
-    return element;
-  }
-
   const nested = element.querySelector<HTMLElement>(
-    '.visual-document-viewport, .score-viewport-container, .workspace-viewport-area, [data-scrollable="true"]'
+    '.visual-document-viewport, .score-viewport-container'
   );
-  if (nested && nested.scrollHeight - nested.clientHeight > 2) {
+  if (nested && isElementScrollableY(nested)) {
     return nested;
   }
 
@@ -60,6 +69,8 @@ export function useAutoscroll(
 
   const animFrameIdRef = useRef<number | null>(null);
   const lastTimestampRef = useRef<number | null>(null);
+  const virtualScrollTopRef = useRef<number | null>(null);
+  const lastReportedProgressRef = useRef<number>(-1);
   const isUserScrollingRef = useRef<boolean>(false);
   const userScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -67,7 +78,6 @@ export function useAutoscroll(
   const statusRef = useRef<AutoscrollStatus>(status);
 
   speedRef.current = speed;
-  statusRef.current = status;
 
   // Detiene el frame actual de forma limpia e idempotente
   const cancelLoop = useCallback(() => {
@@ -80,7 +90,7 @@ export function useAutoscroll(
     lastTimestampRef.current = null;
   }, []);
 
-  // Bucle de animación suave
+  // Bucle de animación suave basado en tiempo transcurrido y acumulador subpíxel
   const scrollLoop = useCallback(
     (timestamp: number) => {
       const container = resolveScrollTarget(containerRef.current);
@@ -93,40 +103,66 @@ export function useAutoscroll(
       const scrollHeight = container.scrollHeight;
       const maxScroll = Math.max(0, scrollHeight - clientHeight);
 
-      if (maxScroll <= 0) {
-        // Contenido cabe completo en pantalla; nada que desplazar
+      if (maxScroll <= 2) {
+        statusRef.current = 'COMPLETED';
         setStatus('COMPLETED');
+        setCurrentScrollTop(0);
+        setMaxScrollTop(0);
+        setProgressPercentage(100);
         cancelLoop();
         return;
       }
 
       if (lastTimestampRef.current === null) {
         lastTimestampRef.current = timestamp;
+        virtualScrollTopRef.current = container.scrollTop;
+        animFrameIdRef.current = requestAnimationFrame(scrollLoop);
+        return;
       }
 
-      const deltaSeconds = (timestamp - lastTimestampRef.current) / 1000;
+      // Acotar deltaSeconds a máximo 100ms para evitar saltos bruscos tras cambios de pestaña o pausas del hilo
+      const rawDeltaSeconds = (timestamp - lastTimestampRef.current) / 1000;
+      const deltaSeconds = Math.min(0.1, Math.max(0, rawDeltaSeconds));
       lastTimestampRef.current = timestamp;
 
-      // Calcular avance en píxeles según velocidad configurada
-      const pixelsToAdvance = deltaSeconds * baseSpeed * speedRef.current;
+      if (isUserScrollingRef.current) {
+        virtualScrollTopRef.current = container.scrollTop;
+      } else {
+        const basePos =
+          virtualScrollTopRef.current !== null &&
+          Math.abs(virtualScrollTopRef.current - container.scrollTop) <= 2
+            ? virtualScrollTopRef.current
+            : container.scrollTop;
 
-      if (!isUserScrollingRef.current) {
-        container.scrollTop += pixelsToAdvance;
+        const pixelsToAdvance = deltaSeconds * baseSpeed * speedRef.current;
+        const nextTop = Math.min(maxScroll, basePos + pixelsToAdvance);
+        virtualScrollTopRef.current = nextTop;
+        container.scrollTop = nextTop;
       }
 
       const currentScroll = container.scrollTop;
-      setCurrentScrollTop(currentScroll);
-      setMaxScrollTop(maxScroll);
-      setProgressPercentage(Math.min(100, Math.round((currentScroll / maxScroll) * 100)));
+      const nextProgress = Math.min(100, Math.round((currentScroll / maxScroll) * 100));
 
-      // Verificación de fin de partitura (llegó al fondo con margen de 2px)
+      if (nextProgress !== lastReportedProgressRef.current) {
+        lastReportedProgressRef.current = nextProgress;
+        setCurrentScrollTop(Math.round(currentScroll));
+        setMaxScrollTop(maxScroll);
+        setProgressPercentage(nextProgress);
+      }
+
+      // Detener automáticamente al alcanzar el final del contenido musical
       if (currentScroll >= maxScroll - 2) {
+        container.scrollTop = maxScroll;
+        virtualScrollTopRef.current = maxScroll;
+        statusRef.current = 'COMPLETED';
         setStatus('COMPLETED');
+        setCurrentScrollTop(maxScroll);
+        setMaxScrollTop(maxScroll);
+        setProgressPercentage(100);
         cancelLoop();
         return;
       }
 
-      // Continuar siguiente frame evitando loops duplicados
       animFrameIdRef.current = requestAnimationFrame(scrollLoop);
     },
     [containerRef, baseSpeed, cancelLoop]
@@ -142,30 +178,48 @@ export function useAutoscroll(
       return;
     }
 
-    // Cancelar cualquier frame huérfano previo antes de lanzar nuevo
     cancelLoop();
 
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (maxScroll <= 2) {
+      statusRef.current = 'COMPLETED';
+      setStatus('COMPLETED');
+      setMaxScrollTop(0);
+      setProgressPercentage(100);
+      return;
+    }
+
+    // Si estaba COMPLETED al final y se vuelve a iniciar, regresar al principio limpiamente
+    if (statusRef.current === 'COMPLETED' && container.scrollTop >= maxScroll - 2) {
+      container.scrollTop = 0;
+    }
+
+    virtualScrollTopRef.current = container.scrollTop;
+    lastReportedProgressRef.current = -1;
+    statusRef.current = 'SCROLLING';
     setStatus('SCROLLING');
     lastTimestampRef.current = null;
     animFrameIdRef.current = requestAnimationFrame(scrollLoop);
   }, [containerRef, cancelLoop, scrollLoop]);
 
-  // Pausar desplazamiento
+  // Pausar desplazamiento manteniendo la posición actual
   const pause = useCallback(() => {
     cancelLoop();
+    statusRef.current = 'PAUSED';
     setStatus('PAUSED');
   }, [cancelLoop]);
 
-  // Reanudar desplazamiento
+  // Reanudar desplazamiento desde la posición actual
   const resume = useCallback(() => {
     if (statusRef.current === 'PAUSED') {
       start();
     }
   }, [start]);
 
-  // Detener y resetear
+  // Detener
   const stop = useCallback(() => {
     cancelLoop();
+    statusRef.current = 'IDLE';
     setStatus('IDLE');
   }, [cancelLoop]);
 
@@ -173,7 +227,7 @@ export function useAutoscroll(
   const togglePlayPause = useCallback(() => {
     if (statusRef.current === 'SCROLLING') {
       pause();
-    } else if (statusRef.current === 'PAUSED' || statusRef.current === 'IDLE') {
+    } else if (statusRef.current === 'PAUSED' || statusRef.current === 'IDLE' || statusRef.current === 'COMPLETED') {
       start();
     }
   }, [start, pause]);
@@ -184,14 +238,18 @@ export function useAutoscroll(
     const container = resolveScrollTarget(containerRef.current);
     if (container) {
       container.scrollTop = 0;
+      virtualScrollTopRef.current = 0;
+      lastReportedProgressRef.current = 0;
       setCurrentScrollTop(0);
       setProgressPercentage(0);
     }
+    statusRef.current = 'IDLE';
     setStatus('IDLE');
   }, [containerRef, cancelLoop]);
 
   // Ajuste de velocidad
   const changeSpeed = useCallback((newSpeed: AutoscrollSpeed) => {
+    speedRef.current = newSpeed;
     setSpeed(newSpeed);
   }, []);
 
@@ -200,6 +258,7 @@ export function useAutoscroll(
     if (currentIndex >= 0 && currentIndex < AVAILABLE_SPEEDS.length - 1) {
       const nextSpeed = AVAILABLE_SPEEDS[currentIndex + 1];
       if (nextSpeed !== undefined) {
+        speedRef.current = nextSpeed;
         setSpeed(nextSpeed);
       }
     }
@@ -210,15 +269,16 @@ export function useAutoscroll(
     if (currentIndex > 0) {
       const prevSpeed = AVAILABLE_SPEEDS[currentIndex - 1];
       if (prevSpeed !== undefined) {
+        speedRef.current = prevSpeed;
         setSpeed(prevSpeed);
       }
     }
   }, []);
 
-  // 1. Detección de interacción manual del usuario (scroll táctil / rueda)
+  // 1. Detección de interacción manual del usuario (rueda / táctil) exclusivamente sobre el viewport musical
   useEffect(() => {
-    const container = resolveScrollTarget(containerRef.current);
-    if (!container || !pauseOnUserScroll) return;
+    const containerEl = containerRef.current;
+    if (!containerEl || !pauseOnUserScroll) return;
 
     const handleUserInteraction = () => {
       if (statusRef.current === 'SCROLLING') {
@@ -228,23 +288,28 @@ export function useAutoscroll(
         }
         userScrollTimeoutRef.current = setTimeout(() => {
           isUserScrollingRef.current = false;
+          const activeTarget = resolveScrollTarget(containerRef.current);
+          if (activeTarget) {
+            virtualScrollTopRef.current = activeTarget.scrollTop;
+          }
         }, gracePeriodMs);
       }
     };
 
-    container.addEventListener('wheel', handleUserInteraction, { passive: true });
-    container.addEventListener('touchstart', handleUserInteraction, { passive: true });
+    containerEl.addEventListener('wheel', handleUserInteraction, { passive: true });
+    containerEl.addEventListener('touchstart', handleUserInteraction, { passive: true });
 
     return () => {
-      container.removeEventListener('wheel', handleUserInteraction);
-      container.removeEventListener('touchstart', handleUserInteraction);
+      containerEl.removeEventListener('wheel', handleUserInteraction);
+      containerEl.removeEventListener('touchstart', handleUserInteraction);
       if (userScrollTimeoutRef.current) {
         clearTimeout(userScrollTimeoutRef.current);
+        userScrollTimeoutRef.current = null;
       }
     };
   }, [containerRef, pauseOnUserScroll, gracePeriodMs]);
 
-  // 2. Detección de visibilidad de pestaña (pausar si la pestaña se oculta)
+  // 2. Detección de visibilidad de pestaña (pausar si la pestaña se oculta sin saltos al volver)
   useEffect(() => {
     if (typeof document === 'undefined') return;
 
@@ -259,6 +324,37 @@ export function useAutoscroll(
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [pause]);
+
+  // 2b. Sincronizar indicador de progreso al desplazar manualmente dentro del viewport musical o redimensionar
+  useEffect(() => {
+    const containerEl = containerRef.current;
+
+    const syncProgress = () => {
+      if (statusRef.current === 'SCROLLING') return;
+      const target = resolveScrollTarget(containerRef.current);
+      if (!target) return;
+      const maxScroll = Math.max(0, target.scrollHeight - target.clientHeight);
+      const currentScroll = target.scrollTop;
+      const nextProgress = maxScroll > 2 ? Math.min(100, Math.round((currentScroll / maxScroll) * 100)) : 0;
+      if (nextProgress !== lastReportedProgressRef.current) {
+        lastReportedProgressRef.current = nextProgress;
+        setCurrentScrollTop(Math.round(currentScroll));
+        setMaxScrollTop(maxScroll);
+        setProgressPercentage(nextProgress);
+      }
+    };
+
+    containerEl?.addEventListener('scroll', syncProgress, { passive: true });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', syncProgress, { passive: true });
+    }
+    return () => {
+      containerEl?.removeEventListener('scroll', syncProgress);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', syncProgress);
+      }
+    };
+  }, [containerRef]);
 
   // 3. Limpieza absoluta en desmontaje
   useEffect(() => {

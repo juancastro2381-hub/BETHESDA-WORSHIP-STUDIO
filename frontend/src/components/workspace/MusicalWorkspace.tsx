@@ -847,10 +847,11 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             isVisible={activeSong.measures.length > 0 || isVisualDocument}
           />
 
-          {/* 6. Viewport de Renderizado Musical Real */}
+          {/* 6. Viewport de Renderizado Musical Real (Contenedor de scroll aislado) */}
           <main
             ref={viewportRef}
             className="workspace-viewport-area"
+            data-scrollable="true"
             role="main"
             aria-label="Partitura y Notación Musical"
             style={

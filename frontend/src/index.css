@@ -1087,9 +1087,17 @@ body {
   margin-right: 0.25rem;
 }
 
-/* Viewport Area */
+/* Viewport Area — Isolated Musical Scroll Container */
 .workspace-viewport-area {
   width: 100%;
+  height: clamp(440px, calc(100dvh - 240px), 820px);
+  max-height: calc(100dvh - 180px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 12px;
+  scroll-behavior: auto;
 }
 
 .workspace-empty-state,
@@ -5548,33 +5556,64 @@ body {
    ========================================================================== */
 
 .autoscroll-control-bar {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.75rem;
-  padding: 0.65rem 1.25rem;
-  background: rgba(15, 23, 42, 0.92);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  border-radius: 8px;
+  padding: 0.65rem 1.15rem;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
   margin: 0.5rem 0;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.autoscroll-control-bar.status-scrolling {
+  border-color: rgba(59, 130, 246, 0.65);
+  box-shadow: 0 8px 28px rgba(37, 99, 235, 0.22);
+}
+
+.autoscroll-control-bar.status-paused {
+  border-color: rgba(16, 185, 129, 0.55);
 }
 
 .autoscroll-main-actions {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .btn-autoscroll {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 36px;
   padding: 0.45rem 0.9rem;
-  border-radius: 6px;
+  border-radius: 7px;
   font-weight: 600;
   font-size: 0.85rem;
   cursor: pointer;
   transition: all 0.15s ease;
   border: 1px solid transparent;
+}
+
+.btn-autoscroll:focus-visible,
+.btn-speed-option:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+.btn-autoscroll:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn-autoscroll-start {
@@ -8440,7 +8479,9 @@ body {
 }
 
 .musical-workspace-root.music-stand-mode .workspace-viewport-area {
-  min-height: calc(100dvh - 140px);
+  height: calc(100dvh - 150px);
+  max-height: calc(100dvh - 130px);
+  min-height: 420px;
 }
 
 .musical-workspace-root.high-contrast-stand {
@@ -8932,6 +8973,77 @@ body {
   }
 
   .completion-actions-bar button {
+    width: 100%;
+  }
+}
+
+/* Floating Digital Music Stand Controls — Mobile & Tablet Responsiveness */
+@media (max-width: 1023px) {
+  .workspace-viewport-area {
+    height: clamp(400px, calc(100dvh - 210px), 780px);
+    max-height: calc(100dvh - 160px);
+  }
+
+  .btn-autoscroll,
+  .btn-speed-option {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 767px) {
+  .workspace-viewport-area {
+    height: calc(100dvh - 265px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 210px - env(safe-area-inset-bottom, 0px));
+    min-height: 300px;
+  }
+
+  .musical-workspace-root {
+    padding-bottom: calc(8.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .autoscroll-control-bar {
+    position: fixed;
+    top: auto;
+    bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+    left: max(0.5rem, env(safe-area-inset-left, 0px));
+    right: max(0.5rem, env(safe-area-inset-right, 0px));
+    z-index: 60;
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    gap: 0.45rem;
+    border-radius: 14px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48);
+  }
+
+  .autoscroll-main-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .autoscroll-main-actions .btn-autoscroll {
+    flex: 1 1 auto;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.8rem;
+  }
+
+  .autoscroll-speed-selector {
+    width: 100%;
+    overflow-x: auto;
+    justify-content: space-between;
+  }
+
+  .autoscroll-speed-label {
+    display: none;
+  }
+
+  .autoscroll-speed-selector .btn-speed-option {
+    flex: 1 1 0;
+    min-height: 36px;
+    padding: 0.25rem 0.35rem;
+    text-align: center;
+  }
+
+  .autoscroll-progress-indicator {
     width: 100%;
   }
 }

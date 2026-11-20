@@ -1057,6 +1057,9 @@ body {
 
 .quick-scenarios-body {
   padding: 0 0.85rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
 }
 
 .controls-grid {

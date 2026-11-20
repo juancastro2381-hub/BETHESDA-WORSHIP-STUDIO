@@ -614,21 +614,9 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         </div>
       )}
 
-      {/* 1. Barra de Selección de Canción e Importación Real / Base de Datos / Setlists (oculta en Modo Atril) */}
+      {/* 1. Barra de Herramientas del Músico: Repertorios, Catálogo BD, Conversión e Importación (oculta en Modo Atril) */}
       {!isMusicStandMode && (
         <div className="catalog-and-import-bar">
-          <SongSelector
-            activeSongTitle={activeSong.title}
-            onSelectSong={(song) => {
-              selectSong(song);
-              setShowUploader(false);
-              setShowDbModal(false);
-              setShowSetlistsModal(false);
-              if (setlistExecution.loadedSetlist) {
-                setlistExecution.notifyOffSetlistSongSelected(song.title);
-              }
-            }}
-          />
 
           {/* Decisión 3 (Opción B): Ocultar 'Repertorios de Culto' para usuarios no autenticados */}
           {user !== null && (
@@ -937,13 +925,25 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             )}
           </main>
 
-          {/* 7. Vistas rápidas / Escenarios de prueba (área secundaria colapsable — fuera del flujo principal) */}
+          {/* 7. Vistas rápidas y canciones canónicas de prueba (área secundaria colapsable — fuera del flujo principal) */}
           {!isMusicStandMode && (
             <details className="quick-scenarios-drawer">
               <summary className="quick-scenarios-summary">
-                Vistas rápidas / Escenarios de prueba (previsualización no destructiva)
+                Vistas rápidas y canciones de prueba (QA / previsualización no destructiva)
               </summary>
               <div className="quick-scenarios-body">
+                <SongSelector
+                  activeSongTitle={activeSong.title}
+                  onSelectSong={(song) => {
+                    selectSong(song);
+                    setShowUploader(false);
+                    setShowDbModal(false);
+                    setShowSetlistsModal(false);
+                    if (setlistExecution.loadedSetlist) {
+                      setlistExecution.notifyOffSetlistSongSelected(song.title);
+                    }
+                  }}
+                />
                 <ScenarioPresets
                   activePresetId={state.activePresetId}
                   activeSong={activeSong}

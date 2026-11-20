@@ -19,6 +19,8 @@ import { Chord } from '../../music-theory/chord.ts';
 import { useMusicalWorkspace } from '../use-musical-workspace.ts';
 import { GOLDEN_SCENARIO_PRESETS } from '../presets.ts';
 import { ScenarioPresets } from '../../../components/workspace/ScenarioPresets.tsx';
+import { MusicalControls } from '../../../components/workspace/MusicalControls.tsx';
+import { InstrumentRegistry } from '../../projection/instrument-profile.ts';
 
 function createChordOnlySong(title = 'Tu Luz Me Guía'): CanonicalMusicPayload {
   return new CanonicalMusicPayload({
@@ -83,5 +85,68 @@ describe('Scenario Cards Non-Destructive Contextual Preview Suite', () => {
       assert.equal(preset.description.includes('Fuente ChordPro'), false);
       assert.equal(preset.description.includes('Canción en Sol Mayor'), false);
     }
+  });
+
+  it('3. MusicalControls should consolidate primary format selection in ReadingFormatSelector, hide duplicate RepresentationSelector, and adapt CapoControl by instrument', () => {
+    const registry = new InstrumentRegistry();
+    const guitar = registry.getOrThrow('acoustic_guitar');
+    const piano = registry.getOrThrow('acoustic_piano');
+    const chordOnlySong = createChordOnlySong('Obra Solo Acordes');
+
+    const guitarHtml = renderToStaticMarkup(
+      React.createElement(MusicalControls, {
+        selectedInstrumentId: guitar.id,
+        availableInstruments: registry.getAll(),
+        instrumentProfile: guitar,
+        supportedRepresentations: Array.from(guitar.supportedRepresentations),
+        primaryRepresentation: 'TABLATURE',
+        secondaryRepresentations: ['CHORDS'],
+        capoFret: 2,
+        transpositionSemitones: 0,
+        chordNotationSystem: 'STANDARD',
+        onSelectInstrument: () => {},
+        onSelectPrimaryRepresentation: () => {},
+        onToggleSecondaryRepresentation: () => {},
+        onSetCapo: () => {},
+        onSetTransposition: () => {},
+        onSetChordNotation: () => {},
+        activeSong: chordOnlySong,
+        onSelectReadingFormat: () => {},
+      })
+    );
+
+    assert.equal(
+      guitarHtml.includes('Representación Principal (Exclusiva)'),
+      false,
+      'No debe duplicar el selector primario de representación'
+    );
+    assert.ok(guitarHtml.includes('Cejilla (Capo):'), 'Guitarra debe mostrar control de Capo');
+    assert.ok(guitarHtml.includes('Capas adicionales:'), 'Debe mostrar chips contextuales para acordes existentes');
+    assert.equal(guitarHtml.includes('+ Letra'), false, 'No debe ofrecer capa de Letra si la obra tiene 0 letras');
+
+    const pianoHtml = renderToStaticMarkup(
+      React.createElement(MusicalControls, {
+        selectedInstrumentId: piano.id,
+        availableInstruments: registry.getAll(),
+        instrumentProfile: piano,
+        supportedRepresentations: Array.from(piano.supportedRepresentations),
+        primaryRepresentation: 'GRAND_STAFF',
+        secondaryRepresentations: [],
+        capoFret: 0,
+        transpositionSemitones: 0,
+        chordNotationSystem: 'STANDARD',
+        onSelectInstrument: () => {},
+        onSelectPrimaryRepresentation: () => {},
+        onToggleSecondaryRepresentation: () => {},
+        onSetCapo: () => {},
+        onSetTransposition: () => {},
+        onSetChordNotation: () => {},
+        activeSong: chordOnlySong,
+        onSelectReadingFormat: () => {},
+      })
+    );
+
+    assert.equal(pianoHtml.includes('Cejilla (Capo):'), false, 'Piano no debe mostrar control irrelevante de Capo');
+    assert.ok(pianoHtml.includes('Gran Pentagrama'), 'Piano debe mostrar etiqueta Gran Pentagrama en ReadingFormatSelector');
   });
 });

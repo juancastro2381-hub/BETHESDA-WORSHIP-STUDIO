@@ -614,18 +614,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         </div>
       )}
 
-      {/* 1. Modos de Previsualización Contextual (No destructivos sobre la canción activa — oculto en Modo Atril) */}
-      {!isMusicStandMode && (
-        <ScenarioPresets
-          activePresetId={state.activePresetId}
-          activeSong={activeSong}
-          activeScenarioPreview={activeScenarioPreview}
-          onApplyPreset={previewScenario}
-          onExitPreview={exitScenarioPreview}
-        />
-      )}
-
-      {/* 2. Barra de Selección de Canción e Importación Real / Base de Datos / Setlists (oculta en Modo Atril) */}
+      {/* 1. Barra de Selección de Canción e Importación Real / Base de Datos / Setlists (oculta en Modo Atril) */}
       {!isMusicStandMode && (
         <div className="catalog-and-import-bar">
           <SongSelector
@@ -838,6 +827,23 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             />
           )}
 
+          {/* 5a. Indicador discreto cuando una vista rápida / escenario está activo */}
+          {!isMusicStandMode && activeScenarioPreview !== null && (
+            <div className="scenario-preview-banner" role="status" aria-live="polite">
+              <span>
+                <strong>Vista previa contextual activa ({activeScenarioPreview})</strong> sobre{' '}
+                <em>{activeSong.title}</em> — la canción canónica y tu configuración original permanecen protegidas.
+              </span>
+              <button
+                type="button"
+                className="btn-exit-scenario-preview"
+                onClick={exitScenarioPreview}
+              >
+                Volver a mi vista original
+              </button>
+            </div>
+          )}
+
           {/* 5b. AutoscrollControl: Desplazamiento Automático Manos Libres (WP-05 — Sin Pedales) */}
           <AutoscrollControl
             controller={autoscroll}
@@ -930,6 +936,24 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               </div>
             )}
           </main>
+
+          {/* 7. Vistas rápidas / Escenarios de prueba (área secundaria colapsable — fuera del flujo principal) */}
+          {!isMusicStandMode && (
+            <details className="quick-scenarios-drawer">
+              <summary className="quick-scenarios-summary">
+                Vistas rápidas / Escenarios de prueba (previsualización no destructiva)
+              </summary>
+              <div className="quick-scenarios-body">
+                <ScenarioPresets
+                  activePresetId={state.activePresetId}
+                  activeSong={activeSong}
+                  activeScenarioPreview={activeScenarioPreview}
+                  onApplyPreset={previewScenario}
+                  onExitPreview={exitScenarioPreview}
+                />
+              </div>
+            </details>
+          )}
         </>
       )}
 

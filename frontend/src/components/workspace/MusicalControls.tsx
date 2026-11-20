@@ -14,10 +14,15 @@ import { instrumentSupportsCapo } from '../../core/workspace/use-musical-workspa
 import { CapoControl } from './CapoControl.tsx';
 import { ChordNotationControl } from './ChordNotationControl.tsx';
 import { InstrumentSelector } from './InstrumentSelector.tsx';
-import { RepresentationSelector } from './RepresentationSelector.tsx';
 import { TranspositionControl } from './TranspositionControl.tsx';
 import { ReadingFormatSelector, type ReadingFormatId } from './ReadingFormatSelector.tsx';
 import { type StandFormatCapabilityDescriptor } from '../../core/workspace/stand-format-capabilities.ts';
+
+const SECONDARY_OVERLAY_META: Partial<Record<ViewRepresentation, { label: string; desc: string }>> = {
+  CHORDS: { label: 'Acordes', desc: 'Mostrar cifrado armónico sobre la vista actual' },
+  LYRICS: { label: 'Letra', desc: 'Mostrar texto lírico alineado' },
+  SECTION_MARKERS: { label: 'Secciones', desc: 'Mostrar Verso, Coro, Puente, Intro' },
+};
 
 export interface MusicalControlsProps {
   readonly selectedInstrumentId: InstrumentId;
@@ -74,6 +79,7 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
   const totalNotesCount = activeSong ? activeSong.getAllNotes().length : 0;
   const totalChordsCount = activeSong ? activeSong.getAllChords().length : 0;
   const totalLyricsCount = activeSong ? activeSong.getAllLyrics().length : 0;
+  const hasSectionMarkers = Boolean(activeSong && activeSong.sections.length > 0);
   const isHarmonicChordOnlyLeadSheet = Boolean(
     activeSong &&
       activeSong.measures.length > 0 &&
@@ -81,6 +87,31 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
       totalNotesCount === 0 &&
       totalLyricsCount === 0
   );
+
+  // Capas secundarias contextuales: solo capas de superposición válidas para formato, instrumento y contenido real
+  const contextualSecondaryLayers: ViewRepresentation[] = (
+    ['CHORDS', 'LYRICS', 'SECTION_MARKERS'] as ViewRepresentation[]
+  ).filter((rep) => {
+    if (rep === primaryRepresentation) return false;
+    if (!supportedRepresentations.includes(rep)) return false;
+    if (!activeSong) return false;
+    if (rep === 'CHORDS') {
+      return totalChordsCount > 0;
+    }
+    if (rep === 'LYRICS') {
+      const lyricsAllowed = serverFormatCapabilities?.LYRICS_ONLY
+        ? serverFormatCapabilities.LYRICS_ONLY.isAvailable
+        : true;
+      return totalLyricsCount > 0 && lyricsAllowed;
+    }
+    if (rep === 'SECTION_MARKERS') {
+      return hasSectionMarkers;
+    }
+    return false;
+  });
+
+  const supportsCapo = instrumentSupportsCapo(instrumentProfile);
+  const supportsChords = instrumentProfile.isRepresentationSupported('CHORDS');
 
   return (
     <section className="musical-controls-section" aria-label="Controles de Visualización y Atril">
@@ -99,6 +130,32 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
             evaluationOptions={{ songStatus, capoFret }}
             onOpenCompletionWorkflow={onOpenCompletionWorkflow}
           />
+
+          {contextualSecondaryLayers.length > 0 && (
+            <div className="contextual-secondary-layers" role="group" aria-label="Capas secundarias del atril">
+              <span className="secondary-layers-label">Capas adicionales:</span>
+              <div className="secondary-layers-chips">
+                {contextualSecondaryLayers.map((rep) => {
+                  const isSelected = secondaryRepresentations.includes(rep);
+                  const meta = SECONDARY_OVERLAY_META[rep];
+                  return (
+                    <button
+                      key={`overlay-${rep}`}
+                      type="button"
+                      aria-pressed={isSelected}
+                      className={`pill-btn secondary-layer-chip ${isSelected ? 'active' : ''}`}
+                      onClick={() => onToggleSecondaryRepresentation(rep)}
+                      title={meta?.desc}
+                    >
+                      {isSelected ? '✓ ' : '+ '}
+                      {meta?.label ?? rep}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {isHarmonicChordOnlyLeadSheet && activeSong && (
             <div
               role="note"
@@ -121,38 +178,34 @@ export const MusicalControls: React.FC<MusicalControlsProps> = ({
         </div>
       )}
 
-      <div className="controls-grid">
+      <div className="unified-adaptation-toolbar" aria-label="Instrumento y adaptaciones musicales">
         <InstrumentSelector
           selectedInstrumentId={selectedInstrumentId}
           availableInstruments={availableInstruments}
           onSelectInstrument={onSelectInstrument}
         />
 
-        <RepresentationSelector
-          supportedRepresentations={supportedRepresentations}
-          primaryRepresentation={primaryRepresentation}
-          secondaryRepresentations={secondaryRepresentations}
-          onSelectPrimary={onSelectPrimaryRepresentation}
-          onToggleSecondary={onToggleSecondaryRepresentation}
-        />
-
-        <div className="controls-subgrid">
-          <CapoControl
-            capoFret={capoFret}
-            instrumentSupportsCapo={instrumentSupportsCapo(instrumentProfile)}
-            instrumentName={instrumentProfile.name}
-            onSetCapo={onSetCapo}
-          />
+        <div className="adaptation-controls-group">
+          {supportsCapo && (
+            <CapoControl
+              capoFret={capoFret}
+              instrumentSupportsCapo={supportsCapo}
+              instrumentName={instrumentProfile.name}
+              onSetCapo={onSetCapo}
+            />
+          )}
 
           <TranspositionControl
             transpositionSemitones={transpositionSemitones}
             onSetTransposition={onSetTransposition}
           />
 
-          <ChordNotationControl
-            chordNotationSystem={chordNotationSystem}
-            onSetChordNotation={onSetChordNotation}
-          />
+          {supportsChords && (
+            <ChordNotationControl
+              chordNotationSystem={chordNotationSystem}
+              onSetChordNotation={onSetChordNotation}
+            />
+          )}
         </div>
       </div>
     </section>

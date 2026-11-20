@@ -85,7 +85,9 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     availableInstruments,
     importedMeta,
     persistedMeta,
-    applyPreset,
+    activeScenarioPreview,
+    previewScenario,
+    exitScenarioPreview,
     selectSong,
     importSong,
     selectPersistedSong,
@@ -612,19 +614,14 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         </div>
       )}
 
-      {/* 1. Selector de Escenarios Dorados Oficiales (Cobertura de Regresión — oculto en Modo Atril) */}
+      {/* 1. Modos de Previsualización Contextual (No destructivos sobre la canción activa — oculto en Modo Atril) */}
       {!isMusicStandMode && (
         <ScenarioPresets
           activePresetId={state.activePresetId}
-          onApplyPreset={(id) => {
-            applyPreset(id);
-            setShowUploader(false);
-            setShowDbModal(false);
-            setShowSetlistsModal(false);
-            if (setlistExecution.loadedSetlist) {
-              setlistExecution.notifyOffSetlistSongSelected(`Escenario ${id}`);
-            }
-          }}
+          activeSong={activeSong}
+          activeScenarioPreview={activeScenarioPreview}
+          onApplyPreset={previewScenario}
+          onExitPreview={exitScenarioPreview}
         />
       )}
 

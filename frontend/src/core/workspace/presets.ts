@@ -57,9 +57,10 @@ export const WORKSPACE_SONG_CATALOG = [
 export const GOLDEN_SCENARIO_PRESETS: Record<GoldenScenarioId, ScenarioPreset> = {
   SCENARIO_A: {
     id: 'SCENARIO_A',
-    name: 'Escenario A: Guitarra Acústica',
-    subtitle: 'Capo 2 • Tablatura + Cifrado (AlphaTab)',
-    description: 'Canción en Sol Mayor. Cejilla en traste 2 produciendo digitación de Fa Mayor. Coordenadas de tablatura precisas. Tono sonante inalterado.',
+    name: 'Guitarra — Capo 2 + Cifrado + Tablatura',
+    subtitle: 'VISTA PREVIA • ALPHATAB (CAPO 2)',
+    description:
+      'Previsualiza la canción actual en guitarra con cejilla en traste 2, tablatura y cifrado armónico sin alterar el tono canónico.',
     instrumentId: 'acoustic_guitar',
     primaryRepresentation: 'TABLATURE',
     secondaryRepresentations: ['CHORDS'],
@@ -71,9 +72,10 @@ export const GOLDEN_SCENARIO_PRESETS: Record<GoldenScenarioId, ScenarioPreset> =
   },
   SCENARIO_B: {
     id: 'SCENARIO_B',
-    name: 'Escenario B: Piano Acústico',
-    subtitle: 'Gran Pentagrama + Cifrado (OSMD)',
-    description: 'Gran Pentagrama con Claves de Sol y Fa conectadas por llave corchete. Métrica 4/4, cifrado armónico y letra alineada.',
+    name: 'Partitura — Gran Pentagrama + Cifrado',
+    subtitle: 'VISTA PREVIA • OSMD (GRAN PENTAGRAMA)',
+    description:
+      'Previsualiza la canción actual en Gran Pentagrama (Claves de Sol y Fa) con cifrado armónico donde exista notación melódica.',
     instrumentId: 'acoustic_piano',
     primaryRepresentation: 'GRAND_STAFF',
     secondaryRepresentations: ['CHORDS'],
@@ -85,9 +87,10 @@ export const GOLDEN_SCENARIO_PRESETS: Record<GoldenScenarioId, ScenarioPreset> =
   },
   SCENARIO_C: {
     id: 'SCENARIO_C',
-    name: 'Escenario C: Saxofón Alto en Eb',
-    subtitle: 'Instrumento Transpositor • Notación Escrita (OSMD)',
-    description: 'Tono de concierto Sol Mayor proyectado a Mi Mayor escrito (+9 semitonos, 4 sostenidos en la armadura). Pentagrama único en Clave de Sol.',
+    name: 'Saxofón Eb — Notación Transpuesta',
+    subtitle: 'VISTA PREVIA • OSMD (+9 SEMITONOS)',
+    description:
+      'Previsualiza la canción actual proyectada a notación escrita en Eb (+9 semitonos) preservando el tono de concierto original.',
     instrumentId: 'alto_sax',
     primaryRepresentation: 'STANDARD_NOTATION',
     secondaryRepresentations: ['CHORDS'],
@@ -99,9 +102,10 @@ export const GOLDEN_SCENARIO_PRESETS: Record<GoldenScenarioId, ScenarioPreset> =
   },
   SCENARIO_D: {
     id: 'SCENARIO_D',
-    name: 'Escenario D: Voz Principal',
-    subtitle: 'Lead Sheet Puro • Cifrado y Letra (LeadSheetDOM)',
-    description: 'Fuente ChordPro sin melodía. Invariante estricto: cero notas melódicas inventadas. Tarjetas de compás semánticas y soporte de cifrado latino.',
+    name: 'Lead Sheet — Cifrado + Letra',
+    subtitle: 'VISTA PREVIA • LEADSHEETDOM',
+    description:
+      'Previsualiza la canción actual como guion de cifrado armónico y letra disponible sin inventar melodía.',
     instrumentId: 'lead_vocal',
     primaryRepresentation: 'LYRICS',
     secondaryRepresentations: ['CHORDS'],

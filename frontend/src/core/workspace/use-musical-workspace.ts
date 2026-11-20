@@ -65,6 +65,9 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   readonly availableInstruments: readonly InstrumentProfile[];
   readonly importedMeta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined; pageCount?: number | undefined } | null;
   readonly persistedMeta: { isPersisted: boolean; songId: string; versionNumber: number } | null;
+  readonly activeScenarioPreview: GoldenScenarioId | null;
+  readonly previewScenario: (presetId: GoldenScenarioId) => void;
+  readonly exitScenarioPreview: () => void;
   readonly applyPreset: (presetId: GoldenScenarioId) => void;
   readonly selectSong: (song: CanonicalMusicPayload) => void;
   readonly importSong: (song: CanonicalMusicPayload, meta: { sourceName?: string | undefined; format: string; isVisualOnly?: boolean | undefined; documentUrl?: string | undefined; storageKey?: string | undefined; pageCount?: number | undefined }) => void;
@@ -107,6 +110,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
   const [state, setState] = useState<IWorkspaceState>(
     createInitialWorkspaceState(initialPresetId)
   );
+  const [activeScenarioPreview, setActiveScenarioPreview] = useState<GoldenScenarioId | null>(null);
+  const savedStateBeforePreviewRef = useRef<IWorkspaceState | null>(null);
 
   // Lista de todos los instrumentos registrados en el dominio
   const availableInstruments = useMemo(() => {
@@ -118,7 +123,43 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     return instrumentRegistry.getOrThrow(state.selectedInstrumentId);
   }, [state.selectedInstrumentId]);
 
-  // Aplicar Preset Dorado
+  const exitScenarioPreview = useCallback(() => {
+    const previousState = savedStateBeforePreviewRef.current;
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
+    if (previousState) {
+      setState(previousState);
+    } else {
+      setState((prev) => ({
+        ...prev,
+        activePresetId: 'CUSTOM',
+      }));
+    }
+  }, []);
+
+  // Previsualización contextual NO DESTRUCTIVA sobre la canción activa:
+  // Jamás reemplaza activeSong, persistedMeta, importedMeta ni preferredFormatRef.
+  const previewScenario = useCallback(
+    (presetId: GoldenScenarioId) => {
+      const preset = GOLDEN_SCENARIO_PRESETS[presetId];
+      if (!preset) return;
+
+      if (activeScenarioPreview === presetId) {
+        exitScenarioPreview();
+        return;
+      }
+
+      if (activeScenarioPreview === null) {
+        savedStateBeforePreviewRef.current = state;
+      }
+
+      setActiveScenarioPreview(presetId);
+      setState(transitionApplyPreset(preset));
+    },
+    [activeScenarioPreview, exitScenarioPreview, state]
+  );
+
+  // Aplicar Preset Dorado (mantenido para compatibilidad de pruebas heredadas)
   const applyPreset = useCallback((presetId: GoldenScenarioId) => {
     const preset = GOLDEN_SCENARIO_PRESETS[presetId];
     if (!preset) return;
@@ -127,6 +168,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
       primary: preset.primaryRepresentation,
       secondary: preset.secondaryRepresentations,
     };
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
     setActiveSong(song);
     setImportedMeta(null);
     setPersistedMeta(null);
@@ -135,6 +178,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Cambiar canción activa del catálogo
   const selectSong = useCallback((song: CanonicalMusicPayload) => {
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
     setActiveSong(song);
     const songMeta = (song as any)?.metadata;
     const isVisual = Boolean(
@@ -176,6 +221,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
         pageCount?: number | undefined;
       }
     ) => {
+      setActiveScenarioPreview(null);
+      savedStateBeforePreviewRef.current = null;
       setActiveSong(song);
       setImportedMeta(meta);
       setPersistedMeta(null);
@@ -189,6 +236,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Cargar canción persistida desde base de datos PostgreSQL
   const selectPersistedSong = useCallback((song: CanonicalMusicPayload, meta: { isPersisted: boolean; songId: string; versionNumber: number }) => {
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
     setActiveSong(song);
     const songMeta = (song as any)?.metadata;
     const isVisual = Boolean(
@@ -219,6 +268,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Cambiar instrumento seleccionado y filtrar representaciones incompatibles
   const selectInstrument = useCallback((instrumentId: InstrumentId) => {
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
     const targetProfile = instrumentRegistry.getOrThrow(instrumentId);
     setState((prev) => {
       const transitioned = transitionSelectInstrument(prev, targetProfile);
@@ -257,6 +308,8 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
 
   // Cambiar formato de lectura (primaria y secundarias atómicamente)
   const setReadingFormat = useCallback((primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
+    savedStateBeforePreviewRef.current = null;
+    setActiveScenarioPreview(null);
     preferredFormatRef.current = { primary, secondary };
     setState((prev) => {
       const profile = instrumentRegistry.getOrThrow(prev.selectedInstrumentId);
@@ -322,6 +375,9 @@ export function useMusicalWorkspace(options: UseMusicalWorkspaceOptions = {}): {
     availableInstruments,
     importedMeta,
     persistedMeta,
+    activeScenarioPreview,
+    previewScenario,
+    exitScenarioPreview,
     applyPreset,
     selectSong,
     importSong,

@@ -27,10 +27,29 @@ import {
   StorageNotFoundError,
 } from '../../../domain/storage/storage-provider.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
+import { DualRateLimiter } from '../middlewares/rate-limiter.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { UnauthorizedError, ValidationError } from '../../../domain/errors.ts';
 import type { AuthenticatedUser } from '../../../domain/auth-types.ts';
-import { MAX_OMR_BASE64_LENGTH } from '../../../domain/omr/types.ts';
+import { MAX_OMR_BASE64_LENGTH, MAX_OMR_FILE_SIZE_BYTES } from '../../../domain/omr/types.ts';
+
+const MAX_CONVERSION_RAW_TEXT_CHARS = 5 * 1024 * 1024; // 5 MiB caracteres texto
+
+function assertSafeConversionPayloadSize(input: { rawText?: string; dataBase64?: string }): void {
+  if (input.rawText && Buffer.byteLength(input.rawText, 'utf8') > MAX_OMR_FILE_SIZE_BYTES) {
+    throw new ValidationError('El contenido textual excede el límite máximo permitido de 15 MiB.');
+  }
+  if (input.dataBase64) {
+    const approxBytes = Math.floor((input.dataBase64.length * 3) / 4);
+    if (approxBytes > MAX_OMR_FILE_SIZE_BYTES) {
+      throw new ValidationError('El archivo decodificado excede el límite máximo permitido de 15 MiB.');
+    }
+  }
+}
+
+function sanitizeHeaderFilename(rawName: string): string {
+  return rawName.replace(/["\r\n\\]/g, '').trim() || 'conversion.txt';
+}
 
 // ---------------------------------------------------------------------------
 // Schemas Zod de Validación de Entrada HTTP
@@ -47,7 +66,7 @@ const ConversionTargetEnum = z.enum([
 
 const ValidateInputSchema = z.object({
   filename: z.string().min(1, 'El nombre de archivo es obligatorio').max(255),
-  rawText: z.string().optional(),
+  rawText: z.string().max(MAX_CONVERSION_RAW_TEXT_CHARS, 'rawText excede límite permitido').optional(),
   dataBase64: z
     .string()
     .max(MAX_OMR_BASE64_LENGTH, 'El contenido Base64 excede el límite máximo permitido')
@@ -57,7 +76,7 @@ const ValidateInputSchema = z.object({
 const TranspileInputSchema = z.object({
   filename: z.string().min(1, 'El nombre de archivo es obligatorio').max(255),
   targetFormat: ConversionTargetEnum,
-  rawText: z.string().optional(),
+  rawText: z.string().max(MAX_CONVERSION_RAW_TEXT_CHARS, 'rawText excede límite permitido').optional(),
   dataBase64: z
     .string()
     .max(MAX_OMR_BASE64_LENGTH, 'El contenido Base64 excede el límite máximo permitido')
@@ -92,6 +111,7 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
   const tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
   const userRepo = new DrizzleUserRepository();
   const authGuard = new AuthGuard(tokenService, userRepo);
+  const conversionRateLimiter = new DualRateLimiter({ ipWindowMs: 60_000, ipMaxAttempts: 30 });
 
   const songRepo = new DrizzleSongRepository();
   const versionRepo = new DrizzleSongVersionRepository();
@@ -106,194 +126,233 @@ export const conversionRoutes: FastifyPluginAsync = async (fastify) => {
     outputStorage
   );
 
-  // 1. POST /api/v1/conversion/validate
-  fastify.post('/validate', async (request, reply) => {
-    const parsed = ValidateInputSchema.safeParse(request.body);
-    if (!parsed.success) {
-      throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
-    }
+  // 1. POST /api/v1/conversion/validate (Autenticado + RBAC songs:read + rate limit)
+  fastify.post(
+    '/validate',
+    { preHandler: [conversionRateLimiter.preHandler(), authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const parsed = ValidateInputSchema.safeParse(request.body);
+      if (!parsed.success) {
+        throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
+      }
+      assertSafeConversionPayloadSize(parsed.data);
 
-    const result = await conversionService.validateSource(parsed.data);
-    return reply.status(200).send({
-      data: result,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 2. POST /api/v1/conversion/transpile
-  fastify.post('/transpile', async (request, reply) => {
-    const parsed = TranspileInputSchema.safeParse(request.body);
-    if (!parsed.success) {
-      throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
-    }
-
-    const result = await conversionService.transpileDirect(parsed.data);
-    return reply.status(200).send({
-      data: result,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 3. POST /api/v1/conversion/jobs (Exige autenticación)
-  fastify.post('/jobs', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const parsed = TranspileInputSchema.safeParse(request.body);
-    if (!parsed.success) {
-      throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
-    }
-
-    const job = await conversionService.createJob(user, parsed.data);
-    return reply.status(201).send({
-      data: job,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 4. GET /api/v1/conversion/jobs
-  fastify.get('/jobs', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const jobs = await conversionService.listUserJobs(user);
-    return reply.status(200).send({
-      data: jobs,
-      error: null,
-      meta: { timestamp: new Date().toISOString(), total: jobs.length },
-    });
-  });
-
-  // 5. GET /api/v1/conversion/jobs/:jobId
-  fastify.get('/jobs/:jobId', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const { jobId } = request.params as { jobId: string };
-    const job = await conversionService.getJob(jobId, user);
-    return reply.status(200).send({
-      data: job,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 6. POST /api/v1/conversion/jobs/:jobId/retry
-  fastify.post('/jobs/:jobId/retry', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const { jobId } = request.params as { jobId: string };
-    const retriedJob = await conversionService.retryJob(jobId, user);
-    return reply.status(200).send({
-      data: retriedJob,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 7. POST /api/v1/conversion/jobs/:jobId/cancel
-  fastify.post('/jobs/:jobId/cancel', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const { jobId } = request.params as { jobId: string };
-    const cancelledJob = await conversionService.cancelJob(jobId, user);
-    return reply.status(200).send({
-      data: cancelledJob,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
-
-  // 8. GET /api/v1/conversion/jobs/:jobId/download
-  fastify.get('/jobs/:jobId/download', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-
-    const { jobId } = request.params as { jobId: string };
-    const job = await conversionService.getJob(jobId, user);
-
-    // Verificación de política de ciclo de vida (Fase 2B.1 / CR-04)
-    if (job.prunedAt) {
-      return reply.status(410).send({
-        error: {
-          code: 'OUTPUT_PRUNED',
-          message:
-            'El archivo de salida ha sido podado según la política de retención. Los metadatos de la conversión y el historial continúan preservados.',
-        },
+      const result = await conversionService.validateSource(parsed.data);
+      return reply.status(200).send({
+        data: result,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
       });
     }
+  );
 
-    const details = (job.errorDetails as any) || {};
-    const filename = job.outputRef || 'conversion.txt';
-    const mimeType = details.mimeType || 'application/octet-stream';
+  // 2. POST /api/v1/conversion/transpile (Autenticado + RBAC songs:update_draft + rate limit)
+  fastify.post(
+    '/transpile',
+    {
+      preHandler: [
+        conversionRateLimiter.preHandler(),
+        authGuard.requirePermission('songs:update_draft', true),
+      ],
+    },
+    async (request, reply) => {
+      const parsed = TranspileInputSchema.safeParse(request.body);
+      if (!parsed.success) {
+        throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
+      }
+      assertSafeConversionPayloadSize(parsed.data);
 
-    // Modo 1 (Fase 2B.1): Descarga desde almacenamiento externo desacoplado
-    if (job.outputStorageKey) {
-      try {
-        const stream = await outputStorage.getStream(job.outputStorageKey);
+      const result = await conversionService.transpileDirect(parsed.data);
+      return reply.status(200).send({
+        data: result,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+  );
+
+  // 3. POST /api/v1/conversion/jobs (Exige songs:update_draft verificado contra BD)
+  fastify.post(
+    '/jobs',
+    {
+      preHandler: [
+        conversionRateLimiter.preHandler(),
+        authGuard.requirePermission('songs:update_draft', true),
+      ],
+    },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const parsed = TranspileInputSchema.safeParse(request.body);
+      if (!parsed.success) {
+        throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
+      }
+      assertSafeConversionPayloadSize(parsed.data);
+
+      const job = await conversionService.createJob(user, parsed.data);
+      return reply.status(201).send({
+        data: job,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+  );
+
+  // 4. GET /api/v1/conversion/jobs
+  fastify.get(
+    '/jobs',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const jobs = await conversionService.listUserJobs(user);
+      return reply.status(200).send({
+        data: jobs,
+        error: null,
+        meta: { timestamp: new Date().toISOString(), total: jobs.length },
+      });
+    }
+  );
+
+  // 5. GET /api/v1/conversion/jobs/:jobId
+  fastify.get(
+    '/jobs/:jobId',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const { jobId } = request.params as { jobId: string };
+      const job = await conversionService.getJob(jobId, user);
+      return reply.status(200).send({
+        data: job,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+  );
+
+  // 6. POST /api/v1/conversion/jobs/:jobId/retry
+  fastify.post(
+    '/jobs/:jobId/retry',
+    { preHandler: [authGuard.requirePermission('songs:update_draft', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const { jobId } = request.params as { jobId: string };
+      const retriedJob = await conversionService.retryJob(jobId, user);
+      return reply.status(200).send({
+        data: retriedJob,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+  );
+
+  // 7. POST /api/v1/conversion/jobs/:jobId/cancel
+  fastify.post(
+    '/jobs/:jobId/cancel',
+    { preHandler: [authGuard.requirePermission('songs:update_draft', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const { jobId } = request.params as { jobId: string };
+      const cancelledJob = await conversionService.cancelJob(jobId, user);
+      return reply.status(200).send({
+        data: cancelledJob,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+  );
+
+  // 8. GET /api/v1/conversion/jobs/:jobId/download
+  fastify.get(
+    '/jobs/:jobId/download',
+    { preHandler: [authGuard.requirePermission('songs:read', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
+
+      const { jobId } = request.params as { jobId: string };
+      const job = await conversionService.getJob(jobId, user);
+
+      // Verificación de política de ciclo de vida (Fase 2B.1 / CR-04)
+      if (job.prunedAt) {
+        return reply.status(410).send({
+          error: {
+            code: 'OUTPUT_PRUNED',
+            message:
+              'El archivo de salida ha sido podado según la política de retención. Los metadatos de la conversión y el historial continúan preservados.',
+          },
+        });
+      }
+
+      const details = (job.errorDetails as any) || {};
+      const filename = sanitizeHeaderFilename(job.outputRef || 'conversion.txt');
+      const mimeType = details.mimeType || 'application/octet-stream';
+
+      // Modo 1 (Fase 2B.1): Descarga desde almacenamiento externo desacoplado
+      if (job.outputStorageKey) {
+        try {
+          const stream = await outputStorage.getStream(job.outputStorageKey);
+          reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+          reply.header('Content-Type', mimeType);
+          if (job.outputByteLength) {
+            reply.header('Content-Length', job.outputByteLength);
+          }
+          if (job.outputChecksumSha256) {
+            reply.header('ETag', `"${job.outputChecksumSha256}"`);
+          }
+          return reply.status(200).send(stream);
+        } catch (storageErr) {
+          if (storageErr instanceof StorageNotFoundError) {
+            return reply.status(404).send({
+              error: {
+                code: 'OUTPUT_FILE_NOT_FOUND',
+                message: 'El archivo generado no se encuentra en el almacenamiento de salidas.',
+              },
+            });
+          }
+          throw storageErr;
+        }
+      }
+
+      // Modo 2 (Compatibilidad histórica Fase 2A): Carga en línea en errorDetails.data
+      if (details && details.data) {
         reply.header('Content-Disposition', `attachment; filename="${filename}"`);
         reply.header('Content-Type', mimeType);
-        if (job.outputByteLength) {
-          reply.header('Content-Length', job.outputByteLength);
+
+        if (details.isBinary) {
+          const buffer = Buffer.from(details.data, 'base64');
+          return reply.status(200).send(buffer);
+        } else {
+          return reply.status(200).send(details.data);
         }
-        if (job.outputChecksumSha256) {
-          reply.header('ETag', `"${job.outputChecksumSha256}"`);
-        }
-        return reply.status(200).send(stream);
-      } catch (storageErr) {
-        if (storageErr instanceof StorageNotFoundError) {
-          return reply.status(404).send({
-            error: {
-              code: 'OUTPUT_FILE_NOT_FOUND',
-              message: 'El archivo generado no se encuentra en el almacenamiento de salidas.',
-            },
-          });
-        }
-        throw storageErr;
       }
+
+      throw new ValidationError(
+        'El trabajo de conversión aún no cuenta con un archivo generado para descargar.'
+      );
     }
+  );
 
-    // Modo 2 (Compatibilidad histórica Fase 2A): Carga en línea en errorDetails.data
-    if (details && details.data) {
-      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-      reply.header('Content-Type', mimeType);
+  // 9. POST /api/v1/conversion/jobs/:jobId/commit (Requiere songs:create verificado contra BD)
+  fastify.post(
+    '/jobs/:jobId/commit',
+    { preHandler: [authGuard.requirePermission('songs:create', true)] },
+    async (request, reply) => {
+      const user = extractAuthenticatedUser(request);
 
-      if (details.isBinary) {
-        const buffer = Buffer.from(details.data, 'base64');
-        return reply.status(200).send(buffer);
-      } else {
-        return reply.status(200).send(details.data);
-      }
+      const { jobId } = request.params as { jobId: string };
+      const parsed = CommitInputSchema.safeParse(request.body ?? {});
+      const overrides = parsed.success ? parsed.data : undefined;
+
+      const createdSong = await conversionService.commitJobToCatalog(jobId, user, overrides);
+      return reply.status(201).send({
+        data: createdSong,
+        error: null,
+        meta: { timestamp: new Date().toISOString() },
+      });
     }
-
-    throw new ValidationError(
-      'El trabajo de conversión aún no cuenta con un archivo generado para descargar.'
-    );
-  });
-
-  // 9. POST /api/v1/conversion/jobs/:jobId/commit
-  fastify.post('/jobs/:jobId/commit', async (request, reply) => {
-    await authGuard.authenticate(request, reply);
-    const user = extractAuthenticatedUser(request);
-    if (!user) {
-      throw new UnauthorizedError('Se requiere iniciar sesión para guardar en el catálogo.');
-    }
-
-    const { jobId } = request.params as { jobId: string };
-    const parsed = CommitInputSchema.safeParse(request.body ?? {});
-    const overrides = parsed.success ? parsed.data : undefined;
-
-    const createdSong = await conversionService.commitJobToCatalog(jobId, user, overrides);
-    return reply.status(201).send({
-      data: createdSong,
-      error: null,
-      meta: { timestamp: new Date().toISOString() },
-    });
-  });
+  );
 };
 

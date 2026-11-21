@@ -221,6 +221,7 @@ export interface JwtTokenPayload {
   email: string;
   role: UserRole;
   jti: string;
+  tokenVersion?: number;
   iat?: number;
   exp?: number;
 }

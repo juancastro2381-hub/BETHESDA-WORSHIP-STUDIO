@@ -157,6 +157,7 @@ export class DrizzleUserRepository implements IUserRepository {
         failedLoginAttempts: 0,
         lockoutUntil: null,
         lastLoginAt: new Date(),
+        accountStatus: sql`CASE WHEN ${users.accountStatus} = 'LOCKED' THEN 'ACTIVE'::account_status ELSE ${users.accountStatus} END`,
       })
       .where(eq(users.id, id));
   }
@@ -183,6 +184,7 @@ export class DrizzleUserRepository implements IUserRepository {
       .set({
         failedLoginAttempts: newAttempts,
         lockoutUntil: lockoutUntil ?? user.lockoutUntil,
+        ...(isLocked && user.accountStatus === 'ACTIVE' ? { accountStatus: 'LOCKED' as const } : {}),
       })
       .where(eq(users.id, id));
 

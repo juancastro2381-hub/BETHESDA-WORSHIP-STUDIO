@@ -15,7 +15,13 @@ import type { JwtTokenPayload, UserRole } from '../domain/auth-types.ts';
 import { TokenExpiredError, TokenInvalidError } from '../domain/errors.ts';
 
 export interface ITokenService {
-  signAccessToken(user: { id?: string; sub?: string; email: string; role: UserRole }): { token: string; jti: string; expiresIn: number };
+  signAccessToken(user: {
+    id?: string;
+    sub?: string;
+    email: string;
+    role: UserRole;
+    tokenVersion?: number;
+  }): { token: string; jti: string; expiresIn: number };
   verifyAccessToken(token: string): JwtTokenPayload;
 }
 
@@ -45,7 +51,13 @@ export class JwtTokenService implements ITokenService {
   /**
    * Genera un Access Token JWT firmado determinísticamente con HS256.
    */
-  public signAccessToken(user: { id?: string; sub?: string; email: string; role: UserRole }): {
+  public signAccessToken(user: {
+    id?: string;
+    sub?: string;
+    email: string;
+    role: UserRole;
+    tokenVersion?: number;
+  }): {
     token: string;
     jti: string;
     expiresIn: number;
@@ -69,6 +81,7 @@ export class JwtTokenService implements ITokenService {
       email: user.email,
       role: user.role,
       jti,
+      tokenVersion: user.tokenVersion ?? 1,
       iat: now,
       exp,
     };

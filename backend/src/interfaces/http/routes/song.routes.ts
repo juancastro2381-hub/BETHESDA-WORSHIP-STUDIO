@@ -25,6 +25,7 @@ import { DrizzleSongVersionRepository } from '../../../repositories/version-repo
 import { DrizzleUserRepository } from '../../../repositories/user-repository.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
+import { NotFoundError } from '../../../domain/errors.ts';
 
 export const songRoutes: FastifyPluginAsync = async (fastify) => {
   const songRepo = new DrizzleSongRepository();
@@ -136,6 +137,9 @@ export const songRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const params = VersionIdParamSchema.parse(request.params);
       const version = await songService.getVersion(params.versionId);
+      if (version.songId !== params.songId) {
+        throw new NotFoundError('La versión solicitada no pertenece a esta canción.');
+      }
       return reply.status(200).send({
         data: version,
       });

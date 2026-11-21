@@ -52,11 +52,21 @@ export class DualRateLimiter {
     return { allowed: true, retryAfter: 0 };
   }
 
+  private pruneExpiredBuckets(buckets: Map<string, RateLimitBucket>, now: number): void {
+    if (buckets.size <= 1000) return;
+    for (const [key, entry] of buckets.entries()) {
+      if (now >= entry.resetAt) {
+        buckets.delete(key);
+      }
+    }
+  }
+
   /**
    * Registra un intento de solicitud desde la IP dada.
    */
   public recordIpAttempt(ip: string): void {
     const now = Date.now();
+    this.pruneExpiredBuckets(this.ipBuckets, now);
     const bucket = this.ipBuckets.get(ip);
 
     if (!bucket || now >= bucket.resetAt) {
@@ -95,6 +105,7 @@ export class DualRateLimiter {
   public recordAccountFailedAttempt(email: string): void {
     const normalizedEmail = email.toLowerCase().trim();
     const now = Date.now();
+    this.pruneExpiredBuckets(this.accountBuckets, now);
     const bucket = this.accountBuckets.get(normalizedEmail);
 
     if (!bucket || now >= bucket.resetAt) {

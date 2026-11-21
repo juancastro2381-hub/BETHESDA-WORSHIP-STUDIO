@@ -23,7 +23,7 @@ import { DrizzleAuditLogRepository } from '../../../repositories/audit-repositor
 import { Argon2PasswordHasher } from '../../../domain/crypto/password-hasher.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 import { AuditService } from '../../../application/audit-service.ts';
-import { defaultRateLimiter } from '../middlewares/rate-limiter.ts';
+import { defaultRateLimiter, DualRateLimiter } from '../middlewares/rate-limiter.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { UnauthorizedError } from '../../../domain/errors.ts';
 
@@ -68,6 +68,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   const authGuard = new AuthGuard(tokenService, userRepo);
+  const authRecoveryRateLimiter = new DualRateLimiter({ ipWindowMs: 60_000, ipMaxAttempts: 30 });
 
   const isProd = env.NODE_ENV === 'production';
   const cookieOptions = {
@@ -142,8 +143,8 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     }
   };
 
-  fastify.post('/refresh', handleRefreshSession);
-  fastify.get('/refresh', handleRefreshSession);
+  fastify.post('/refresh', { preHandler: authRecoveryRateLimiter.preHandler() }, handleRefreshSession);
+  fastify.get('/refresh', { preHandler: authRecoveryRateLimiter.preHandler() }, handleRefreshSession);
 
   // 3. POST /api/v1/auth/logout
   fastify.post('/logout', async (request, reply) => {
@@ -167,7 +168,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // 4. POST /api/v1/auth/accept-invite
-  fastify.post('/accept-invite', async (request, reply) => {
+  fastify.post('/accept-invite', { preHandler: authRecoveryRateLimiter.preHandler() }, async (request, reply) => {
     const body = AcceptInviteBodySchema.parse(request.body);
 
     await invitationService.acceptInvitation(body.token, body.password);
@@ -197,7 +198,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   // 6. POST /api/v1/auth/reset-password
-  fastify.post('/reset-password', async (request, reply) => {
+  fastify.post('/reset-password', { preHandler: authRecoveryRateLimiter.preHandler() }, async (request, reply) => {
     const body = ResetPasswordBodySchema.parse(request.body);
     const context = getContext(request);
 

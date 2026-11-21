@@ -149,12 +149,12 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /api/v1/ingestion/upload
-   * Ingesta de archivos binarios o textuales.
+   * Ingesta de archivos binarios o textuales (Requiere songs:create verificado contra BD).
    */
   fastify.post(
     '/upload',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);
@@ -202,12 +202,12 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /api/v1/ingestion/written-notes
-   * Ingesta de notas musicales manuales estructuradas.
+   * Ingesta de notas musicales manuales estructuradas (Requiere songs:create verificado contra BD).
    */
   fastify.post(
     '/written-notes',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);
@@ -233,12 +233,12 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /api/v1/ingestion/video-url
-   * Ingesta de URL de video autorizada con protección SSRF.
+   * Ingesta de URL de video autorizada con protección SSRF (Requiere songs:create verificado contra BD).
    */
   fastify.post(
     '/video-url',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);
@@ -264,12 +264,12 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * GET /api/v1/ingestion/jobs/:jobId
-   * Consulta de estado de una tarea de ingesta.
+   * Consulta de estado de una tarea de ingesta (Requiere songs:read verificado contra BD).
    */
   fastify.get(
     '/jobs/:jobId',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);
@@ -302,7 +302,7 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/sources/:sourceId',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);
@@ -338,7 +338,7 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/sources/:sourceId/file',
     {
-      preHandler: [authGuard.requireAuth],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = extractAuthenticatedPrincipal(request);

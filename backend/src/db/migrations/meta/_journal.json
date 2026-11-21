@@ -134,6 +134,20 @@
       "when": 1794476000000,
       "tag": "0020_worship_services_and_setlist_enhancements",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794476001000,
+      "tag": "0018_cas_deletion_state_machine",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794476002000,
+      "tag": "0019_cas_deletion_retained_state",
+      "breakpoints": true
     }
   ]
 }

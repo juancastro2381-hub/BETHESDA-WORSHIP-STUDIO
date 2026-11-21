@@ -74,9 +74,12 @@ export class AuthService {
 
     const user = await this.userRepo.findByEmail(normalizedEmail);
 
-    // Comportamiento anti-enumeración: Si no existe el usuario, calcular hash ficticio para mitigar timing attacks
+    // Comportamiento anti-enumeración: Si no existe el usuario, calcular hash Argon2id sintácticamente válido para mitigar timing attacks
     if (!user) {
-      await this.passwordHasher.verify(password, '$argon2id$v=19$m=65536,t=3,p=4$dummy_salt$dummy_hash');
+      await this.passwordHasher.verify(
+        password,
+        '$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      );
       await this.auditService.log({
         eventType: 'LOGIN_FAILURE',
         resource: 'auth',
@@ -92,9 +95,9 @@ export class AuthService {
       throw new InvalidCredentialsError('La cuenta no se encuentra activa para iniciar sesión.');
     }
 
-    // Comprobar bloqueo temporal por intentos fallidos
-    if (user.accountStatus === 'LOCKED' && user.lockoutUntil) {
-      if (new Date() < user.lockoutUntil) {
+    // Comprobar bloqueo temporal por intentos fallidos (verifica tanto estado LOCKED como lockoutUntil activo)
+    if (user.accountStatus === 'LOCKED' || user.lockoutUntil) {
+      if (user.lockoutUntil && new Date() < user.lockoutUntil) {
         await this.auditService.log({
           eventType: 'LOGIN_FAILURE',
           userId: user.id,
@@ -104,9 +107,15 @@ export class AuthService {
           metadata: { email: normalizedEmail, reason: 'ACCOUNT_LOCKED', lockoutUntil: user.lockoutUntil },
         });
         throw new AccountLockedError(`Cuenta bloqueada temporalmente hasta: ${user.lockoutUntil.toISOString()}`);
+      } else if (user.accountStatus === 'LOCKED' && !user.lockoutUntil) {
+        throw new AccountLockedError('La cuenta se encuentra bloqueada por seguridad.');
       } else {
-        // Bloqueo expirado: restaurar a ACTIVE
-        await this.userRepo.updateStatus(user.id, 'ACTIVE');
+        // Bloqueo expirado: restaurar a ACTIVE y limpiar contadores de bloqueo
+        await this.userRepo.update(user.id, {
+          ...(user.accountStatus === 'LOCKED' ? { accountStatus: 'ACTIVE' } : {}),
+          failedLoginAttempts: 0,
+          lockoutUntil: null,
+        });
       }
     }
 
@@ -138,11 +147,12 @@ export class AuthService {
     // Login exitoso: resetear contadores y registrar timestamp
     await this.userRepo.recordSuccessfulLogin(user.id);
 
-    // 1. Generar Access Token (HS256, 15 min, en memoria)
+    // 1. Generar Access Token (HS256, 15 min, en memoria) con tokenVersion autoritativo
     const { token: accessToken, expiresIn } = this.tokenService.signAccessToken({
       id: user.id,
       email: user.email,
       role: user.role,
+      tokenVersion: user.tokenVersion,
     });
 
     // 2. Generar Refresh Token criptográfico opaco
@@ -225,9 +235,15 @@ export class AuthService {
       throw new TokenExpiredError('El token de refresco ha expirado. Inicie sesión nuevamente.');
     }
 
-    // Verificar usuario en base de datos en tiempo real
+    // Verificar usuario en base de datos en tiempo real (incluyendo bloqueo temporal activo)
     const user = await this.userRepo.findById(storedToken.userId);
-    if (!user || user.accountStatus === 'LOCKED' || user.accountStatus === 'SUSPENDED') {
+    if (
+      !user ||
+      user.accountStatus === 'LOCKED' ||
+      user.accountStatus === 'SUSPENDED' ||
+      user.accountStatus === 'PENDING_INVITATION' ||
+      (user.lockoutUntil && user.lockoutUntil > new Date())
+    ) {
       await this.refreshTokenRepo.revokeToken(storedToken.id);
       throw new UnauthorizedError('La cuenta de usuario no se encuentra activa para renovar sesión.');
     }
@@ -248,11 +264,12 @@ export class AuthService {
       ipAddress: context?.ipAddress,
     });
 
-    // Emitir nuevo Access Token HS256
+    // Emitir nuevo Access Token HS256 con tokenVersion autoritativo
     const { token: newAccessToken, expiresIn } = this.tokenService.signAccessToken({
       id: user.id,
       email: user.email,
       role: user.role,
+      tokenVersion: user.tokenVersion,
     });
 
     return {

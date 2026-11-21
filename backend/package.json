@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
-    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs');fs.cpSync('src/db/migrations','dist/backend/src/db/migrations',{recursive:true,force:true});\"",
+    "start": "node dist/backend/src/server.js",
     "migrate": "tsx src/db/migrate.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

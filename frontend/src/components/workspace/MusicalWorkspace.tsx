@@ -429,21 +429,21 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     state.primaryRepresentation === 'TABLATURE'
       ? 'TAB'
       : state.primaryRepresentation === 'STANDARD_NOTATION' || state.primaryRepresentation === 'GRAND_STAFF'
-      ? 'SCORE'
-      : state.primaryRepresentation === 'CHORDS'
-      ? 'CHORD_SHEET'
-      : 'LYRICS';
+        ? 'SCORE'
+        : state.primaryRepresentation === 'CHORDS'
+          ? 'CHORD_SHEET'
+          : 'LYRICS';
 
   const activeReadingFormatLabel =
     activeReadingFormat === 'SCORE'
       ? 'Partitura'
       : activeReadingFormat === 'CHORD_SHEET'
-      ? state.secondaryRepresentations.includes('LYRICS')
-        ? 'Cifrado con Letra'
-        : 'Cifrado Armónico'
-      : activeReadingFormat === 'TAB'
-      ? 'Tablatura'
-      : 'Letra Sola';
+        ? state.secondaryRepresentations.includes('LYRICS')
+          ? 'Cifrado con Letra'
+          : 'Cifrado Armónico'
+        : activeReadingFormat === 'TAB'
+          ? 'Tablatura'
+          : 'Letra Sola';
 
   // Cargar una canción persistida específica en el Atril Digital (resolviendo la discrepancia de asociación de WS-AUDIO)
   const handleOpenPersistedSongInStand = useCallback(
@@ -554,16 +554,15 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const visualMimeType =
     ((activeSong as any)?.metadata?.mimeType as string | undefined) ||
     (importedMeta?.format === 'PDF' ||
-    (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
-    (activeSong as any)?.sourceFormat === 'PDF'
+      (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
+      (activeSong as any)?.sourceFormat === 'PDF'
       ? 'application/pdf'
       : 'image/png');
 
   return (
     <div
-      className={`musical-workspace-root ${isMusicStandMode ? 'music-stand-mode' : ''} ${
-        isHighContrast ? 'high-contrast-stand' : ''
-      }`}
+      className={`musical-workspace-root ${isMusicStandMode ? 'music-stand-mode' : ''} ${isHighContrast ? 'high-contrast-stand' : ''
+        }`}
     >
       {/* 0. Barra de Navegación de Atril Litúrgico (WS7 & Fase 2C — 4.5) */}
       {setlistExecution.loadedSetlist && (
@@ -741,9 +740,9 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           apiClient={client}
         />
       ) : setlistExecution.loadedSetlist &&
-      setlistExecution.isServiceMoment &&
-      setlistExecution.currentItem?.itemType === 'SERVICE_MOMENT' &&
-      !setlistExecution.isOffSetlistSongActive ? (
+        setlistExecution.isServiceMoment &&
+        setlistExecution.currentItem?.itemType === 'SERVICE_MOMENT' &&
+        !setlistExecution.isOffSetlistSongActive ? (
         /* Vista de Momento Litúrgico (WS7: Cero adaptadores de partitura inicializados) */
         <main className="workspace-viewport-area service-moment-viewport" role="main">
           <ServiceMomentCard

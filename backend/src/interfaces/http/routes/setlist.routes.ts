@@ -56,7 +56,7 @@ export const setlistRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.get(
     '/',
-    { preHandler: authGuard.requirePermission('setlists:list', false) },
+    { preHandler: authGuard.requirePermission('setlists:list', true) },
     async (request, reply) => {
       const query = ListSetlistsQuerySchema.parse(request.query);
       const result = await setlistService.listSetlists(query);
@@ -111,7 +111,7 @@ export const setlistRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.get(
     '/:id',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const params = SetlistIdParamSchema.parse(request.params);
       const setlist = await setlistService.getSetlist(params.id);

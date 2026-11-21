@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { buildApp } from '../app.ts';
 import { type FastifyInstance } from 'fastify';
 import { JwtTokenService } from '../application/token-service.ts';
+import { DrizzleUserRepository } from '../repositories/user-repository.ts';
 import { env } from '../config/env.ts';
 import { pool } from '../db/index.ts';
 
@@ -15,9 +16,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
   let app: FastifyInstance;
   let tokenService: JwtTokenService;
   let testUserToken: string;
-  let otherUserToken: string;
-  const testUserId = '00000000-0000-0000-0000-000000000001';
-  const otherUserId = '00000000-0000-0000-0000-000000000002';
+  let testUserId: string;
 
   const validChordProContent = `
 {title: Sublime Gracia}
@@ -34,21 +33,32 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     app = await buildApp();
     await app.ready();
 
+    const userRepo = new DrizzleUserRepository();
     tokenService = new JwtTokenService(env.JWT_SECRET, env.JWT_ACCESS_EXPIRES_IN);
+    const created = await userRepo.create({
+      email: `conv-api-leader-${Date.now()}@bethesda.test`,
+      passwordHash: 'dummy_hash',
+      firstName: 'Conversion',
+      lastName: 'Tester',
+      role: 'WORSHIP_LEADER',
+      accountStatus: 'ACTIVE',
+      emailVerified: true,
+    });
+    testUserId = created.id;
+
     testUserToken = tokenService.signAccessToken({
-      id: testUserId,
-      email: 'musician@bethesda.com',
-      role: 'MUSICIAN',
-    }).token;
-    otherUserToken = tokenService.signAccessToken({
-      id: otherUserId,
-      email: 'other@bethesda.com',
-      role: 'MUSICIAN',
+      id: created.id,
+      email: created.email,
+      role: created.role,
+      tokenVersion: created.tokenVersion,
     }).token;
   });
 
   after(async () => {
     await app.close();
+    if (testUserId) {
+      await pool.query('DELETE FROM users WHERE id = $1', [testUserId]);
+    }
     await pool.end();
   });
 
@@ -56,6 +66,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/validate',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'himno.musicxml',
         rawText: '<?xml version="1.0"?><score-partwise version="4.0"><part id="P1"><measure number="1"></measure></part></score-partwise>',
@@ -79,6 +90,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/validate',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'canto.cho',
         rawText: validChordProContent,
@@ -99,6 +111,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/validate',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'ensayo.mp3',
         dataBase64: Buffer.from('fake-mp3-bytes').toString('base64'),
@@ -121,6 +134,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const resLyrics = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/transpile',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'himno.cho',
         targetFormat: 'LYRICS_ONLY',
@@ -139,6 +153,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const resXml = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/transpile',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'himno.cho',
         targetFormat: 'MUSIC_XML',
@@ -155,6 +170,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const resMidi = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/transpile',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'himno.cho',
         targetFormat: 'MIDI',
@@ -168,7 +184,21 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     assert.ok(midiBody.data.diagnostics.some((d: any) => d.code === 'CANNOT_EXPORT_MIDI_WITHOUT_NOTES'));
   });
 
-  it('5. POST /api/v1/conversion/jobs — should require authentication (401 Unauthorized)', async () => {
+  it('5. POST /api/v1/conversion/{validate,transpile,jobs} — should require authentication (401 Unauthorized)', async () => {
+    const valRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/conversion/validate',
+      payload: { filename: 'himno.cho', rawText: validChordProContent },
+    });
+    assert.strictEqual(valRes.statusCode, 401);
+
+    const transRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/conversion/transpile',
+      payload: { filename: 'himno.cho', targetFormat: 'LYRICS_ONLY', rawText: validChordProContent },
+    });
+    assert.strictEqual(transRes.statusCode, 401);
+
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/jobs',
@@ -231,6 +261,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/conversion/validate',
+      headers: { authorization: `Bearer ${testUserToken}` },
       payload: {
         filename: 'cancion.cho',
         rawText: validChordProContent,

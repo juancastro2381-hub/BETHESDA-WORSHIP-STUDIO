@@ -43,7 +43,7 @@ export const worshipServiceRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /api/v1/worship-services
   fastify.get(
     '/',
-    { preHandler: authGuard.requirePermission('services:list', false) },
+    { preHandler: authGuard.requirePermission('services:list', true) },
     async (request, reply) => {
       const query = ListWorshipServicesQuerySchema.parse(request.query);
       const result = await worshipService.listServices(query);
@@ -85,7 +85,7 @@ export const worshipServiceRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /api/v1/worship-services/:id
   fastify.get(
     '/:id',
-    { preHandler: authGuard.requirePermission('services:read', false) },
+    { preHandler: authGuard.requirePermission('services:read', true) },
     async (request, reply) => {
       const params = WorshipServiceIdParamSchema.parse(request.params);
       const service = await worshipService.getService(params.id);

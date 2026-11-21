@@ -227,7 +227,7 @@ describe('Phase 3A — WP-02: User Preferences REST API & Zod Validation Suite (
       assert.strictEqual(res.statusCode, 401);
     });
 
-    it('1.4 should reject request from SUSPENDED user with 401 UNAUTHORIZED', async () => {
+    it('1.4 should reject request from SUSPENDED user with 403 FORBIDDEN', async () => {
       const res = await app.inject({
         method: 'GET',
         url: '/api/v1/users/me/preferences',
@@ -236,7 +236,9 @@ describe('Phase 3A — WP-02: User Preferences REST API & Zod Validation Suite (
         },
       });
 
-      assert.strictEqual(res.statusCode, 401);
+      assert.strictEqual(res.statusCode, 403);
+      const json = JSON.parse(res.payload);
+      assert.strictEqual(json.error.code, 'FORBIDDEN');
     });
   });
 

@@ -57,7 +57,7 @@ describe('Phase 2A-R — CR-08: Conversion Security & Anti-IDOR Suite', () => {
     tokenUserA = tokenService.signAccessToken({
       id: userAId,
       email: 'userA@bethesda.com',
-      role: 'MUSICIAN',
+      role: 'WORSHIP_LEADER',
     }).token;
 
     tokenUserB = tokenService.signAccessToken({
@@ -72,39 +72,49 @@ describe('Phase 2A-R — CR-08: Conversion Security & Anti-IDOR Suite', () => {
       role: 'ADMIN',
     }).token;
 
-    // Asegurar que los usuarios existan en la base de datos de prueba
-    await db.insert(users).values([
-      {
+    // Asegurar que los usuarios existan en la base de datos de prueba con rol autoritativo vigente
+    await db
+      .insert(users)
+      .values({
         id: userAId,
         email: 'userA@bethesda.com',
         passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhashuserA',
         firstName: 'Usuario',
         lastName: 'A',
-        role: 'MUSICIAN',
+        role: 'WORSHIP_LEADER',
         accountStatus: 'ACTIVE',
         emailVerified: true,
-      },
-      {
-        id: userBId,
-        email: 'userB@bethesda.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhashuserB',
-        firstName: 'Usuario',
-        lastName: 'B',
-        role: 'MUSICIAN',
-        accountStatus: 'ACTIVE',
-        emailVerified: true,
-      },
-      {
-        id: adminId,
-        email: 'admin@bethesda.com',
-        passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhashadmin',
-        firstName: 'Admin',
-        lastName: 'Bethesda',
-        role: 'ADMIN',
-        accountStatus: 'ACTIVE',
-        emailVerified: true,
-      },
-    ]).onConflictDoNothing();
+      })
+      .onConflictDoUpdate({
+        target: users.id,
+        set: { role: 'WORSHIP_LEADER', accountStatus: 'ACTIVE', tokenVersion: 1 },
+      });
+
+    await db
+      .insert(users)
+      .values([
+        {
+          id: userBId,
+          email: 'userB@bethesda.com',
+          passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhashuserB',
+          firstName: 'Usuario',
+          lastName: 'B',
+          role: 'MUSICIAN',
+          accountStatus: 'ACTIVE',
+          emailVerified: true,
+        },
+        {
+          id: adminId,
+          email: 'admin@bethesda.com',
+          passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$dummyhashadmin',
+          firstName: 'Admin',
+          lastName: 'Bethesda',
+          role: 'ADMIN',
+          accountStatus: 'ACTIVE',
+          emailVerified: true,
+        },
+      ])
+      .onConflictDoNothing();
 
     // Crear un trabajo real para Usuario A
     const createRes = await app.inject({

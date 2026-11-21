@@ -317,8 +317,26 @@ describe('Production Gates — Auth Persistence, Concurrency Resilience & User A
     const body = JSON.parse(demoteRes.payload);
     assert.match(body.error.message, /único Super Administrador activo/i);
 
-    // Restaurar estado de superAdminId a ACTIVE
+    // Restaurar estado de superAdminId a ACTIVE (updateStatus incrementa tokenVersion en BD)
     await userRepo.updateStatus(superAdminId, 'ACTIVE');
+
+    // Verificar R1.3: el token anterior emitido antes de la suspensión/reactivación queda revocado (401)
+    const staleMeRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: { authorization: `Bearer ${superAdminAccessToken}` },
+    });
+    assert.equal(staleMeRes.statusCode, 401, 'Token con tokenVersion antiguo debe ser rechazado con 401 tras reactivación');
+
+    // Reautenticar al Super Admin para obtener token con tokenVersion vigente para pruebas siguientes
+    defaultRateLimiter.reset();
+    const reloginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: superAdminEmail, password: defaultPassword },
+    });
+    assert.equal(reloginRes.statusCode, 200);
+    superAdminAccessToken = JSON.parse(reloginRes.payload).data.accessToken;
 
     // Limpieza: eliminar sa2
     await pool.query(`DELETE FROM users WHERE id = $1`, [sa2.id]);

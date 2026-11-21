@@ -98,7 +98,7 @@ describe('Worship Studio — Phase 1B-R3 Final Certification & Independent Audit
 
   const testUserB: AuthenticatedUser = {
     id: '',
-    role: 'MUSICIAN',
+    role: 'WORSHIP_LEADER',
     email: 'musician_r3_b@bethesda.test',
   };
 
@@ -131,9 +131,9 @@ describe('Worship Studio — Phase 1B-R3 Final Certification & Independent Audit
     const uB = await userRepo.create({
       email: `musician_r3_b_${ts}@bethesda.test`,
       passwordHash: 'dummy_hash_b',
-      firstName: 'Musician',
-      lastName: 'R3-B',
-      role: 'MUSICIAN',
+      firstName: 'Worship',
+      lastName: 'Leader R3-B',
+      role: 'WORSHIP_LEADER',
     });
     userBId = uB.id;
     testUserB.id = userBId;
@@ -159,7 +159,7 @@ describe('Worship Studio — Phase 1B-R3 Final Certification & Independent Audit
     userBToken = tokenService.signAccessToken({
       id: userBId,
       email: testUserB.email,
-      role: 'MUSICIAN',
+      role: 'WORSHIP_LEADER',
     }).token;
 
     adminToken = tokenService.signAccessToken({
@@ -440,7 +440,7 @@ describe('Worship Studio — Phase 1B-R3 Final Certification & Independent Audit
         passwordHash: 'dummy_hash',
         firstName: 'TempR3',
         lastName: 'User',
-        role: 'MUSICIAN',
+        role: 'WORSHIP_LEADER',
       });
 
       const tempToken = tokenService.signAccessToken({

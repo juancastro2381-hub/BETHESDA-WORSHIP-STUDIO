@@ -616,10 +616,8 @@ export const audioRoutes: FastifyPluginAsync = async (fastify) => {
         );
         authenticatedUserId = ticketData.userId;
       } else {
-        await authGuard.authenticate(request, reply);
-        if (request.user) {
-          authenticatedUserId = request.user.sub;
-        }
+        await authGuard.requirePermission('songs:read', true)(request, reply);
+        authenticatedUserId = request.user!.sub;
       }
 
       if (!authenticatedUserId) {

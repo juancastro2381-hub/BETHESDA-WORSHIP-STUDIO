@@ -348,12 +348,12 @@ export const ingestionRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const { source, buffer } = await ingestionService.getSourceFile(paramResult.data.sourceId, user);
-      const filename = source.filename || 'source.bin';
+      const filename = (source.filename || 'source.bin').replace(/["\r\n\\]/g, '').trim() || 'source.bin';
       const mimeType = source.mimeType || 'application/octet-stream';
 
       return reply
         .header('Content-Type', mimeType)
-        .header('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`)
+        .header('Content-Disposition', `attachment; filename="${filename}"`)
         .header('X-Checksum-SHA256', source.checksumSha256 || '')
         .header('Content-Length', buffer.length)
         .send(buffer);

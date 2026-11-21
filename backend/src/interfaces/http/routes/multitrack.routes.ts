@@ -128,7 +128,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/sessions',
     {
-      preHandler: [authGuard.requirePermission('songs:update_draft')],
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
     },
     async (request, reply) => {
       const user = request.user!;
@@ -157,7 +157,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/sessions/:sessionId',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = request.user!;
@@ -178,7 +178,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/by-song/:songId',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = request.user!;
@@ -213,7 +213,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.patch(
     '/sessions/:sessionId/tracks/:trackId',
     {
-      preHandler: [authGuard.requirePermission('songs:update_draft')],
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
     },
     async (request, reply) => {
       const user = request.user!;
@@ -237,7 +237,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.delete(
     '/sessions/:sessionId',
     {
-      preHandler: [authGuard.requirePermission('songs:update_draft')],
+      preHandler: [authGuard.requirePermission('songs:update_draft', true)],
     },
     async (request, reply) => {
       const user = request.user!;
@@ -262,7 +262,7 @@ export const multitrackRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/sessions/:sessionId/offline-status',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const user = request.user!;

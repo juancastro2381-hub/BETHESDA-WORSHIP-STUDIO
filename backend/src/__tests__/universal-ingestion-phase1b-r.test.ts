@@ -87,7 +87,7 @@ describe('Worship Studio — Phase 1B-R Remediation Test Suite', () => {
 
   const testUserB: AuthenticatedUser = {
     id: '',
-    role: 'MUSICIAN',
+    role: 'WORSHIP_LEADER',
     email: 'userb@bethesda.org',
   };
 
@@ -120,9 +120,9 @@ describe('Worship Studio — Phase 1B-R Remediation Test Suite', () => {
     const uB = await userRepo.create({
       email: `userb_${ts}@bethesda.test`,
       passwordHash: 'dummy_hash_b',
-      firstName: 'Musician',
-      lastName: 'User B',
-      role: 'MUSICIAN',
+      firstName: 'Worship',
+      lastName: 'Leader B',
+      role: 'WORSHIP_LEADER',
     });
     userBId = uB.id;
     testUserB.id = userBId;
@@ -148,7 +148,7 @@ describe('Worship Studio — Phase 1B-R Remediation Test Suite', () => {
     userBToken = tokenService.signAccessToken({
       id: userBId,
       email: testUserB.email,
-      role: 'MUSICIAN',
+      role: 'WORSHIP_LEADER',
     }).token;
 
     adminToken = tokenService.signAccessToken({

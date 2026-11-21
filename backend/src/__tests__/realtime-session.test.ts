@@ -435,15 +435,38 @@ describe('Workstream C — Phase 3B Realtime Liturgical Flow Suite', () => {
       role: 'WORSHIP_LEADER', // El token declara que es WORSHIP_LEADER
     }).token;
 
-    // 2. Administrador degrada su rol en PostgreSQL a VIEWER
+    // 2. Administrador degrada su rol en PostgreSQL a VIEWER (también incrementa tokenVersion a 2)
     await userRepo.updateRole(downgradedUser.id, 'VIEWER');
 
-    // 3. El usuario intenta crear una sesión con su token anterior vigente: debe ser rechazado inmediatamente
-    const res = await app.inject({
+    // 3a. El token anterior con tokenVersion=1 queda revocado de inmediato (401 Unauthorized — R1.3)
+    const revokedRes = await app.inject({
       method: 'POST',
       url: '/api/v1/realtime/sessions',
       headers: {
         authorization: `Bearer ${staleLeaderToken}`,
+      },
+      payload: {
+        setlistId: testSetlist.id,
+        initialItemIndex: 0,
+      },
+    });
+    assert.equal(revokedRes.statusCode, 401, 'Token con tokenVersion antiguo debe ser rechazado con 401');
+    const revokedBody = JSON.parse(revokedRes.payload);
+    assert.match(revokedBody.error.message, /revocado/i);
+
+    // 3b. Incluso un token con tokenVersion=2 actual pero claim de rol antiguo debe ser bloqueado por el rol VIEWER en BD (403)
+    const staleRoleCurrentVersionToken = tokenService.signAccessToken({
+      id: downgradedUser.id,
+      email: downgradedUser.email,
+      role: 'WORSHIP_LEADER',
+      tokenVersion: 2,
+    }).token;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/realtime/sessions',
+      headers: {
+        authorization: `Bearer ${staleRoleCurrentVersionToken}`,
       },
       payload: {
         setlistId: testSetlist.id,

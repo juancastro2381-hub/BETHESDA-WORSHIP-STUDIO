@@ -603,7 +603,7 @@ describe('Worship Studio — Phase 1B-R2 Final Integrity Remediation Suite', () 
         passwordHash: 'dummy_hash',
         firstName: 'Temp',
         lastName: 'User',
-        role: 'MUSICIAN',
+        role: 'WORSHIP_LEADER',
       });
 
       const tempToken = tokenService.signAccessToken({

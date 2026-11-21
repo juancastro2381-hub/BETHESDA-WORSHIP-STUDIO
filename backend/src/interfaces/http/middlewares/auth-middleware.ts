@@ -59,13 +59,6 @@ export class AuthGuard {
     }
 
     if (
-      tokenPayload.tokenVersion !== undefined &&
-      dbUser.tokenVersion !== tokenPayload.tokenVersion
-    ) {
-      throw new UnauthorizedError('Token revocado por cambio de seguridad en la cuenta.');
-    }
-
-    if (
       dbUser.accountStatus === 'SUSPENDED' ||
       dbUser.accountStatus === 'LOCKED' ||
       dbUser.accountStatus === 'PENDING_INVITATION'
@@ -83,6 +76,13 @@ export class AuthGuard {
 
     if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
       throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
+    }
+
+    if (
+      typeof tokenPayload.tokenVersion !== 'number' ||
+      dbUser.tokenVersion !== tokenPayload.tokenVersion
+    ) {
+      throw new UnauthorizedError('Token revocado por cambio de seguridad en la cuenta.');
     }
 
     return dbUser;
@@ -108,11 +108,11 @@ export class AuthGuard {
   };
 
   /**
-   * Guard que valida si el usuario posee un permiso específico (RBAC).
+   * Guard que valida si el usuario posee un permiso específico (RBAC), verificando estado, bloqueo y tokenVersion en BD.
    * @param permission Permiso requerido
-   * @param verifyDatabaseRole Si es true, valida en tiempo real el rol y tokenVersion contra la base de datos (para operaciones sensibles)
+   * @param verifyDatabaseRole Si es true (por defecto), también valida en tiempo real que el rol actual en BD autorice el permiso
    */
-  public requirePermission = (permission: Permission, verifyDatabaseRole = false) => {
+  public requirePermission = (permission: Permission, verifyDatabaseRole = true) => {
     return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
       const user = await this.ensureJwtAuthenticated(request, reply);
 
@@ -125,13 +125,13 @@ export class AuthGuard {
         );
       }
 
-      // Si la operación es sensible, verificar el estado, tokenVersion y rol autoritativo directo en la BD
-      if (verifyDatabaseRole) {
-        const rawDbUser = await this.userRepository.findById(user.sub);
-        const dbUser = this.validateDbSessionState(rawDbUser, user, {
-          allowMustChangePassword: false,
-        });
+      // Verificar incondicionalmente estado, bloqueo y tokenVersion autoritativo en la BD
+      const rawDbUser = await this.userRepository.findById(user.sub);
+      const dbUser = this.validateDbSessionState(rawDbUser, user, {
+        allowMustChangePassword: false,
+      });
 
+      if (verifyDatabaseRole) {
         const currentDbPermissions = ROLE_PERMISSIONS[dbUser.role as UserRole] || [];
         if (!currentDbPermissions.includes(permission)) {
           throw new ForbiddenError(

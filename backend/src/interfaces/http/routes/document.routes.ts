@@ -15,7 +15,7 @@ import { SongService } from '../../../application/song-service.ts';
 import { AuthGuard } from '../middlewares/auth-middleware.ts';
 import { JwtTokenService } from '../../../application/token-service.ts';
 
-import { UnauthorizedError } from '../../../domain/errors.ts';
+import { ForbiddenError, UnauthorizedError } from '../../../domain/errors.ts';
 import { ROLE_PERMISSIONS, type UserRole } from '../../../domain/auth-types.ts';
 import { globalStreamTicketService } from '../../../application/stream-ticket-service.ts';
 
@@ -63,7 +63,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/inspect',
     {
-      preHandler: [authGuard.requirePermission('songs:create')],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const body = InspectDocumentBodySchema.parse(request.body);
@@ -87,7 +87,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/import-song',
     {
-      preHandler: [authGuard.requirePermission('songs:create')],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const body = ImportVisualSongBodySchema.parse(request.body);
@@ -112,7 +112,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/:storageKey/ticket',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { storageKey } = StorageKeyParamSchema.parse(request.params);
@@ -164,15 +164,35 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
             'El rol del usuario en el ticket no tiene permisos para visualizar documentos.'
           );
         }
+
+        // Validar estado autoritativo y rol vigente del usuario contra PostgreSQL
+        const dbUser = await userRepo.findById(ticketData.userId);
+        if (!dbUser) {
+          globalStreamTicketService.revokeTicketsForUser(ticketData.userId);
+          throw new UnauthorizedError('Usuario no encontrado o dado de baja en la base de datos.');
+        }
+        if (dbUser.accountStatus !== 'ACTIVE') {
+          globalStreamTicketService.revokeTicketsForUser(ticketData.userId);
+          throw new ForbiddenError(
+            `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación denegada.`
+          );
+        }
+        if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
+          globalStreamTicketService.revokeTicketsForUser(ticketData.userId);
+          throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
+        }
+        const dbPermissions = ROLE_PERMISSIONS[dbUser.role as UserRole] || [];
+        if (!dbPermissions.includes('songs:read')) {
+          globalStreamTicketService.revokeTicketsForUser(ticketData.userId);
+          throw new ForbiddenError(
+            `El rol actual en base de datos (${dbUser.role}) no autoriza el permiso requerido (songs:read).`
+          );
+        }
+
         authenticatedUserId = ticketData.userId;
       } else {
-        await authGuard.authenticate(request, reply);
-        if (request.user) {
-          const permissions = ROLE_PERMISSIONS[request.user.role as UserRole] || [];
-          if (permissions.includes('songs:read')) {
-            authenticatedUserId = request.user.sub;
-          }
-        }
+        await authGuard.requirePermission('songs:read', true)(request, reply);
+        authenticatedUserId = request.user!.sub;
       }
 
       if (!authenticatedUserId) {
@@ -211,7 +231,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/:storageKey/analyze',
     {
-      preHandler: [authGuard.requirePermission('songs:read')],
+      preHandler: [authGuard.requirePermission('songs:read', true)],
     },
     async (request, reply) => {
       const { storageKey } = StorageKeyParamSchema.parse(request.params);
@@ -224,7 +244,7 @@ export const documentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     '/:storageKey/convert-song',
     {
-      preHandler: [authGuard.requirePermission('songs:create')],
+      preHandler: [authGuard.requirePermission('songs:create', true)],
     },
     async (request, reply) => {
       const { storageKey } = StorageKeyParamSchema.parse(request.params);

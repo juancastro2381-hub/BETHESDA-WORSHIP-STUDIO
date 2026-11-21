@@ -56,7 +56,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const body = CreateRealtimeSessionBodySchema.parse(request.body);
       const user = request.user!;
@@ -108,7 +108,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.get(
     '/sessions/by-setlist/:setlistId',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { setlistId } = request.params as { setlistId: string };
       await assertFreshActiveUser(request.user!.sub);
@@ -134,7 +134,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.get(
     '/sessions/:sessionId',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       await assertFreshActiveUser(request.user!.sub);
@@ -158,7 +158,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions/:sessionId/join',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
@@ -187,7 +187,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions/:sessionId/leave',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
@@ -205,7 +205,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions/:sessionId/heartbeat',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
@@ -222,7 +222,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions/:sessionId/actions',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const action = RealtimeActionBodySchema.parse(request.body);
@@ -255,7 +255,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
   // ==========================================================================
   fastify.post(
     '/sessions/:sessionId/ticket',
-    { preHandler: authGuard.requirePermission('setlists:read', false) },
+    { preHandler: authGuard.requirePermission('setlists:read', true) },
     async (request, reply) => {
       const { sessionId } = RealtimeSessionParamSchema.parse(request.params);
       const user = request.user!;
@@ -311,11 +311,9 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
         authenticatedRole = ticketData.role;
       } else {
         // 2. Probar encabezado Authorization Bearer estándar (clientes que admiten headers)
-        await authGuard.authenticate(request, reply);
-        if (request.user) {
-          authenticatedUserId = request.user.sub;
-          authenticatedRole = request.user.role;
-        }
+        await authGuard.requirePermission('setlists:read', true)(request, reply);
+        authenticatedUserId = request.user!.sub;
+        authenticatedRole = request.user!.role;
       }
 
       if (!authenticatedUserId || !authenticatedRole) {

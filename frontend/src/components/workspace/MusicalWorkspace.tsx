@@ -23,12 +23,19 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useMusicalWorkspace } from '../../core/workspace/use-musical-workspace.ts';
 import { useSetlistExecution } from '../../core/workspace/use-setlist-execution.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
-import { BethesdaApiClient } from '../../core/api/api-client.ts';
+import { BethesdaApiClient, type BackendVersionItem } from '../../core/api/api-client.ts';
 import { type UserViewPreferenceData } from '../../core/api/preference-types.ts';
+import { type FrontendReadingFormat } from '../../core/api/setlist-types.ts';
 import { type ViewRepresentation } from '../../core/projection/types.ts';
 import { CanonicalMusicPayload } from '../../core/canonical-model/index.ts';
+import {
+  DEFAULT_STAND_ZOOM,
+  resolveEffectiveStandView,
+  resolveReadingFormatForSong,
+  zoomInStand,
+  zoomOutStand,
+} from '../../core/workspace/music-stand-controller.ts';
 import { MusicalScoreRenderer } from '../../core/rendering/react/musical-score-renderer.tsx';
-import { DiagnosticPanel } from './DiagnosticPanel.tsx';
 import { MusicalControls } from './MusicalControls.tsx';
 import { RendererStatus } from './RendererStatus.tsx';
 import { ScenarioPresets } from './ScenarioPresets.tsx';
@@ -39,11 +46,20 @@ import { DatabaseSongsModal } from './DatabaseSongsModal.tsx';
 import { SetlistsModal } from './SetlistsModal.tsx';
 import { SetlistNavigationToolbar } from './SetlistNavigationToolbar.tsx';
 import { ServiceMomentCard } from './ServiceMomentCard.tsx';
-import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 import { useAutoscroll } from '../../core/autoscroll/use-autoscroll.ts';
 import { AutoscrollControl } from './AutoscrollControl.tsx';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
+import { swLifecycleManager } from '../../core/offline/sw-lifecycle-manager.ts';
 import { VisualDocumentStand } from './VisualDocumentStand.tsx';
+import { ConversionCenterWorkspace } from '../conversion/ConversionCenterWorkspace.tsx';
+import {
+  FormatCompletionWizardModal,
+  createInitialFormatCompletionDraftState,
+  type FormatCompletionUnsavedDraftState,
+} from './FormatCompletionWizardModal.tsx';
+import { type ReadingFormatId } from './reading-format-selector-component.ts';
+import { type StandFormatCapabilityDescriptor } from '../../core/workspace/stand-format-capabilities.ts';
+import { type CompletionProposalSummaryDTO } from '../../core/api/api-client.ts';
 
 export interface MusicalWorkspaceProps {
   readonly initialSetlistId?: string | undefined;
@@ -55,12 +71,13 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   apiClient,
 }) => {
   const client = apiClient ?? BethesdaApiClient.getInstance();
-  const { user } = useAuth();
+  const { user, isReadOnlyOffline } = useAuth();
 
   // Modales y paneles emergentes
   const [showUploader, setShowUploader] = useState<boolean>(false);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [showSetlistsModal, setShowSetlistsModal] = useState<boolean>(false);
+  const [showConversionCenter, setShowConversionCenter] = useState<boolean>(false);
 
   // Hook del Espacio de Trabajo Musical (Fase 1G)
   const {
@@ -68,7 +85,9 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     availableInstruments,
     importedMeta,
     persistedMeta,
-    applyPreset,
+    activeScenarioPreview,
+    previewScenario,
+    exitScenarioPreview,
     selectSong,
     importSong,
     selectPersistedSong,
@@ -84,13 +103,23 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     resetToOriginal,
   } = useMusicalWorkspace();
 
-  // Estado de preferencias de visualización del usuario autenticado (Fase 3A — WP-02)
+  // Estado de preferencias de visualización del usuario autenticado (Fase 3A — WP-02 & Fase 2C — 4.4)
   const [userPreferences, setUserPreferences] = useState<UserViewPreferenceData | null>(null);
 
-  // Cargar preferencias del usuario al autenticarse y aplicarlas por defecto
+  // Fase 2C (4.5): Estado de Ejecución en Modo Atril (Music Stand Experience)
+  const [isMusicStandMode, setIsMusicStandMode] = useState<boolean>(false);
+  const [isHighContrast, setIsHighContrast] = useState<boolean>(false);
+  const [zoomPercent, setZoomPercent] = useState<number>(DEFAULT_STAND_ZOOM);
+  const [standFormatWarning, setStandFormatWarning] = useState<string | null>(null);
+
+  // Cargar preferencias del usuario al autenticarse en línea y aplicarlas por defecto
   useEffect(() => {
     if (!user) {
       setUserPreferences(null);
+      return;
+    }
+
+    if (isReadOnlyOffline || !offlineManager.isOnline()) {
       return;
     }
 
@@ -109,7 +138,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [user, client, applyUserPreference]);
+  }, [user, isReadOnlyOffline, client, applyUserPreference]);
 
   // Hook de Ejecución de Setlist de Atril Litúrgico (WS6)
   const setlistExecution = useSetlistExecution({
@@ -117,9 +146,44 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     apiClient: client,
   });
 
+  // WS-2D-01 (Sección 3.2): Diferir cualquier actualización del Service Worker durante ejecución activa en escenario
+  useEffect(() => {
+    swLifecycleManager.setStageProtectionState({
+      isSetlistActive: setlistExecution.loadedSetlist?.status === 'ACTIVE',
+      isMusicStandMode,
+    });
+  }, [setlistExecution.loadedSetlist?.status, isMusicStandMode]);
+
+  useEffect(() => {
+    return () => {
+      swLifecycleManager.setStageProtectionState({
+        isSetlistActive: false,
+        isMusicStandMode: false,
+      });
+    };
+  }, []);
+
   // Decisión 2 (Opción A): Memoria volátil de sesión para caché de canciones canónicas
   const songCacheRef = useRef<Map<string, CanonicalMusicPayload>>(new Map());
   const [songLoading, setSongLoading] = useState<boolean>(false);
+  const [persistedSongVersions, setPersistedSongVersions] = useState<BackendVersionItem[]>([]);
+  const [activeVersionId, setActiveVersionId] = useState<string | undefined>(undefined);
+  const [persistedSongStatus, setPersistedSongStatus] = useState<'DRAFT' | 'APPROVED' | 'ARCHIVED' | undefined>(
+    undefined
+  );
+
+  // Estado de Completitud de Contenido Musical y Capacidades Autoritativas del Servidor
+  const [serverFormatCapabilities, setServerFormatCapabilities] = useState<Partial<
+    Record<ReadingFormatId, StandFormatCapabilityDescriptor>
+  > | null>(null);
+  const [completionProposals, setCompletionProposals] = useState<CompletionProposalSummaryDTO[]>([]);
+  const [completionModalOpen, setCompletionModalOpen] = useState<boolean>(false);
+  const [completionTargetFormat, setCompletionTargetFormat] =
+    useState<ReadingFormatId>('STAFF_NOTATION');
+  const [completionUnsavedDraft, setCompletionUnsavedDraft] =
+    useState<FormatCompletionUnsavedDraftState>(() =>
+      createInitialFormatCompletionDraftState()
+    );
 
   // Referencia al contenedor de partitura y controlador de Autoscroll (WP-05)
   const viewportRef = useRef<HTMLElement | null>(null);
@@ -135,6 +199,56 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     supportedRepresentations,
   } = viewResult;
 
+  const loadServerFormatCapabilities = useCallback(
+    async (songId: string, instrumentId: string, capoFret: number, versionId?: string) => {
+      if (!user || isReadOnlyOffline || !offlineManager.isOnline()) return;
+      try {
+        const res = await client.getSongFormatCapabilities(songId, {
+          instrumentId,
+          capoFret,
+          ...(versionId ? { versionId } : {}),
+        });
+        setServerFormatCapabilities(res.capabilities);
+        setCompletionProposals(res.proposals);
+        setPersistedSongStatus(res.songStatus);
+      } catch {
+        // Fallback silencioso a evaluación determinista local sin bloquear lectura
+      }
+    },
+    [client, user, isReadOnlyOffline]
+  );
+
+  useEffect(() => {
+    const sid = persistedMeta?.songId;
+    if (!sid) {
+      setServerFormatCapabilities(null);
+      setCompletionProposals([]);
+      return;
+    }
+    void loadServerFormatCapabilities(sid, state.selectedInstrumentId, state.capoFret, activeVersionId);
+  }, [
+    persistedMeta?.songId,
+    state.selectedInstrumentId,
+    state.capoFret,
+    activeVersionId,
+    loadServerFormatCapabilities,
+  ]);
+
+  useEffect(() => {
+    setCompletionUnsavedDraft((prev) => ({
+      ...createInitialFormatCompletionDraftState(
+        activeSong?.title || '',
+        state.selectedInstrumentId,
+        state.capoFret
+      ),
+      tabInstrumentId:
+        prev.tabInstrumentId ||
+        (state.selectedInstrumentId === 'bass' || state.selectedInstrumentId === 'electric_guitar'
+          ? state.selectedInstrumentId
+          : 'acoustic_guitar'),
+    }));
+  }, [persistedMeta?.songId]);
+
   // Resetear autoscroll ante cambio de canción activa o transición de repertorio
   useEffect(() => {
     autoscroll.reset();
@@ -144,6 +258,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const handleSavePreference = useCallback(
     async (primary: ViewRepresentation, secondary: ViewRepresentation[]) => {
       if (!user) return;
+      offlineManager.assertCanMutateServer();
       const payload = {
         instrumentId: state.selectedInstrumentId,
         primaryRepresentation: primary,
@@ -159,6 +274,36 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
       setUserPreferences(updated);
     },
     [user, client, state]
+  );
+
+  // Fase 2C (4.4): Resolver precedencia entre preferencia personal del músico y sugerencia del ítem de setlist
+  const applySetlistItemStandView = useCallback(
+    (canonical: CanonicalMusicPayload, item: typeof setlistExecution.currentItem) => {
+      setStandFormatWarning(null);
+      const resolution = resolveEffectiveStandView({
+        song: canonical,
+        setlistItem: item,
+        userPreferences,
+        instrumentProfile,
+        currentPrimary: state.primaryRepresentation,
+        currentSecondary: state.secondaryRepresentations,
+      });
+
+      if (resolution.source === 'USER_PREFERENCE' && userPreferences) {
+        applyUserPreference(userPreferences);
+      } else if (resolution.source === 'SETLIST_SUGGESTION') {
+        setReadingFormat(resolution.primaryRepresentation, [...resolution.secondaryRepresentations]);
+      }
+    },
+    [
+      userPreferences,
+      instrumentProfile,
+      state.primaryRepresentation,
+      state.secondaryRepresentations,
+      applyUserPreference,
+      setReadingFormat,
+      setlistExecution,
+    ]
   );
 
   // Sincronización del ítem de Setlist activo con el Espacio de Trabajo Musical
@@ -182,6 +327,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           versionNumber: 1,
         });
         setTransposition(setlistExecution.transpositionSemitones);
+        applySetlistItemStandView(cached, item);
       } else {
         // 2. Cargar bajo demanda: consultar primero el almacenamiento offline local en IndexedDB (WP-04)
         setSongLoading(true);
@@ -197,6 +343,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
                 versionNumber: localPayload.metadata.versionNumber,
               });
               setTransposition(setlistExecution.transpositionSemitones);
+              applySetlistItemStandView(canonical, item);
               setSongLoading(false);
               return;
             }
@@ -211,6 +358,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
                 versionNumber: response.version.versionNumber,
               });
               setTransposition(setlistExecution.transpositionSemitones);
+              applySetlistItemStandView(canonical, item);
             });
           })
           .catch((err) => {
@@ -246,6 +394,7 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
     setlistExecution.transpositionSemitones,
     selectPersistedSong,
     setTransposition,
+    applySetlistItemStandView,
     client,
   ]);
 
@@ -262,15 +411,117 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           versionNumber: 1,
         });
         setTransposition(setlistExecution.transpositionSemitones);
+        applySetlistItemStandView(cached, setlistExecution.currentItem);
       }
     }
-  }, [setlistExecution, selectPersistedSong, setTransposition]);
+  }, [setlistExecution, selectPersistedSong, setTransposition, applySetlistItemStandView]);
 
   // Manejador de Descarga de Setlist
   const handleUnloadSetlist = useCallback(() => {
     setlistExecution.unloadSetlist();
+    setIsMusicStandMode(false);
+    setStandFormatWarning(null);
     resetToOriginal();
   }, [setlistExecution, resetToOriginal]);
+
+  // Fase 2C (4.5): Formato de lectura activo y conmutación rápida desde el atril (Zero-Fabrication)
+  const activeReadingFormat: FrontendReadingFormat =
+    state.primaryRepresentation === 'TABLATURE'
+      ? 'TAB'
+      : state.primaryRepresentation === 'STANDARD_NOTATION' || state.primaryRepresentation === 'GRAND_STAFF'
+        ? 'SCORE'
+        : state.primaryRepresentation === 'CHORDS'
+          ? 'CHORD_SHEET'
+          : 'LYRICS';
+
+  const activeReadingFormatLabel =
+    activeReadingFormat === 'SCORE'
+      ? 'Partitura'
+      : activeReadingFormat === 'CHORD_SHEET'
+        ? state.secondaryRepresentations.includes('LYRICS')
+          ? 'Cifrado con Letra'
+          : 'Cifrado Armónico'
+        : activeReadingFormat === 'TAB'
+          ? 'Tablatura'
+          : 'Letra Sola';
+
+  // Cargar una canción persistida específica en el Atril Digital (resolviendo la discrepancia de asociación de WS-AUDIO)
+  const handleOpenPersistedSongInStand = useCallback(
+    async (songId: string, options?: { audioId?: string; versionId?: string }) => {
+      setSongLoading(true);
+      setStandFormatWarning(null);
+      try {
+        const [songRes, versionsList] = await Promise.all([
+          client.getSong(songId),
+          client.listSongVersions(songId).catch(() => [] as BackendVersionItem[]),
+        ]);
+
+        let targetVersion = songRes.version;
+        if (options?.versionId && versionsList.length > 0) {
+          const matched = versionsList.find((v) => v.id === options.versionId);
+          if (matched) {
+            targetVersion = matched;
+          }
+        }
+
+        const canonical = CanonicalMusicPayload.fromJSON(targetVersion.canonicalPayload);
+        songCacheRef.current.set(songId, canonical);
+        setPersistedSongVersions(versionsList);
+        setActiveVersionId(targetVersion.id);
+        setPersistedSongStatus(songRes.song.status);
+
+        selectPersistedSong(canonical, {
+          isPersisted: true,
+          songId: songRes.song.id,
+          versionNumber: targetVersion.versionNumber,
+        });
+
+        if (setlistExecution.loadedSetlist) {
+          setlistExecution.notifyOffSetlistSongSelected(songRes.song.title);
+        }
+        setShowConversionCenter(false);
+        setShowDbModal(false);
+        setShowUploader(false);
+      } catch (err) {
+        console.error('Error al abrir la canción asociada en el Atril Digital:', err);
+      } finally {
+        setSongLoading(false);
+      }
+    },
+    [client, selectPersistedSong, setlistExecution]
+  );
+
+  // Conmutar entre versiones históricas o aprobadas de la canción activa en el Atril Digital
+  const handleSelectSongVersion = useCallback(
+    async (versionId: string) => {
+      const currentSongId = persistedMeta?.songId;
+      if (!currentSongId) return;
+      const matched = persistedSongVersions.find((v) => v.id === versionId);
+      if (!matched) return;
+
+      const canonical = CanonicalMusicPayload.fromJSON(matched.canonicalPayload);
+      setActiveVersionId(matched.id);
+      selectPersistedSong(canonical, {
+        isPersisted: true,
+        songId: currentSongId,
+        versionNumber: matched.versionNumber,
+      });
+    },
+    [persistedMeta?.songId, persistedSongVersions, selectPersistedSong]
+  );
+
+  const handleQuickSelectFormat = useCallback(
+    (format: FrontendReadingFormat) => {
+      const check = resolveReadingFormatForSong(format, activeSong, instrumentProfile);
+      if (!check.isAvailable || check.resolvedFormat !== format || check.primary === null) {
+        setStandFormatWarning(check.unavailabilityReason ?? 'Formato no disponible para esta obra.');
+        return;
+      }
+      setStandFormatWarning(null);
+      setReadingFormat(check.primary, check.secondary);
+    },
+    [activeSong, instrumentProfile, setReadingFormat]
+  );
 
   const concertKeyStr = derivedView?.concertKey.toString() ?? 'Sol Mayor';
 
@@ -303,14 +554,17 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
   const visualMimeType =
     ((activeSong as any)?.metadata?.mimeType as string | undefined) ||
     (importedMeta?.format === 'PDF' ||
-    (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
-    (activeSong as any)?.sourceFormat === 'PDF'
+      (activeSong as any)?.metadata?.sourceFormat === 'PDF' ||
+      (activeSong as any)?.sourceFormat === 'PDF'
       ? 'application/pdf'
       : 'image/png');
 
   return (
-    <div className="musical-workspace-root">
-      {/* 0. Barra de Navegación de Atril Litúrgico (WS7: Decisión 1 Aprobada: Top en Desktop/Tablet, Bottom en Mobile) */}
+    <div
+      className={`musical-workspace-root ${isMusicStandMode ? 'music-stand-mode' : ''} ${isHighContrast ? 'high-contrast-stand' : ''
+        }`}
+    >
+      {/* 0. Barra de Navegación de Atril Litúrgico (WS7 & Fase 2C — 4.5) */}
       {setlistExecution.loadedSetlist && (
         <SetlistNavigationToolbar
           loadedSetlist={setlistExecution.loadedSetlist}
@@ -331,83 +585,99 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
           onReturnToSetlist={handleReturnToSetlist}
           onOpenSetlistsModal={() => setShowSetlistsModal(true)}
           onUnloadSetlist={handleUnloadSetlist}
+          isMusicStandMode={isMusicStandMode}
+          onToggleMusicStandMode={() => setIsMusicStandMode((prev) => !prev)}
+          isHighContrast={isHighContrast}
+          onToggleHighContrast={() => setIsHighContrast((prev) => !prev)}
+          zoomPercent={zoomPercent}
+          onZoomIn={() => setZoomPercent((prev) => zoomInStand(prev))}
+          onZoomOut={() => setZoomPercent((prev) => zoomOutStand(prev))}
+          onResetZoom={() => setZoomPercent(DEFAULT_STAND_ZOOM)}
+          activeReadingFormat={activeReadingFormat}
+          onQuickSelectFormat={handleQuickSelectFormat}
         />
       )}
 
-      {/* 1. Selector de Escenarios Dorados Oficiales (Cobertura de Regresión) */}
-      <ScenarioPresets
-        activePresetId={state.activePresetId}
-        onApplyPreset={(id) => {
-          applyPreset(id);
-          setShowUploader(false);
-          setShowDbModal(false);
-          setShowSetlistsModal(false);
-          if (setlistExecution.loadedSetlist) {
-            setlistExecution.notifyOffSetlistSongSelected(`Escenario ${id}`);
-          }
-        }}
-      />
-
-      {/* 2. Barra de Selección de Canción e Importación Real / Base de Datos / Setlists */}
-      <div className="catalog-and-import-bar">
-        <SongSelector
-          activeSongTitle={activeSong.title}
-          onSelectSong={(song) => {
-            selectSong(song);
-            setShowUploader(false);
-            setShowDbModal(false);
-            setShowSetlistsModal(false);
-            if (setlistExecution.loadedSetlist) {
-              setlistExecution.notifyOffSetlistSongSelected(song.title);
-            }
-          }}
-        />
-
-        {/* Decisión 3 (Opción B): Ocultar 'Repertorios de Culto' para usuarios no autenticados */}
-        {user !== null && (
+      {standFormatWarning && (
+        <div className="uploader-alert alert-error stand-format-warning" role="alert">
+          <span aria-hidden="true">⚠️</span>
+          <span>{standFormatWarning}</span>
           <button
             type="button"
-            className={`btn-toggle-setlists-modal ${showSetlistsModal ? 'active' : ''}`}
-            onClick={() => {
-              setShowSetlistsModal((prev) => !prev);
-              setShowDbModal(false);
-              setShowUploader(false);
-            }}
-            id="btn-toggle-setlists-modal"
-            aria-expanded={showSetlistsModal}
+            className="btn-clear-selection"
+            onClick={() => setStandFormatWarning(null)}
+            aria-label="Cerrar aviso de formato"
           >
-            {showSetlistsModal ? '✕ Cerrar Repertorios' : '📋 Repertorios de Culto (Setlists)'}
+            ✕
           </button>
-        )}
+        </div>
+      )}
 
-        <button
-          type="button"
-          className={`btn-toggle-db-modal ${showDbModal ? 'active' : ''}`}
-          onClick={() => {
-            setShowDbModal((prev) => !prev);
-            setShowUploader(false);
-            setShowSetlistsModal(false);
-          }}
-          id="btn-toggle-db-modal"
-          aria-expanded={showDbModal}
-        >
-          {showDbModal ? '✕ Cerrar Catálogo BD' : '💾 Catálogo en Base de Datos'}
-        </button>
+      {/* 1. Barra de Herramientas del Músico: Repertorios, Catálogo BD, Conversión e Importación (oculta en Modo Atril) */}
+      {!isMusicStandMode && (
+        <div className="catalog-and-import-bar">
 
-        <button
-          type="button"
-          className={`btn-toggle-uploader ${showUploader ? 'active' : ''}`}
-          onClick={() => {
-            setShowUploader((prev) => !prev);
-            setShowDbModal(false);
-            setShowSetlistsModal(false);
-          }}
-          id="btn-toggle-source-uploader"
-          aria-expanded={showUploader}
-        >
-          {showUploader ? '✕ Cerrar Importador' : '📥 Importar Archivo (MusicXML / ChordPro)'}
-        </button>
-      </div>
+          {/* Decisión 3 (Opción B): Ocultar 'Repertorios de Culto' para usuarios no autenticados */}
+          {user !== null && (
+            <button
+              type="button"
+              className={`btn-toggle-setlists-modal ${showSetlistsModal ? 'active' : ''}`}
+              onClick={() => {
+                setShowSetlistsModal((prev) => !prev);
+                setShowDbModal(false);
+                setShowUploader(false);
+              }}
+              id="btn-toggle-setlists-modal"
+              aria-expanded={showSetlistsModal}
+            >
+              {showSetlistsModal ? '✕ Cerrar Repertorios' : '📋 Repertorios de Culto (Setlists)'}
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`btn-toggle-db-modal ${showDbModal ? 'active' : ''}`}
+            onClick={() => {
+              setShowDbModal((prev) => !prev);
+              setShowUploader(false);
+              setShowSetlistsModal(false);
+            }}
+            id="btn-toggle-db-modal"
+            aria-expanded={showDbModal}
+          >
+            {showDbModal ? '✕ Cerrar Catálogo BD' : '💾 Catálogo en Base de Datos'}
+          </button>
+
+          <button
+            type="button"
+            className={`btn-toggle-conversion-center ${showConversionCenter ? 'active' : ''}`}
+            onClick={() => {
+              setShowConversionCenter((prev) => !prev);
+              setShowUploader(false);
+              setShowDbModal(false);
+              setShowSetlistsModal(false);
+            }}
+            id="btn-toggle-conversion-center"
+            aria-expanded={showConversionCenter}
+          >
+            {showConversionCenter ? '✕ Volver al Atril' : '🔄 Centro de Conversión'}
+          </button>
+
+          <button
+            type="button"
+            className={`btn-toggle-uploader ${showUploader ? 'active' : ''}`}
+            onClick={() => {
+              setShowUploader((prev) => !prev);
+              setShowDbModal(false);
+              setShowSetlistsModal(false);
+            }}
+            id="btn-toggle-source-uploader"
+            aria-expanded={showUploader}
+          >
+            {showUploader ? '✕ Cerrar Importador' : '📥 Importar Archivo (MusicXML / ChordPro)'}
+          </button>
+        </div>
+      )}
 
       {/* 2b. Modal de Repertorios Litúrgicos (Setlists) (Fase 2C — WS7) */}
       {showSetlistsModal && (
@@ -428,15 +698,15 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         <DatabaseSongsModal
           activeSong={activeSong}
           onSelectSong={(dbSong, meta) => {
-            if (meta) {
-              selectPersistedSong(dbSong, meta);
+            if (meta?.songId) {
+              void handleOpenPersistedSongInStand(meta.songId);
             } else {
               selectSong(dbSong);
+              if (setlistExecution.loadedSetlist) {
+                setlistExecution.notifyOffSetlistSongSelected(dbSong.title);
+              }
+              setShowDbModal(false);
             }
-            if (setlistExecution.loadedSetlist) {
-              setlistExecution.notifyOffSetlistSongSelected(dbSong.title);
-            }
-            setShowDbModal(false);
           }}
           onClose={() => setShowDbModal(false)}
         />
@@ -456,11 +726,23 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
         />
       )}
 
-      {/* 3. Discriminación Litúrgica: SONG vs SERVICE_MOMENT */}
-      {setlistExecution.loadedSetlist &&
-      setlistExecution.isServiceMoment &&
-      setlistExecution.currentItem?.itemType === 'SERVICE_MOMENT' &&
-      !setlistExecution.isOffSetlistSongActive ? (
+      {/* 3. Discriminación de Vista: Centro de Conversión vs Momento Litúrgico vs Partitura */}
+      {showConversionCenter ? (
+        <ConversionCenterWorkspace
+          initialSongId={persistedMeta?.songId}
+          diagnostics={diagnostics}
+          onClose={() => setShowConversionCenter(false)}
+          onOpenInMusicStand={(payload, meta) => {
+            importSong(payload, { format: 'CHORD_PRO', sourceName: meta?.title });
+            setShowConversionCenter(false);
+          }}
+          onOpenPersistedSongInStand={handleOpenPersistedSongInStand}
+          apiClient={client}
+        />
+      ) : setlistExecution.loadedSetlist &&
+        setlistExecution.isServiceMoment &&
+        setlistExecution.currentItem?.itemType === 'SERVICE_MOMENT' &&
+        !setlistExecution.isOffSetlistSongActive ? (
         /* Vista de Momento Litúrgico (WS7: Cero adaptadores de partitura inicializados) */
         <main className="workspace-viewport-area service-moment-viewport" role="main">
           <ServiceMomentCard
@@ -484,44 +766,70 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             versionNumber={persistedMeta?.versionNumber}
             persistedSongId={persistedMeta?.songId}
             isVisualDocument={isVisualDocument}
-          />
-
-          {/* 3b. AudioPlayerBar: Reproducción y Playback Offline de Audio (Workstream A) */}
-          <AudioPlayerBar
-            songId={persistedMeta?.songId ?? (activeSong as any)?.id}
-            songTitle={activeSong.title}
+            activeReadingFormatLabel={activeReadingFormatLabel}
+            songStatus={persistedSongStatus}
+            availableVersions={persistedSongVersions}
+            activeVersionId={activeVersionId}
+            onSelectVersion={(vid) => void handleSelectSongVersion(vid)}
           />
 
           {/* 4. MusicalControls: Instrumento, Representaciones, Capo, Transposición y Cifrado */}
-          <MusicalControls
-            selectedInstrumentId={state.selectedInstrumentId}
-            availableInstruments={availableInstruments}
-            instrumentProfile={instrumentProfile}
-            supportedRepresentations={supportedRepresentations}
-            primaryRepresentation={state.primaryRepresentation}
-            secondaryRepresentations={state.secondaryRepresentations}
-            capoFret={state.capoFret}
-            transpositionSemitones={state.transpositionSemitones}
-            chordNotationSystem={state.chordNotationSystem}
-            onSelectInstrument={selectInstrument}
-            onSelectPrimaryRepresentation={setPrimaryRepresentation}
-            onToggleSecondaryRepresentation={toggleSecondaryRepresentation}
-            onSetCapo={setCapo}
-            onSetTransposition={setTransposition}
-            onSetChordNotation={setChordNotation}
-            activeSong={activeSong}
-            userPreferences={userPreferences}
-            isAuthenticated={user !== null}
-            onSelectReadingFormat={setReadingFormat}
-            onSavePreference={handleSavePreference}
-          />
+          {!isMusicStandMode && (
+            <MusicalControls
+              selectedInstrumentId={state.selectedInstrumentId}
+              availableInstruments={availableInstruments}
+              instrumentProfile={instrumentProfile}
+              supportedRepresentations={supportedRepresentations}
+              primaryRepresentation={state.primaryRepresentation}
+              secondaryRepresentations={state.secondaryRepresentations}
+              capoFret={state.capoFret}
+              transpositionSemitones={state.transpositionSemitones}
+              chordNotationSystem={state.chordNotationSystem}
+              onSelectInstrument={selectInstrument}
+              onSelectPrimaryRepresentation={setPrimaryRepresentation}
+              onToggleSecondaryRepresentation={toggleSecondaryRepresentation}
+              onSetCapo={setCapo}
+              onSetTransposition={setTransposition}
+              onSetChordNotation={setChordNotation}
+              activeSong={activeSong}
+              userPreferences={userPreferences}
+              isAuthenticated={user !== null}
+              onSelectReadingFormat={setReadingFormat}
+              onSavePreference={handleSavePreference}
+              serverFormatCapabilities={serverFormatCapabilities}
+              songStatus={persistedSongStatus}
+              onOpenCompletionWorkflow={(fmtId) => {
+                setCompletionTargetFormat(fmtId);
+                setCompletionModalOpen(true);
+              }}
+            />
+          )}
 
           {/* 5. RendererStatus: Estado del motor de renderizado */}
-          <RendererStatus
-            activeRendererId={activeRendererId}
-            forcedRendererId={state.forcedRendererId}
-            onSetForcedRenderer={setForcedRenderer}
-          />
+          {!isMusicStandMode && (
+            <RendererStatus
+              activeRendererId={activeRendererId}
+              forcedRendererId={state.forcedRendererId}
+              onSetForcedRenderer={setForcedRenderer}
+            />
+          )}
+
+          {/* 5a. Indicador discreto cuando una vista rápida / escenario está activo */}
+          {!isMusicStandMode && activeScenarioPreview !== null && (
+            <div className="scenario-preview-banner" role="status" aria-live="polite">
+              <span>
+                <strong>Vista previa contextual activa ({activeScenarioPreview})</strong> sobre{' '}
+                <em>{activeSong.title}</em> — la canción canónica y tu configuración original permanecen protegidas.
+              </span>
+              <button
+                type="button"
+                className="btn-exit-scenario-preview"
+                onClick={exitScenarioPreview}
+              >
+                Volver a mi vista original
+              </button>
+            </div>
+          )}
 
           {/* 5b. AutoscrollControl: Desplazamiento Automático Manos Libres (WP-05 — Sin Pedales) */}
           <AutoscrollControl
@@ -529,12 +837,19 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
             isVisible={activeSong.measures.length > 0 || isVisualDocument}
           />
 
-          {/* 6. Viewport de Renderizado Musical Real */}
+          {/* 6. Viewport de Renderizado Musical Real (Contenedor de scroll aislado) */}
           <main
             ref={viewportRef}
             className="workspace-viewport-area"
+            data-scrollable="true"
             role="main"
             aria-label="Partitura y Notación Musical"
+            style={
+              {
+                zoom: `${zoomPercent}%`,
+                '--stand-zoom-scale': zoomPercent / 100,
+              } as React.CSSProperties
+            }
           >
             {songLoading ? (
               <div className="workspace-loading-state" role="status">
@@ -552,9 +867,47 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               />
             ) : activeSong.measures.length === 0 ? (
               <div className="workspace-empty-state" role="alert">
-                <div className="empty-icon">𝄞</div>
-                <h3>Canción Sin Contenido Musical</h3>
-                <p>La canción seleccionada no contiene compases ni eventos musicales canónicos.</p>
+                <div className="empty-icon">🎙️</div>
+                <h3>{activeSong.title} — Audio Preservado (Sin Notación Aprobada Aún)</h3>
+                <p>
+                  El audio original asociado a esta canción está disponible en el reproductor superior, pero aún no se
+                  ha aprobado una versión transcrita (ChordPro / MusicXML / Tablatura) mediante Revisión Humana.
+                </p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center', marginTop: '12px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowConversionCenter(true)}
+                    style={{
+                      padding: '8px 16px',
+                      background: '#7c3aed',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                    }}
+                  >
+                    🔬 Abrir Centro de Conversión para Analizar y Revisar Borrador Musical
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCompletionTargetFormat('CHORD_CHART');
+                      setCompletionModalOpen(true);
+                    }}
+                    style={{
+                      padding: '8px 16px',
+                      background: 'rgba(37, 99, 235, 0.25)',
+                      color: '#bfdbfe',
+                      border: '1px solid rgba(96, 165, 250, 0.45)',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                    }}
+                  >
+                    🧩 Completar Letra, Melodía o Tablatura Manualmente
+                  </button>
+                </div>
               </div>
             ) : derivedView ? (
               <MusicalScoreRenderer
@@ -570,11 +923,67 @@ export const MusicalWorkspace: React.FC<MusicalWorkspaceProps> = ({
               </div>
             )}
           </main>
+
+          {/* 7. Vistas rápidas y canciones canónicas de prueba (área secundaria colapsable — fuera del flujo principal) */}
+          {!isMusicStandMode && (
+            <details className="quick-scenarios-drawer">
+              <summary className="quick-scenarios-summary">
+                Vistas rápidas y canciones de prueba (QA / previsualización no destructiva)
+              </summary>
+              <div className="quick-scenarios-body">
+                <SongSelector
+                  activeSongTitle={activeSong.title}
+                  onSelectSong={(song) => {
+                    selectSong(song);
+                    setShowUploader(false);
+                    setShowDbModal(false);
+                    setShowSetlistsModal(false);
+                    if (setlistExecution.loadedSetlist) {
+                      setlistExecution.notifyOffSetlistSongSelected(song.title);
+                    }
+                  }}
+                />
+                <ScenarioPresets
+                  activePresetId={state.activePresetId}
+                  activeSong={activeSong}
+                  activeScenarioPreview={activeScenarioPreview}
+                  onApplyPreset={previewScenario}
+                  onExitPreview={exitScenarioPreview}
+                />
+              </div>
+            </details>
+          )}
         </>
       )}
 
-      {/* 7. DiagnosticPanel: Diagnósticos estructurados colapsables */}
-      <DiagnosticPanel diagnostics={diagnostics} />
+      {/* 8. Asistente Guiado de Completitud Musical por Formato (Scope 1C Integration) */}
+      <FormatCompletionWizardModal
+        isOpen={completionModalOpen}
+        initialTargetFormat={completionTargetFormat}
+        song={activeSong}
+        songId={persistedMeta?.songId}
+        songStatus={persistedSongStatus}
+        instrumentProfile={instrumentProfile}
+        capoFret={state.capoFret}
+        serverCapabilities={serverFormatCapabilities}
+        pendingProposals={completionProposals}
+        canApproveAndPublish={Boolean(
+          user && ['WORSHIP_LEADER', 'ADMIN', 'SUPER_ADMIN'].includes(user.role)
+        )}
+        isAuthenticated={user !== null}
+        apiClient={client}
+        preservedDraftState={completionUnsavedDraft}
+        onUpdateDraftState={setCompletionUnsavedDraft}
+        onClose={() => setCompletionModalOpen(false)}
+        onSongVersionUpdated={async (sid) => {
+          await handleOpenPersistedSongInStand(sid);
+          await loadServerFormatCapabilities(sid, state.selectedInstrumentId, state.capoFret);
+        }}
+        onApplyLocalPreview={(previewPayload) => {
+          importSong(previewPayload, { format: 'MUSIC_XML', sourceName: previewPayload.title });
+          setCompletionModalOpen(false);
+        }}
+      />
     </div>
   );
 };

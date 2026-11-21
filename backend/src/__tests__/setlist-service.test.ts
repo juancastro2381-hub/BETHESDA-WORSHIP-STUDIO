@@ -53,6 +53,7 @@ class InMemorySetlistRepository implements ISetlistRepository {
         status: s.status,
         directorUserId: s.directorUserId,
         directorName: s.directorUserId ? 'Director Test' : undefined,
+        isTemplate: s.isTemplate,
         totalItems: setlistItems.length,
         totalSongs: setlistItems.filter((i) => i.itemType === 'SONG').length,
         createdAt: s.createdAt,
@@ -80,21 +81,58 @@ class InMemorySetlistRepository implements ISetlistRepository {
   }
 
   public async create(dto: CreateSetlistDTO): Promise<SetlistEntity> {
+    const targetStatus = dto.status ?? 'PLANNING';
+    if (targetStatus === 'ACTIVE') {
+      const existingActive = Array.from(this.setlists.values()).find((s) => s.status === 'ACTIVE');
+      if (existingActive) {
+        throw new ConflictError(
+          `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+        );
+      }
+    }
+
     const id = `setlist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date();
     const entity: SetlistEntity = {
       id,
       title: dto.title,
       scheduledDateTime: dto.scheduledDateTime ? new Date(dto.scheduledDateTime) : null,
-      status: dto.status ?? 'PLANNING',
+      status: targetStatus,
       directorUserId: dto.directorUserId ?? null,
       notes: dto.notes ?? null,
+      isTemplate: dto.isTemplate ?? false,
       createdAt: now,
       updatedAt: now,
     };
     this.setlists.set(id, entity);
     this.items.set(id, []);
     return entity;
+  }
+
+  public async duplicate(
+    id: string,
+    newTitle: string,
+    options?: { scheduledDateTime?: Date | string | null; isTemplate?: boolean }
+  ): Promise<SetlistWithItemsEntity> {
+    const source = this.setlists.get(id);
+    if (!source) throw new NotFoundError('Setlist', id);
+    const created = await this.create({
+      title: newTitle,
+      scheduledDateTime: options?.scheduledDateTime ?? null,
+      directorUserId: source.directorUserId,
+      notes: source.notes,
+      isTemplate: options?.isTemplate ?? false,
+    });
+    const now = new Date();
+    const clonedItems = (this.items.get(id) ?? []).map((item, idx) => ({
+      ...item,
+      id: `item-dup-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+      setlistId: created.id,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    this.items.set(created.id, clonedItems);
+    return { ...created, directorName: null, items: [...clonedItems] };
   }
 
   public async update(id: string, dto: UpdateSetlistDTO): Promise<SetlistEntity | null> {
@@ -118,6 +156,34 @@ class InMemorySetlistRepository implements ISetlistRepository {
   public async updateStatus(id: string, status: SetlistStatus): Promise<SetlistEntity | null> {
     const setlist = this.setlists.get(id);
     if (!setlist) return null;
+
+    if (setlist.status === status) {
+      return { ...setlist };
+    }
+
+    const allowedTransitions: Record<SetlistStatus, readonly SetlistStatus[]> = {
+      PLANNING: ['ACTIVE', 'ARCHIVED'],
+      ACTIVE: ['COMPLETED', 'PLANNING'],
+      COMPLETED: ['ARCHIVED'],
+      ARCHIVED: [],
+    };
+    const allowed = allowedTransitions[setlist.status];
+    if (!allowed || !allowed.includes(status)) {
+      throw new ConflictError(
+        `Transición de estado litúrgico no permitida: no se puede cambiar de '${setlist.status}' a '${status}'.`
+      );
+    }
+
+    if (status === 'ACTIVE') {
+      const existingActive = Array.from(this.setlists.values()).find(
+        (s) => s.status === 'ACTIVE' && s.id !== id
+      );
+      if (existingActive) {
+        throw new ConflictError(
+          `Ya existe un setlist en estado ACTIVE ('${existingActive.title}'). Debe finalizar o cambiar su estado antes de activar un nuevo culto.`
+        );
+      }
+    }
 
     const updated: SetlistEntity = {
       ...setlist,
@@ -164,6 +230,9 @@ class InMemorySetlistRepository implements ISetlistRepository {
       durationMinutes: dto.itemType === 'SERVICE_MOMENT' ? dto.durationMinutes ?? null : null,
       musicalKey: dto.itemType === 'SERVICE_MOMENT' ? dto.musicalKey ?? null : null,
       notesForTeam: dto.notesForTeam ?? null,
+      preferredInstrument: dto.preferredInstrument ?? null,
+      preferredTuning: dto.preferredTuning ?? null,
+      preferredFormat: dto.preferredFormat ?? null,
       createdAt: now,
       updatedAt: now,
       song: dto.itemType === 'SONG' && dto.songId ? {

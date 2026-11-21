@@ -95,9 +95,9 @@ describe('Phase 2A — Round-Trip Persistence & Invariant Integrity Tests', () =
 
     // Compás 1
     const m1 = payloadB.measures[0]!;
-    assert.strictEqual(m1.timeSignature.numerator, 4);
-    assert.strictEqual(m1.timeSignature.denominator, 4);
-    assert.strictEqual(m1.keySignature.toMusicalKey().tonic.toString(), 'G');
+    assert.strictEqual(m1.timeSignature?.numerator, 4);
+    assert.strictEqual(m1.timeSignature?.denominator, 4);
+    assert.strictEqual(m1.keySignature?.toMusicalKey().tonic.toString(), 'G');
 
     const notesM1 = m1.getAllNotes();
     assert.strictEqual(notesM1.length, 3);

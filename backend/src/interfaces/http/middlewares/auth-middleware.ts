@@ -47,28 +47,75 @@ export class AuthGuard {
   };
 
   /**
-   * Guard que exige que el usuario esté autenticado.
+   * Valida estado de cuenta, bloqueo y tokenVersion en tiempo real contra BD para mitigar tokens revocados.
    */
-  public requireAuth = async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
+  private validateDbSessionState(
+    dbUser: Awaited<ReturnType<IUserRepository['findById']>>,
+    tokenPayload: JwtPayload,
+    options: { allowMustChangePassword: boolean }
+  ): NonNullable<Awaited<ReturnType<IUserRepository['findById']>>> {
+    if (!dbUser) {
+      throw new UnauthorizedError('Usuario no encontrado o dado de baja en la base de datos.');
+    }
+
+    if (
+      dbUser.accountStatus === 'SUSPENDED' ||
+      dbUser.accountStatus === 'LOCKED' ||
+      dbUser.accountStatus === 'PENDING_INVITATION'
+    ) {
+      throw new ForbiddenError(
+        `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación denegada.`
+      );
+    }
+
+    if (!options.allowMustChangePassword && dbUser.accountStatus !== 'ACTIVE') {
+      throw new ForbiddenError(
+        `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación denegada.`
+      );
+    }
+
+    if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
+      throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
+    }
+
+    if (
+      typeof tokenPayload.tokenVersion !== 'number' ||
+      dbUser.tokenVersion !== tokenPayload.tokenVersion
+    ) {
+      throw new UnauthorizedError('Token revocado por cambio de seguridad en la cuenta.');
+    }
+
+    return dbUser;
+  }
+
+  private async ensureJwtAuthenticated(request: FastifyRequest, reply: FastifyReply): Promise<JwtPayload> {
     if (!request.user) {
-      // Intentar autenticar por si el hook global no corrió
-      await this.authenticate(request, _reply);
+      await this.authenticate(request, reply);
       if (!request.user) {
         throw new UnauthorizedError('Autenticación requerida para acceder a este recurso.');
       }
     }
+    return request.user;
+  }
+
+  /**
+   * Guard que exige que el usuario esté autenticado y valida estado de cuenta y tokenVersion.
+   */
+  public requireAuth = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const user = await this.ensureJwtAuthenticated(request, reply);
+    const dbUser = await this.userRepository.findById(user.sub);
+    this.validateDbSessionState(dbUser, user, { allowMustChangePassword: true });
   };
 
   /**
-   * Guard que valida si el usuario posee un permiso específico (RBAC).
+   * Guard que valida si el usuario posee un permiso específico (RBAC), verificando estado, bloqueo y tokenVersion en BD.
    * @param permission Permiso requerido
-   * @param verifyDatabaseRole Si es true, valida en tiempo real contra la base de datos (para operaciones sensibles)
+   * @param verifyDatabaseRole Si es true (por defecto), también valida en tiempo real que el rol actual en BD autorice el permiso
    */
-  public requirePermission = (permission: Permission, verifyDatabaseRole = false) => {
+  public requirePermission = (permission: Permission, verifyDatabaseRole = true) => {
     return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-      await this.requireAuth(request, reply);
+      const user = await this.ensureJwtAuthenticated(request, reply);
 
-      const user = request.user!;
       const tokenRole = user.role as UserRole;
       const allowedPermissions = ROLE_PERMISSIONS[tokenRole] || [];
 
@@ -78,23 +125,13 @@ export class AuthGuard {
         );
       }
 
-      // Si la operación es sensible, verificar el estado y rol autoritativo directo en la BD
+      // Verificar incondicionalmente estado, bloqueo y tokenVersion autoritativo en la BD
+      const rawDbUser = await this.userRepository.findById(user.sub);
+      const dbUser = this.validateDbSessionState(rawDbUser, user, {
+        allowMustChangePassword: false,
+      });
+
       if (verifyDatabaseRole) {
-        const dbUser = await this.userRepository.findById(user.sub);
-        if (!dbUser) {
-          throw new UnauthorizedError('Usuario no encontrado o dado de baja en la base de datos.');
-        }
-
-        if (dbUser.accountStatus !== 'ACTIVE') {
-          throw new ForbiddenError(
-            `Su cuenta se encuentra en estado '${dbUser.accountStatus}'. Operación denegada.`
-          );
-        }
-
-        if (dbUser.lockoutUntil && dbUser.lockoutUntil.getTime() > Date.now()) {
-          throw new ForbiddenError('La cuenta se encuentra temporalmente bloqueada por seguridad.');
-        }
-
         const currentDbPermissions = ROLE_PERMISSIONS[dbUser.role as UserRole] || [];
         if (!currentDbPermissions.includes(permission)) {
           throw new ForbiddenError(

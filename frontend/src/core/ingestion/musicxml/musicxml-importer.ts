@@ -150,13 +150,15 @@ export class MusicXmlImporter implements MusicImporter {
       }
 
       let activeDivisions = 1;
-      let activeTimeSignature = TimeSignature.FOUR_FOUR;
-      let activeKeySigRef = new KeySignatureReference(NoteName.C, 'MAJOR', new KeySignature(0));
+      let activeTimeSignature: TimeSignature | null = null;
+      let activeKeySigRef: KeySignatureReference | null = null;
+      let hasAnyDeclaredTimeSignature = false;
+      let hasAnyDeclaredKeySignature = false;
       const tempoEvents: TempoEvent[] = [];
       const sections: Section[] = [];
       const canonicalMeasures: Measure[] = [];
 
-      let currentMeasureStartTick = 0;
+      let currentMeasureStartTick: number | null = 0;
       let lyricSequence = 1;
 
       for (let mIdx = 0; mIdx < rawMeasures.length; mIdx++) {
@@ -180,10 +182,11 @@ export class MusicXmlImporter implements MusicImporter {
             if (beats && beatType) {
               try {
                 activeTimeSignature = new TimeSignature(beats, beatType);
+                hasAnyDeclaredTimeSignature = true;
               } catch (err) {
                 diagnostics.addWarning(
                   'INVALID_TIME_SIGNATURE',
-                  `Métrica inválida en compás ${measureNum}: ${beats}/${beatType}`,
+                  `Métrica inválida en compás ${measureNum}: ${beats}/${beatType}. Se preserva como no resuelta.`,
                   { measureNumber: measureNum }
                 );
               }
@@ -199,51 +202,106 @@ export class MusicXmlImporter implements MusicImporter {
               const keySig = new KeySignature(fifths);
               const tonic = this.deduceTonicFromFifths(fifths, mode === 'MAJOR');
               activeKeySigRef = new KeySignatureReference(tonic, mode, keySig);
+              hasAnyDeclaredKeySignature = true;
             } catch (err) {
               diagnostics.addWarning(
                 'INVALID_KEY_SIGNATURE',
-                `Armadura inválida en compás ${measureNum} (fifths: ${fifths})`,
+                `Armadura inválida en compás ${measureNum} (fifths: ${fifths}). Se preserva como no resuelta.`,
                 { measureNumber: measureNum }
               );
             }
           }
         }
 
+        // Calcular duración canónica del compás (CERO ASUNCIÓN DE 1920 / 4/4 CUANDO NO HAY MÉTRICA)
+        let calculatedDurationTicks: number | null = null;
+        if (activeTimeSignature) {
+          calculatedDurationTicks = activeTimeSignature.calculateMeasureDurationTicks();
+        } else {
+          // Pre-calcular duración a partir del contenido real de las notas y desplazamientos
+          let curTick = 0;
+          let maxTick = 0;
+          for (const ch of mEl.children) {
+            if (ch.name === 'note') {
+              const isChord = ch.child('chord') !== undefined;
+              const durDiv = ch.childInt('duration') ?? 0;
+              const durTicks = activeDivisions > 0 ? Math.round((durDiv * CANONICAL_TPQN) / activeDivisions) : 0;
+              if (!isChord && durTicks > 0) {
+                curTick += durTicks;
+                if (curTick > maxTick) maxTick = curTick;
+              }
+            } else if (ch.name === 'forward') {
+              const durDiv = ch.childInt('duration') ?? 0;
+              const durTicks = activeDivisions > 0 ? Math.round((durDiv * CANONICAL_TPQN) / activeDivisions) : 0;
+              curTick += durTicks;
+              if (curTick > maxTick) maxTick = curTick;
+            } else if (ch.name === 'backup') {
+              const durDiv = ch.childInt('duration') ?? 0;
+              const durTicks = activeDivisions > 0 ? Math.round((durDiv * CANONICAL_TPQN) / activeDivisions) : 0;
+              curTick = Math.max(0, curTick - durTicks);
+            }
+          }
+          if (maxTick > 0) {
+            calculatedDurationTicks = maxTick;
+          } else {
+            calculatedDurationTicks = null;
+            diagnostics.addWarning(
+              'UNRESOLVED_MEASURE_DURATION',
+              `Compás ${measureNum}: Compás sin métrica declarada y sin eventos temporales válidos; la duración se preserva como no resuelta (null) sin fabricar 480 ticks.`,
+              { measureNumber: measureNum }
+            );
+          }
+        }
+        const measureDurationTicks = calculatedDurationTicks;
+
         // Leer <direction> para tempos y secciones
         for (const dir of mEl.childrenNamed('direction')) {
-          // Tempo
+          // Tempo desde <sound tempo="..."> o <direction-type><metronome><per-minute>
           const soundEl = dir.child('sound');
           if (soundEl) {
             const tempoAttr = soundEl.attr('tempo');
             if (tempoAttr) {
               const parsedBpm = parseFloat(tempoAttr);
               if (parsedBpm > 0) {
-                tempoEvents.push(new TempoEvent(currentMeasureStartTick, parsedBpm));
+                tempoEvents.push(new TempoEvent(currentMeasureStartTick ?? 0, parsedBpm));
               }
             }
           }
 
-          // Marcadores de ensayo / secciones (rehearsal)
           const dirType = dir.child('direction-type');
-          const rehearsalText = dirType?.childText('rehearsal') ?? dirType?.childText('words');
-          if (rehearsalText) {
-            const sectionType = this.deduceSectionType(rehearsalText);
+          const metronomeEl = dirType?.child('metronome');
+          if (metronomeEl) {
+            const perMinText = metronomeEl.childText('per-minute');
+            if (perMinText) {
+              const parsedBpm = parseFloat(perMinText);
+              if (parsedBpm > 0 && !tempoEvents.some((t) => t.tick === (currentMeasureStartTick ?? 0))) {
+                tempoEvents.push(new TempoEvent(currentMeasureStartTick ?? 0, parsedBpm));
+              }
+            }
+          }
+
+          // Marcadores de ensayo / secciones (rehearsal o words explícitamente reconocidos como sección)
+          const rehearsalOnly = dirType?.childText('rehearsal')?.trim();
+          const wordsText = dirType?.childText('words')?.trim();
+          const candidateSectionLabel =
+            rehearsalOnly ||
+            (wordsText && this.isExplicitSectionLabel(wordsText) ? wordsText : undefined);
+
+          if (candidateSectionLabel) {
+            const sectionType = this.deduceSectionType(candidateSectionLabel);
             sections.push(
               new Section({
                 id: `sec_${measureNum}_${sectionType.toLowerCase()}`,
                 type: sectionType,
-                label: rehearsalText,
+                label: candidateSectionLabel,
                 startMeasure: measureNum,
                 measureCount: 1, // Se actualizará al final
                 startTick: currentMeasureStartTick,
-                durationTicks: activeTimeSignature.calculateMeasureDurationTicks(),
+                durationTicks: measureDurationTicks,
               })
             );
           }
         }
-
-        // Calcular duración canónica del compás
-        const measureDurationTicks = activeTimeSignature.calculateMeasureDurationTicks();
 
         // Procesar Voces, Notas, Silencios, Acordes y Lírica
         const voiceEventsMap = new Map<number, (Note | Rest)[]>();
@@ -258,98 +316,289 @@ export class MusicXmlImporter implements MusicImporter {
           if (child.name === 'note') {
             const isRest = child.child('rest') !== undefined;
             const isChord = child.child('chord') !== undefined;
-            const durationDiv = child.childInt('duration') ?? 0;
-            const durationTicks = Math.round((durationDiv * CANONICAL_TPQN) / activeDivisions);
-
             const voiceId = child.childInt('voice') ?? 1;
             const staffId = child.childInt('staff') ?? 1;
 
-            const noteStartTick = isChord ? lastNoteTick : currentMeasureStartTick + currentTickInMeasure;
+            const noteStartTick = isChord ? lastNoteTick : (currentMeasureStartTick ?? 0) + currentTickInMeasure;
 
             if (isRest) {
+              const durationEl = child.child('duration');
+              const durationDiv = child.childInt('duration') ?? 0;
+              if (durationEl === undefined) {
+                diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Silencio carece de elemento <duration>. Se omite el evento para evitar inventar duración.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                diagnostics.addWarning(
+                  'MISSING_REST_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Silencio carece de elemento <duration>. Se omite el evento para evitar inventar duración.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                continue;
+              }
+              if (durationDiv <= 0) {
+                diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración de silencio inválida (${durationDiv}). Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                diagnostics.addWarning(
+                  'INVALID_REST_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración de silencio inválida (${durationDiv}). Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                continue;
+              }
+              const durationTicks = Math.round((durationDiv * CANONICAL_TPQN) / activeDivisions);
+              if (durationTicks <= 0) {
+                diagnostics.addWarning(
+                  'UNRESOLVED_NOTE_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                diagnostics.addWarning(
+                  'INVALID_REST_DURATION',
+                  `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. Se omite el evento.`,
+                  { measureNumber: measureNum, voiceId }
+                );
+                continue;
+              }
+
               const restId = `r_m${measureNum}_v${voiceId}_${noteCounterInMeasure++}`;
               const rest = new Rest({
                 id: restId,
                 startTick: noteStartTick,
-                durationTicks: Math.max(1, durationTicks),
+                durationTicks,
                 voice: voiceId,
                 staff: staffId,
               });
 
               if (!voiceEventsMap.has(voiceId)) voiceEventsMap.set(voiceId, []);
               voiceEventsMap.get(voiceId)?.push(rest);
-            } else {
-              // Es una Nota
-              const pitchEl = child.child('pitch');
-              const step = (pitchEl?.childText('step') ?? 'C') as BaseNoteLetter;
-              const alter = pitchEl?.childInt('alter') ?? 0;
-              const octave = pitchEl?.childInt('octave') ?? 4;
 
-              const accidental = Accidental.fromSemitones(alter);
-              const noteName = new NoteName(step, accidental);
-              const pitch = new Pitch(noteName, octave);
-
-              const noteId = `n_m${measureNum}_v${voiceId}_${noteCounterInMeasure++}`;
-
-              // Dinámicas y Articulaciones
-              const notationsEl = child.child('notations');
-              const articulations: ArticulationType[] = [];
-              let dynamic: DynamicMarking | undefined = undefined;
-
-              if (notationsEl) {
-                const articEl = notationsEl.child('articulations');
-                if (articEl) {
-                  if (articEl.child('accent')) articulations.push('accent');
-                  if (articEl.child('staccato')) articulations.push('staccato');
-                  if (articEl.child('tenuto')) articulations.push('tenuto');
-                  if (articEl.child('fermata')) articulations.push('fermata');
-                }
+              if (!isChord) {
+                lastNoteTick = noteStartTick;
+                currentTickInMeasure += durationTicks;
               }
+              continue;
+            }
 
-              // Ligadura (tie)
-              let tie: TieType = 'NONE';
-              const tieEl = child.child('tie');
-              if (tieEl) {
-                const tieTypeAttr = tieEl.attr('type');
-                if (tieTypeAttr === 'start') tie = 'START';
-                else if (tieTypeAttr === 'stop') tie = 'STOP';
+            // Es una Nota (melódica/armónica): CERO INVENCIÓN DE ALTURA, OCTAVA O DURACIÓN
+            const pitchEl = child.child('pitch');
+            if (!pitchEl) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <note> carece de elemento <pitch>. No se inventa altura 'C4'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'MISSING_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <note> carece de elemento <pitch>. No se inventa altura 'C4'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              const durDiv = child.childInt('duration') ?? 0;
+              if (durDiv > 0 && !isChord) {
+                const durTicks = Math.round((durDiv * CANONICAL_TPQN) / activeDivisions);
+                if (durTicks > 0) currentTickInMeasure += durTicks;
               }
+              continue;
+            }
 
-              const noteInit: {
-                id: string;
-                pitch: Pitch;
-                startTick: number;
-                durationTicks: number;
-                voice: number;
-                staff: number;
-                velocity: number;
-                dynamic?: DynamicMarking;
-                articulations: ArticulationType[];
-                tie: TieType;
-              } = {
-                id: noteId,
-                pitch,
-                startTick: noteStartTick,
-                durationTicks: Math.max(1, durationTicks),
-                voice: voiceId,
-                staff: staffId,
-                velocity: 80,
-                articulations,
-                tie,
-              };
-              if (dynamic) noteInit.dynamic = dynamic;
-              const note = new Note(noteInit);
+            const stepRaw = pitchEl.childText('step')?.trim().toUpperCase();
+            if (!stepRaw) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <step>. No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'MISSING_PITCH_STEP',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <step>. No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              const durDiv = child.childInt('duration') ?? 0;
+              if (durDiv > 0 && !isChord) {
+                const durTicks = Math.round((durDiv * CANONICAL_TPQN) / activeDivisions);
+                if (durTicks > 0) currentTickInMeasure += durTicks;
+              }
+              continue;
+            }
+            if (!['A', 'B', 'C', 'D', 'E', 'F', 'G'].includes(stepRaw)) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_PITCH',
+                `Compás ${measureNum}, voz ${voiceId}: Altura <step> inválida ('${stepRaw}'). No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'INVALID_PITCH_STEP',
+                `Compás ${measureNum}, voz ${voiceId}: Altura <step> inválida ('${stepRaw}'). No se inventa altura 'C'.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              const durDiv = child.childInt('duration') ?? 0;
+              if (durDiv > 0 && !isChord) {
+                const durTicks = Math.round((durDiv * CANONICAL_TPQN) / activeDivisions);
+                if (durTicks > 0) currentTickInMeasure += durTicks;
+              }
+              continue;
+            }
+            const step = stepRaw as BaseNoteLetter;
 
-              if (!voiceEventsMap.has(voiceId)) voiceEventsMap.set(voiceId, []);
-              voiceEventsMap.get(voiceId)?.push(note);
+            const octaveRaw = pitchEl.child('octave');
+            if (!octaveRaw || octaveRaw.text.trim() === '') {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <octave>. No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'MISSING_PITCH_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Elemento <pitch> carece de <octave>. No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              const durDiv = child.childInt('duration') ?? 0;
+              if (durDiv > 0 && !isChord) {
+                const durTicks = Math.round((durDiv * CANONICAL_TPQN) / activeDivisions);
+                if (durTicks > 0) currentTickInMeasure += durTicks;
+              }
+              continue;
+            }
+            const octave = pitchEl.childInt('octave');
+            if (octave === undefined || isNaN(octave) || octave < 0 || octave > 9) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Octava <octave> inválida ('${octaveRaw.text}'). No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'INVALID_PITCH_OCTAVE',
+                `Compás ${measureNum}, voz ${voiceId}: Octava <octave> inválida ('${octaveRaw.text}'). No se inventa octava 4.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              const durDiv = child.childInt('duration') ?? 0;
+              if (durDiv > 0 && !isChord) {
+                const durTicks = Math.round((durDiv * CANONICAL_TPQN) / activeDivisions);
+                if (durTicks > 0) currentTickInMeasure += durTicks;
+              }
+              continue;
+            }
 
-              // Sílaba Lírica vinculada a la nota
-              const lyricEl = child.child('lyric');
-              if (lyricEl) {
-                const text = lyricEl.childText('text') ?? '';
-                const syllabic = lyricEl.childText('syllabic');
-                const isHyphenated = syllabic === 'begin' || syllabic === 'middle';
+            const durationEl = child.child('duration');
+            if (!durationEl || durationEl.text.trim() === '') {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Nota carece de elemento <duration>. No se inventa duración artificial de 1 tick.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'MISSING_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Nota carece de elemento <duration>. No se inventa duración artificial de 1 tick.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              continue;
+            }
+            const durationDiv = child.childInt('duration') ?? 0;
+            if (durationDiv <= 0) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración de nota inválida (${durationDiv}). No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'INVALID_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración de nota inválida (${durationDiv}). No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              continue;
+            }
+            const durationTicks = Math.round((durationDiv * CANONICAL_TPQN) / activeDivisions);
+            if (durationTicks <= 0) {
+              diagnostics.addWarning(
+                'UNRESOLVED_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              diagnostics.addWarning(
+                'INVALID_NOTE_DURATION',
+                `Compás ${measureNum}, voz ${voiceId}: Duración calculada en ticks es 0. No se inventa duración artificial.`,
+                { measureNumber: measureNum, voiceId }
+              );
+              continue;
+            }
 
+            const alter = pitchEl.childInt('alter') ?? 0;
+            const accidental = Accidental.fromSemitones(alter);
+            const noteName = new NoteName(step, accidental);
+            const pitch = new Pitch(noteName, octave);
+
+            const noteId = `n_m${measureNum}_v${voiceId}_${noteCounterInMeasure++}`;
+
+            // Dinámicas y Articulaciones
+            const notationsEl = child.child('notations');
+            const articulations: ArticulationType[] = [];
+            let dynamic: DynamicMarking | undefined = undefined;
+
+            if (notationsEl) {
+              const articEl = notationsEl.child('articulations');
+              if (articEl) {
+                if (articEl.child('accent')) articulations.push('accent');
+                if (articEl.child('staccato')) articulations.push('staccato');
+                if (articEl.child('tenuto')) articulations.push('tenuto');
+                if (articEl.child('fermata')) articulations.push('fermata');
+              }
+            }
+
+            // Ligadura (tie)
+            let tie: TieType = 'NONE';
+            const tieEl = child.child('tie');
+            if (tieEl) {
+              const tieTypeAttr = tieEl.attr('type');
+              if (tieTypeAttr === 'start') tie = 'START';
+              else if (tieTypeAttr === 'stop') tie = 'STOP';
+            }
+
+            const noteInit: {
+              id: string;
+              pitch: Pitch;
+              startTick: number;
+              durationTicks: number;
+              voice: number;
+              staff: number;
+              velocity: number;
+              dynamic?: DynamicMarking;
+              articulations: ArticulationType[];
+              tie: TieType;
+            } = {
+              id: noteId,
+              pitch,
+              startTick: noteStartTick,
+              durationTicks,
+              voice: voiceId,
+              staff: staffId,
+              velocity: 80,
+              articulations,
+              tie,
+            };
+            if (dynamic) noteInit.dynamic = dynamic;
+            const note = new Note(noteInit);
+
+            if (!voiceEventsMap.has(voiceId)) voiceEventsMap.set(voiceId, []);
+            voiceEventsMap.get(voiceId)?.push(note);
+
+            // Sílaba Lírica vinculada a la nota (soporta múltiples <lyric>, priorizando verso 1 / principal)
+            const lyricElements = child.childrenNamed('lyric');
+            const primaryLyricEl =
+              lyricElements.find((el) => (el.attr('number') ?? '1') === '1') ?? lyricElements[0];
+            if (primaryLyricEl) {
+              const textParts = primaryLyricEl
+                .childrenNamed('text')
+                .map((t) => t.text)
+                .filter((t) => t.length > 0);
+              const text = textParts.length > 0 ? textParts.join(' ') : primaryLyricEl.childText('text') ?? '';
+              const syllabic = primaryLyricEl.childText('syllabic')?.trim().toLowerCase();
+              const isHyphenated = syllabic === 'begin' || syllabic === 'middle';
+
+              if (text.length > 0) {
                 lyricSyllables.push(
                   new LyricSyllable({
                     id: `syl_m${measureNum}_${lyricSequence}`,
@@ -384,8 +633,8 @@ export class MusicXmlImporter implements MusicImporter {
                 new ChordEvent({
                   id: `ch_m${measureNum}_${chordEvents.length + 1}`,
                   chord,
-                  startTick: currentMeasureStartTick + currentTickInMeasure,
-                  durationTicks: measureDurationTicks - currentTickInMeasure,
+                  startTick: currentMeasureStartTick !== null ? currentMeasureStartTick + currentTickInMeasure : null,
+                  durationTicks: measureDurationTicks !== null ? measureDurationTicks - currentTickInMeasure : null,
                   measureNumber: measureNum,
                 })
               );
@@ -415,17 +664,21 @@ export class MusicXmlImporter implements MusicImporter {
         // Construir Voces
         const voices: Voice[] = [];
         if (voiceEventsMap.size === 0) {
-          // Si no hubo eventos en voces, crear voz con silencio de compás completo
-          voices.push(
-            new Voice(1, [
-              new Rest({
-                id: `r_empty_m${measureNum}`,
-                startTick: currentMeasureStartTick,
-                durationTicks: measureDurationTicks,
-                voice: 1,
-              }),
-            ])
-          );
+          if (measureDurationTicks !== null && currentMeasureStartTick !== null) {
+            // Si no hubo eventos en voces y la duración está resuelta, crear voz con silencio de compás completo
+            voices.push(
+              new Voice(1, [
+                new Rest({
+                  id: `r_empty_m${measureNum}`,
+                  startTick: currentMeasureStartTick,
+                  durationTicks: measureDurationTicks,
+                  voice: 1,
+                }),
+              ])
+            );
+          } else {
+            voices.push(new Voice(1, []));
+          }
         } else {
           for (const [voiceId, events] of voiceEventsMap.entries()) {
             voices.push(new Voice(voiceId, events));
@@ -434,10 +687,10 @@ export class MusicXmlImporter implements MusicImporter {
 
         const measureInit: {
           number: number;
-          timeSignature: TimeSignature;
-          keySignature: KeySignatureReference;
-          startTick: number;
-          durationTicks: number;
+          timeSignature: TimeSignature | null;
+          keySignature: KeySignatureReference | null;
+          startTick: number | null;
+          durationTicks: number | null;
           voices: Voice[];
           chords: ChordEvent[];
           lyrics: LyricSyllable[];
@@ -459,19 +712,53 @@ export class MusicXmlImporter implements MusicImporter {
         if (endingNumber !== undefined) measureInit.endingNumber = endingNumber;
 
         canonicalMeasures.push(new Measure(measureInit));
-        currentMeasureStartTick += measureDurationTicks;
+        if (currentMeasureStartTick !== null && measureDurationTicks !== null) {
+          currentMeasureStartTick += measureDurationTicks;
+        } else {
+          currentMeasureStartTick = null;
+        }
       }
 
-      // Consolidar Secciones contiguas
-      const consolidatedSections = this.consolidateSections(sections, canonicalMeasures.length);
+      // Diagnósticos de metadatos no resueltos (CERO INVENCIÓN SILENCIOSA)
+      if (!hasAnyDeclaredTimeSignature) {
+        diagnostics.addInfo(
+          'UNRESOLVED_TIME_SIGNATURE',
+          'El documento MusicXML no declara métrica (<time>). La pieza se preserva como no medida (unmetered) sin asumir 4/4.'
+        );
+      }
+
+      if (!hasAnyDeclaredKeySignature) {
+        diagnostics.addInfo(
+          'UNRESOLVED_KEY_SIGNATURE',
+          'El documento MusicXML no declara armadura tonal (<key>). La tonalidad permanece no resuelta (null).'
+        );
+      }
+
+      if (tempoEvents.length === 0 && !options?.defaultBpm) {
+        diagnostics.addInfo(
+          'UNRESOLVED_TEMPO',
+          'El documento MusicXML no declara eventos de tempo (<sound tempo="...">). El mapa de tempo se preserva como no resuelto (null) sin asumir 120 BPM.'
+        );
+      }
+
+      // Consolidar Secciones contiguas con duraciones exactas
+      const consolidatedSections = this.consolidateSections(sections, canonicalMeasures);
 
       // Línea de tiempo
-      const totalTicks = currentMeasureStartTick;
+      const hasUnresolvedMeasure = canonicalMeasures.some((m) => m.durationTicks === null);
+      const totalTicks = hasUnresolvedMeasure ? null : currentMeasureStartTick;
       const timeline = new Timeline({
         tpqn: CANONICAL_TPQN,
         totalDurationTicks: totalTicks,
         measureCount: canonicalMeasures.length,
-        tempoMap: new TempoMap(tempoEvents.length > 0 ? tempoEvents : [new TempoEvent(0, options?.defaultBpm ?? 120)]),
+        tempoMap: new TempoMap(
+          tempoEvents.length > 0
+            ? tempoEvents
+            : options?.defaultBpm
+            ? [new TempoEvent(0, options.defaultBpm)]
+            : []
+        ),
+        isUnmetered: activeTimeSignature === null,
       });
 
       const payload = new CanonicalMusicPayload({
@@ -518,7 +805,11 @@ export class MusicXmlImporter implements MusicImporter {
       const rootEl = harmonyEl.child('root');
       if (!rootEl) return null;
 
-      const step = (rootEl.childText('root-step') ?? 'C') as BaseNoteLetter;
+      const rawStep = rootEl.childText('root-step')?.trim().toUpperCase();
+      if (!rawStep || !['A', 'B', 'C', 'D', 'E', 'F', 'G'].includes(rawStep)) {
+        return null;
+      }
+      const step = rawStep as BaseNoteLetter;
       const alter = rootEl.childInt('root-alter') ?? 0;
       const rootNote = new NoteName(step, Accidental.fromSemitones(alter));
 
@@ -528,18 +819,38 @@ export class MusicXmlImporter implements MusicImporter {
 
       // Mapear kind a cualidad
       let chordStr = rootNote.toString();
-      if (kindText.includes('minor-seventh') || kindAttr === 'm7') {
+      if (kindText.includes('minor-ninth') || kindAttr === 'm9') {
+        chordStr += 'm9';
+      } else if (kindText.includes('major-ninth') || kindAttr === 'maj9') {
+        chordStr += 'maj9';
+      } else if (kindText.includes('dominant-ninth') || kindAttr === '9') {
+        chordStr += '9';
+      } else if (kindText.includes('minor-seventh') || kindAttr === 'm7') {
         chordStr += 'm7';
       } else if (kindText.includes('major-seventh') || kindAttr === 'maj7') {
         chordStr += 'maj7';
+      } else if (kindText.includes('diminished-seventh') || kindAttr === 'dim7') {
+        chordStr += 'dim7';
+      } else if (kindText.includes('half-diminished') || kindAttr.includes('m7b5')) {
+        chordStr += 'm7b5';
+      } else if (kindText.includes('diminished') || kindAttr === 'dim') {
+        chordStr += 'dim';
+      } else if (kindText.includes('augmented') || kindAttr === 'aug') {
+        chordStr += 'aug';
+      } else if (kindText.includes('minor-sixth') || kindAttr === 'm6') {
+        chordStr += 'm6';
+      } else if (kindText.includes('major-sixth') || kindAttr === '6') {
+        chordStr += '6';
       } else if (kindText.includes('minor') || kindAttr === 'm') {
         chordStr += 'm';
       } else if (kindText.includes('dominant') || kindAttr === '7') {
         chordStr += '7';
       } else if (kindText.includes('suspended-fourth') || kindAttr === 'sus4') {
         chordStr += 'sus4';
-      } else if (kindText.includes('half-diminished') || kindAttr.includes('m7b5')) {
-        chordStr += 'm7b5';
+      } else if (kindText.includes('suspended-second') || kindAttr === 'sus2') {
+        chordStr += 'sus2';
+      } else if (kindText === 'power' || kindAttr === '5') {
+        chordStr += '5';
       }
 
       const bassEl = harmonyEl.child('bass');
@@ -599,6 +910,13 @@ export class MusicXmlImporter implements MusicImporter {
     return isMajor ? majorFifthsMap[fifths] ?? NoteName.C : minorFifthsMap[fifths] ?? NoteName.A;
   }
 
+  private isExplicitSectionLabel(text: string): boolean {
+    const t = text.toUpperCase().trim();
+    return /^(INTRO|INTRODUCCI[ÓO]N|VERSO|VERSE|ESTROFA|PRE[- ]?CORO|PRE[- ]?CHORUS|CORO|CHORUS|PUENTE|BRIDGE|INTERLUDE|INTERLUDIO|SOLO|INSTRUMENTAL|OUTRO|FINAL|TAG|VAMP|CODA)\b/.test(
+      t
+    );
+  }
+
   private deduceSectionType(text: string): SectionType {
     const t = text.toUpperCase().trim();
     if (t.includes('INTRO')) return 'INTRO';
@@ -615,9 +933,15 @@ export class MusicXmlImporter implements MusicImporter {
     return 'CUSTOM';
   }
 
-  private consolidateSections(sections: Section[], totalMeasures: number): Section[] {
+  private consolidateSections(sections: Section[], canonicalMeasures: Measure[]): Section[] {
+    const totalMeasures = canonicalMeasures.length;
     if (sections.length === 0) {
       // Crear sección por defecto abarcando toda la obra
+      const hasNullDuration = canonicalMeasures.some((m) => m.durationTicks === null);
+      const totalDuration = hasNullDuration
+        ? null
+        : canonicalMeasures.reduce((sum, m) => sum + (m.durationTicks ?? 0), 0);
+      const startTick = canonicalMeasures[0]?.startTick ?? null;
       return [
         new Section({
           id: 'sec_main',
@@ -625,8 +949,8 @@ export class MusicXmlImporter implements MusicImporter {
           label: 'Cuerpo Principal',
           startMeasure: 1,
           measureCount: totalMeasures,
-          startTick: 0,
-          durationTicks: totalMeasures * 1920,
+          startTick,
+          durationTicks: totalDuration,
         }),
       ];
     }
@@ -638,6 +962,12 @@ export class MusicXmlImporter implements MusicImporter {
       const endM = next ? next.startMeasure - 1 : totalMeasures;
       const measureCount = Math.max(1, endM - current.startMeasure + 1);
 
+      const sectionMeasures = canonicalMeasures.slice(current.startMeasure - 1, endM);
+      const hasNullDuration = sectionMeasures.some((m) => m.durationTicks === null);
+      const sectionDuration = hasNullDuration
+        ? null
+        : sectionMeasures.reduce((sum, m) => sum + (m.durationTicks ?? 0), 0);
+
       consolidated.push(
         new Section({
           id: current.id,
@@ -646,7 +976,7 @@ export class MusicXmlImporter implements MusicImporter {
           startMeasure: current.startMeasure,
           measureCount,
           startTick: current.startTick,
-          durationTicks: measureCount * 1920,
+          durationTicks: sectionDuration,
         })
       );
     }

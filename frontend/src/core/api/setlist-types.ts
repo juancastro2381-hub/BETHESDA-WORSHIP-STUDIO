@@ -18,6 +18,19 @@ export type FrontendSetlistItemType = 'SONG' | 'SERVICE_MOMENT';
 export type FrontendTransitionType = 'SEGUE' | 'CROSSFADE' | 'STOP' | 'MEDLEY';
 
 /**
+ * Formato de lectura sugerido por el director para una entrada del setlist (Fase 2C).
+ * Es una sugerencia: la preferencia individual del músico prevalece en el atril.
+ */
+export type FrontendReadingFormat = 'SCORE' | 'CHORD_SHEET' | 'LYRICS' | 'TAB';
+
+export const READING_FORMAT_LABELS: Record<FrontendReadingFormat, string> = {
+  SCORE: 'Partitura',
+  CHORD_SHEET: 'Cifrado / Acordes',
+  LYRICS: 'Letra',
+  TAB: 'Tablatura',
+};
+
+/**
  * Resumen de setlist para vistas de catálogo y listados paginados.
  * Corresponde a SetlistSummaryEntity serializado.
  */
@@ -28,6 +41,7 @@ export interface FrontendSetlistSummary {
   status: FrontendSetlistStatus;
   directorUserId: string | null;
   directorName?: string | null;
+  isTemplate?: boolean;
   totalItems: number;
   totalSongs: number;
   createdAt: string;
@@ -45,6 +59,7 @@ export interface FrontendSetlistEntity {
   status: FrontendSetlistStatus;
   directorUserId: string | null;
   notes: string | null;
+  isTemplate?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -78,6 +93,9 @@ export interface FrontendSetlistItem {
   durationMinutes: number | null;
   musicalKey: string | null;
   notesForTeam: string | null;
+  preferredInstrument?: string | null;
+  preferredTuning?: string | null;
+  preferredFormat?: FrontendReadingFormat | null;
   createdAt: string;
   updatedAt: string;
   song: FrontendSetlistItemSong | null;
@@ -107,6 +125,9 @@ export interface CreateSongItemPayload {
   targetBpm?: number | null;
   transitionType?: FrontendTransitionType;
   notesForTeam?: string | null;
+  preferredInstrument?: string | null;
+  preferredTuning?: string | null;
+  preferredFormat?: FrontendReadingFormat | null;
   sequenceOrder?: number;
 }
 
@@ -142,6 +163,9 @@ export interface UpdateSetlistItemPayload {
   durationMinutes?: number | null;
   musicalKey?: string | null;
   notesForTeam?: string | null;
+  preferredInstrument?: string | null;
+  preferredTuning?: string | null;
+  preferredFormat?: FrontendReadingFormat | null;
 }
 
 /**
@@ -152,6 +176,7 @@ export interface CreateSetlistPayload {
   scheduledDateTime?: string | null;
   directorUserId?: string | null;
   notes?: string | null;
+  isTemplate?: boolean;
 }
 
 /**
@@ -162,6 +187,77 @@ export interface UpdateSetlistPayload {
   scheduledDateTime?: string | null;
   directorUserId?: string | null;
   notes?: string | null;
+  isTemplate?: boolean;
+}
+
+/**
+ * Payload para duplicar un setlist o guardarlo como plantilla reutilizable (Fase 2C).
+ * POST /api/v1/setlists/:id/duplicate
+ */
+export interface DuplicateSetlistPayload {
+  newTitle: string;
+  scheduledDateTime?: string | null;
+  isTemplate?: boolean;
+}
+
+// ============================================================================
+// CULTOS / SERVICIOS LITÚRGICOS (FASE 2C)
+// ============================================================================
+
+export type FrontendWorshipServiceStatus = 'DRAFT' | 'UPCOMING' | 'ACTIVE' | 'COMPLETED' | 'ARCHIVED';
+
+export const WORSHIP_SERVICE_STATUS_LABELS: Record<FrontendWorshipServiceStatus, string> = {
+  DRAFT: 'Borrador',
+  UPCOMING: 'Próximo',
+  ACTIVE: 'En curso',
+  COMPLETED: 'Realizado',
+  ARCHIVED: 'Archivado',
+};
+
+export interface FrontendWorshipService {
+  id: string;
+  name: string;
+  description: string | null;
+  /** Categoría libre definida por la congregación (no es un enum fijo). */
+  serviceType: string;
+  scheduledAt: string;
+  worshipLeaderId: string | null;
+  worshipLeaderName?: string | null;
+  notes: string | null;
+  status: FrontendWorshipServiceStatus;
+  setlistId: string | null;
+  setlist?: { id: string; title: string; status: string; totalItems: number } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorshipServicePayload {
+  name: string;
+  description?: string | null;
+  serviceType?: string;
+  scheduledAt: string;
+  worshipLeaderId?: string | null;
+  notes?: string | null;
+  status?: FrontendWorshipServiceStatus;
+  setlistId?: string | null;
+}
+
+export type UpdateWorshipServicePayload = Partial<CreateWorshipServicePayload>;
+
+export interface ListWorshipServicesParams {
+  status?: FrontendWorshipServiceStatus;
+  serviceType?: string;
+  timeframe?: 'upcoming' | 'completed' | 'all';
+  worshipLeaderId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface FrontendListWorshipServicesResult {
+  items: FrontendWorshipService[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // ============================================================================

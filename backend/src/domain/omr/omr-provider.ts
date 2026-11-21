@@ -11,10 +11,9 @@
  */
 
 import crypto from 'node:crypto';
-import type { OmrProposal, OmrRecognitionInput } from './types.ts';
+import { type OmrProposal, type OmrRecognitionInput, MAX_OMR_FILE_SIZE_BYTES } from './types.ts';
 import { ValidationError } from '../errors.ts';
 
-const MAX_OMR_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
   'image/png',
@@ -99,15 +98,25 @@ export class StandardOmrProvider implements IOmrProvider {
   constructor(private readonly options?: StandardOmrProviderOptions) {}
 
   public async recognize(input: OmrRecognitionInput): Promise<OmrProposal> {
-    // 1. Validación de tamaño de archivo
-    if (input.fileSizeBytes > MAX_OMR_FILE_SIZE_BYTES) {
+    // 1. Validación de tamaño de archivo y buffer real (R2-07)
+    if (!input.buffer || input.buffer.length === 0) {
+      throw new ValidationError('El buffer suministrado para OMR está vacío (0 bytes).');
+    }
+
+    if (input.fileSizeBytes === 0) {
+      throw new ValidationError('El tamaño declarado del archivo suministrado para OMR es 0 bytes.');
+    }
+
+    if (input.buffer.length !== input.fileSizeBytes) {
       throw new ValidationError(
-        `El archivo para reconocimiento OMR excede el límite máximo permitido de 15 MB (recibido: ${(input.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB).`
+        `Inconsistencia en metadatos de archivo: el tamaño de buffer real (${input.buffer.length} bytes) no coincide con el tamaño declarado (${input.fileSizeBytes} bytes).`
       );
     }
 
-    if (input.fileSizeBytes === 0 || input.buffer.length === 0) {
-      throw new ValidationError('El archivo suministrado para OMR está vacío.');
+    if (input.buffer.length > MAX_OMR_FILE_SIZE_BYTES || input.fileSizeBytes > MAX_OMR_FILE_SIZE_BYTES) {
+      throw new ValidationError(
+        `El archivo para reconocimiento OMR excede el límite máximo permitido de 15 MB (recibido: ${(Math.max(input.buffer.length, input.fileSizeBytes) / (1024 * 1024)).toFixed(2)} MB).`
+      );
     }
 
     // 2. Validación de tipo MIME

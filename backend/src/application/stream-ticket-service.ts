@@ -142,6 +142,28 @@ export class StreamTicketService {
   }
 
   /**
+   * Revoca explícitamente un ticket específico de forma inmediata.
+   */
+  public revokeTicket(ticket: string): void {
+    this.tickets.delete(ticket);
+  }
+
+  /**
+   * Revoca inmediatamente todos los tickets activos emitidos para un usuario específico.
+   * Útil cuando la cuenta es suspendida, bloqueada, eliminada o pierde permisos.
+   */
+  public revokeTicketsForUser(userId: string): number {
+    let revokedCount = 0;
+    for (const [key, payload] of this.tickets.entries()) {
+      if (payload.userId === userId) {
+        this.tickets.delete(key);
+        revokedCount += 1;
+      }
+    }
+    return revokedCount;
+  }
+
+  /**
    * Inspecciona el estado de un ticket activo (para diagnósticos y suites de prueba).
    */
   public getTicketState(ticket: string): StreamTicketPayload | null {

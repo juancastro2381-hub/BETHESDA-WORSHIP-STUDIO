@@ -14,10 +14,13 @@
  */
 
 import React, { useEffect, useCallback } from 'react';
-import type {
-  FrontendSetlistDetail,
-  FrontendSetlistItem,
+import {
+  READING_FORMAT_LABELS,
+  type FrontendReadingFormat,
+  type FrontendSetlistDetail,
+  type FrontendSetlistItem,
 } from '../../core/api/setlist-types.ts';
+import { DEFAULT_STAND_ZOOM, MAX_STAND_ZOOM, MIN_STAND_ZOOM } from '../../core/workspace/music-stand-controller.ts';
 
 export interface SetlistNavigationToolbarProps {
   readonly loadedSetlist: FrontendSetlistDetail | null;
@@ -38,6 +41,17 @@ export interface SetlistNavigationToolbarProps {
   readonly onReturnToSetlist: () => void;
   readonly onOpenSetlistsModal?: () => void;
   readonly onUnloadSetlist?: () => void;
+  // Fase 2C — Controles de Modo Atril (Music Stand Experience)
+  readonly isMusicStandMode?: boolean;
+  readonly onToggleMusicStandMode?: () => void;
+  readonly isHighContrast?: boolean;
+  readonly onToggleHighContrast?: () => void;
+  readonly zoomPercent?: number;
+  readonly onZoomIn?: () => void;
+  readonly onZoomOut?: () => void;
+  readonly onResetZoom?: () => void;
+  readonly activeReadingFormat?: FrontendReadingFormat | null;
+  readonly onQuickSelectFormat?: (format: FrontendReadingFormat) => void;
 }
 
 export const SetlistNavigationToolbar: React.FC<SetlistNavigationToolbarProps> = ({
@@ -59,6 +73,16 @@ export const SetlistNavigationToolbar: React.FC<SetlistNavigationToolbarProps> =
   onReturnToSetlist,
   onOpenSetlistsModal,
   onUnloadSetlist,
+  isMusicStandMode = false,
+  onToggleMusicStandMode,
+  isHighContrast = false,
+  onToggleHighContrast,
+  zoomPercent = DEFAULT_STAND_ZOOM,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom,
+  activeReadingFormat = null,
+  onQuickSelectFormat,
 }) => {
   // Manejador global de atajos de teclado para atril de alabanza
   const handleKeyDown = useCallback(
@@ -188,6 +212,118 @@ export const SetlistNavigationToolbar: React.FC<SetlistNavigationToolbarProps> =
               <span className="setlist-item-musical-detail">{musicalDetail}</span>
             )}
           </div>
+
+          {/* Cues musicales por entrada (Fase 2C — 4.3) */}
+          {currentItem && isSong && (
+            <div className="setlist-item-cues" aria-label="Indicaciones musicales del ítem">
+              {currentItem.preferredInstrument && (
+                <span className="setlist-cue-chip instrument" title="Instrumento sugerido">
+                  🎸 {currentItem.preferredInstrument}
+                </span>
+              )}
+              {currentItem.preferredTuning && (
+                <span className="setlist-cue-chip tuning" title="Afinación sugerida">
+                  🔧 {currentItem.preferredTuning}
+                </span>
+              )}
+              {currentItem.preferredFormat && (
+                <span className="setlist-cue-chip format" title="Formato de lectura sugerido">
+                  📄 {READING_FORMAT_LABELS[currentItem.preferredFormat]}
+                </span>
+              )}
+              {currentItem.transitionType && (
+                <span className="setlist-cue-chip transition" title="Instrucción de transición">
+                  ⏭️ {currentItem.transitionType}
+                </span>
+              )}
+              {currentItem.notesForTeam && (
+                <span className="setlist-cue-chip team-note" title={currentItem.notesForTeam}>
+                  💬 {currentItem.notesForTeam}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Columna Central: Controles Rápidos de Modo Atril (Fase 2C — 4.5) */}
+        <div className="setlist-stand-quick-controls" role="group" aria-label="Controles de lectura en atril">
+          {isSong && onQuickSelectFormat && (
+            <div className="stand-format-switcher" role="group" aria-label="Formato de lectura rápido">
+              {(['SCORE', 'CHORD_SHEET', 'LYRICS', 'TAB'] as const).map((fmt) => (
+                <button
+                  key={fmt}
+                  type="button"
+                  className={`btn-stand-format ${activeReadingFormat === fmt ? 'active' : ''}`}
+                  onClick={() => onQuickSelectFormat(fmt)}
+                  aria-pressed={activeReadingFormat === fmt}
+                  title={`Cambiar a vista: ${READING_FORMAT_LABELS[fmt]}`}
+                >
+                  {fmt === 'SCORE' && '🎼 Partitura'}
+                  {fmt === 'CHORD_SHEET' && '🎸 Acordes'}
+                  {fmt === 'LYRICS' && '🎤 Letra'}
+                  {fmt === 'TAB' && '🔢 Tab'}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {(onZoomOut || onZoomIn) && (
+            <div className="stand-zoom-controls" role="group" aria-label="Tamaño de texto y notación">
+              <button
+                type="button"
+                className="btn-stand-zoom"
+                onClick={onZoomOut}
+                disabled={zoomPercent <= MIN_STAND_ZOOM}
+                aria-label="Reducir tamaño de lectura"
+                title="Reducir zoom (A−)"
+              >
+                A−
+              </button>
+              <button
+                type="button"
+                className="btn-stand-zoom-display"
+                onClick={onResetZoom}
+                title="Restablecer zoom al 100%"
+                aria-label={`Zoom actual ${zoomPercent} por ciento. Clic para restablecer.`}
+              >
+                {zoomPercent}%
+              </button>
+              <button
+                type="button"
+                className="btn-stand-zoom"
+                onClick={onZoomIn}
+                disabled={zoomPercent >= MAX_STAND_ZOOM}
+                aria-label="Aumentar tamaño de lectura"
+                title="Aumentar zoom (A+)"
+              >
+                A+
+              </button>
+            </div>
+          )}
+
+          {onToggleHighContrast && (
+            <button
+              type="button"
+              className={`btn-stand-toggle ${isHighContrast ? 'active' : ''}`}
+              onClick={onToggleHighContrast}
+              aria-pressed={isHighContrast}
+              title="Alternar modo de alto contraste para escenario"
+            >
+              ◐ {isHighContrast ? 'Contraste Alto' : 'Contraste'}
+            </button>
+          )}
+
+          {onToggleMusicStandMode && (
+            <button
+              type="button"
+              className={`btn-stand-toggle stand-mode-btn ${isMusicStandMode ? 'active' : ''}`}
+              onClick={onToggleMusicStandMode}
+              aria-pressed={isMusicStandMode}
+              title="Alternar Modo Atril sin distracciones (oculta paneles laterales)"
+            >
+              🎼 {isMusicStandMode ? 'Salir Atril' : 'Modo Atril'}
+            </button>
+          )}
         </div>
 
         {/* Columna Central: Notificación Off-Setlist y Botón Volver al Culto */}

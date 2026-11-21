@@ -1,0 +1,23 @@
+﻿# BETHESDA WORSHIP STUDIO — PHASE 2A-R2.2.1-R3.3.6 DELIVERABLE SHA-256 MANIFEST
+# Manifest Coverage Rule: Self-excluding manifest. Lists SHA-256 hashes of all 20 payload files.
+# The ZIP archive packages these 20 payload files plus this manifest (total: 21 archive files).
+66dcbd144dced7f8c389367ed4aaa9059cd7659355b3702c624222c9d892667f  backend/src/application/conversion-worker.ts
+1b234c240e7503ceb510578c0615ada60f42c3471cdc8e2dff2bb87c25e10ee0  backend/src/__tests__/conversion-worker-certification.test.ts
+958296806c7c0e204fb22d60efe2c842c6fbaaeb981b3c31c46c69ae6a707765  docs/reports/phase-2a-r2.2.1-r3.3.5/03_ZIP_CONTENTS_AND_CRC_AUDIT.md
+e424fcd00894c4d8a8f1113a2f49e8f72dd4ffd2d6b46982a1abb9bb1e5e607c  docs/reports/phase-2a-r2.2.1-r3.3.5/04_SHA256_MANIFEST_RECONCILIATION.md
+cd6c3defba03bcfcbd4e09307638f642d30f5105177d92f17a687169eceb9240  docs/reports/phase-2a-r2.2.1-r3.3.6/01_PREFLIGHT_AND_GIT_GOVERNANCE.md
+48b6bb5878bb7da9abb8045ac01d7dae771c7d34d31e39908aedcfb7edfc4773  docs/reports/phase-2a-r2.2.1-r3.3.6/02_R3_3_5_FINDINGS_AND_REMEDIATION.md
+16180af281354d8d18af13b1c7db6dc4e18ebc02b38d88943b939094e837db0b  docs/reports/phase-2a-r2.2.1-r3.3.6/03_ACTUAL_ZIP_INVENTORY_AND_CRC_AUDIT.md
+b8a037a252e945e2d0fb67d9c3e229e16276054a4dcc16e54c994fbe92fcd49b  docs/reports/phase-2a-r2.2.1-r3.3.6/04_SHA256_MANIFEST_VERIFICATION.md
+b0485b0f16f3ba00440d85f9beb11c78527b5ceb67ec084c77976e7035636b4a  docs/reports/phase-2a-r2.2.1-r3.3.6/05_TYPECHECK_AND_BUILD_EXECUTION_EVIDENCE.md
+b3e07dc62378ad3474bcb19b17c071c3f637908ebe11e59eb1d389a69ecc8aa5  docs/reports/phase-2a-r2.2.1-r3.3.6/06_COMPLETE_TEST_SUITE_RECONCILIATION.md
+7d341b52b46e1194427c2ca9cadc3bdd5528e8ce8e7b89ce7f1448a7c28d7b64  docs/reports/phase-2a-r2.2.1-r3.3.6/07_REAL_PG_BOSS_INTEGRATION_VERIFICATION.md
+262158b95d35d5e5715f8f2329c130bbbd983d4401e51b1cab58be3d909023b5  docs/reports/phase-2a-r2.2.1-r3.3.6/08_WORKER_LIFECYCLE_SEMANTIC_REVIEW.md
+b754531139954c8f621c37e4e869ad69f8804ad893a8e9d959d86207df1627be  docs/reports/phase-2a-r2.2.1-r3.3.6/09_FINAL_PHASE_2A_CERTIFICATION_READINESS.md
+55ff793cae53b80507fdac65e8450d0b2d821bb5a939e2124a18808d36ad68c0  docs/reports/phase-2a-r2.2.1-r3.3.6/git_diff_phase_2a_r2.2.1_r3.3.6.patch
+b9ebe8ac98168b7faa59d2ad03f2d633f8f598932103a175161cba5951f36533  docs/reports/phase-2a-r2.2.1-r3.3.6/git_status_phase_2a_r2.2.1_r3.3.6.txt
+3ad8a3719537799c97f08c4877095cd203b41317c6346dae65ceb15f8e78b794  docs/reports/phase-2a-r2.2.1-r3.3.6/logs/all_conversion_suites.log
+affa749ce95df96b91b763de82c8b03dff8b098d3989cbc2ec120d5db4233641  docs/reports/phase-2a-r2.2.1-r3.3.6/logs/backend_build.log
+d854adfd80ef474af49a57955c2c6b21a6b745a7f4984c64d6745536d4276cf2  docs/reports/phase-2a-r2.2.1-r3.3.6/logs/backend_typecheck.log
+ed38b5a36732e884f4e9cece2ee91224356065937fe669af08df7e2fef6157da  docs/reports/phase-2a-r2.2.1-r3.3.6/logs/certification_suite.log
+fc28352b5bba735a7245d0a8bcfcab0346a4e574cb230ee69a6fddf36f7e2377  docs/reports/phase-2a-r2.2.1-r3.3.6/logs/individual_conversion_suites.log

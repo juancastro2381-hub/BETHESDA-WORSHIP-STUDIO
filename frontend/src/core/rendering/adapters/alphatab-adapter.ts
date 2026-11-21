@@ -154,8 +154,12 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
     const staffClef = view.measures[0]?.clefs[0] ?? view.instrumentProfile.clef;
 
     const bars: AlphaTabBarData[] = view.measures.map((measure) => {
-      const timeSigStr = `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`;
-      const keyAccidentals = measure.writtenKeySignature.keySignature.accidentalCount;
+      const timeSigStr = measure.timeSignature
+        ? `${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`
+        : '4/4';
+      const keyAccidentals = measure.writtenKeySignature
+        ? measure.writtenKeySignature.keySignature.accidentalCount
+        : 0;
 
       const voiceBeatsMap = new Map<number, AlphaTabBeatData[]>();
 
@@ -166,37 +170,52 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
           voiceBeatsMap.set(note.voice, beats);
         }
 
-        const tabCoord = measure.tablature.find(
-          (t) =>
-            t.canonicalPitch.midiNumber === note.canonicalPitch.midiNumber &&
-            t.durationTicks === note.durationTicks
-        );
+        const tabCoord =
+          measure.tablature.find((t) => t.noteId && t.noteId === note.id) ??
+          measure.tablature.find(
+            (t) =>
+              t.canonicalPitch.midiNumber === note.canonicalPitch.midiNumber &&
+              t.durationTicks === note.durationTicks
+          );
+
+        if (isTabRequested && !tabCoord) {
+          this.addDiagnostic(
+            'WARNING',
+            'TABLATURE_NOTE_OUT_OF_RANGE',
+            `La nota ${note.writtenPitch.toString()} en compás ${measure.measureNumber} no tiene digitación válida en ${view.instrumentProfile.name}; no se fabrica posición artificial.`
+          );
+          if (!isNotationRequested) {
+            continue;
+          }
+        }
 
         const noteData: AlphaTabNoteData = {
-          string: tabCoord ? tabCoord.stringNumber : 1,
-          fret: tabCoord ? tabCoord.fret : 0,
+          string: tabCoord ? tabCoord.stringNumber : 0,
+          fret: tabCoord ? tabCoord.fret : -1,
           pitchMidi: note.writtenPitch.midiNumber,
           canonicalPitch: note.canonicalPitch.toString(),
           writtenPitch: note.writtenPitch.toString(),
           tie: note.tie,
-          durationTicks: note.durationTicks,
+          durationTicks: note.durationTicks ?? 480,
         };
 
-        let existingBeat = beats.find((b) => b.startTick === note.startTick);
+        const effectiveStart = note.startTick ?? 0;
+        let existingBeat = beats.find((b) => b.startTick === effectiveStart);
         if (!existingBeat) {
-          existingBeat = {
-            startTick: note.startTick,
-            durationTicks: note.durationTicks,
+          const newBeat: AlphaTabBeatData = {
+            startTick: effectiveStart,
+            durationTicks: note.durationTicks ?? 480,
             notes: [],
           };
-          beats.push(existingBeat);
+          beats.push(newBeat);
+          existingBeat = newBeat;
         }
         existingBeat.notes.push(noteData);
       }
 
       if (measure.notes.length === 0 && measure.chords.length > 0) {
         const defaultBeats: AlphaTabBeatData[] = measure.chords.map((ch) => ({
-          startTick: ch.startTick,
+          startTick: ch.startTick ?? 0,
           durationTicks: ch.durationTicks ?? 480,
           notes: [],
           chord: {
@@ -209,7 +228,7 @@ export class AlphaTabAdapter extends BaseMusicRenderer<AlphaTabScoreData> {
       } else {
         const v1Beats = voiceBeatsMap.get(1) ?? [];
         for (const ch of measure.chords) {
-          const beat = v1Beats.find((b) => b.startTick === ch.startTick);
+          const beat = v1Beats.find((b) => ch.startTick !== null && b.startTick === ch.startTick);
           if (beat) {
             beat.chord = {
               name: ch.displayString,

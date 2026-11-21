@@ -27,6 +27,7 @@ import {
 } from './derived-musical-view.ts';
 import { type InstrumentProfile } from './instrument-profile.ts';
 import { TablatureCalculator } from './tablature-calculator.ts';
+import { extractValidatedTablatureOverride } from '../workspace/stand-format-capabilities.ts';
 import {
   type ProjectionDiagnostic,
   type ProjectionStatus,
@@ -79,7 +80,7 @@ export class ProjectionService {
 
     // 2. Determinar tonalidades y desplazamientos interválicos
     const firstMeasure = canonicalMusic.measures[0];
-    const canonicalKey = firstMeasure?.keySignature.toMusicalKey() ?? MusicalKey.C_MAJOR;
+    const canonicalKey = firstMeasure?.keySignature?.toMusicalKey() ?? MusicalKey.C_MAJOR;
 
     // Desplazamiento sonante (transposición musical solicitada por el músico/director)
     const musicianSemitones = viewPreference.transpositionSemitones;
@@ -115,7 +116,7 @@ export class ProjectionService {
     for (const measure of canonicalMusic.measures) {
       // Clave de armadura de compás
       const concertKeySig = measure.keySignature;
-      const writtenKeySig = totalWrittenOffset !== 0
+      const writtenKeySig = totalWrittenOffset !== 0 && concertKeySig !== null
         ? KeySignatureReference.fromMusicalKey(writtenKey)
         : concertKeySig;
 
@@ -221,17 +222,55 @@ export class ProjectionService {
       );
 
       // Proyectar tablatura si fue solicitada y el instrumento tiene afinación
+      // Preserva posiciones humanas/importadas explícitas en notationMetadata.tablature cuando coinciden exactamente con el pitch y afinación
       const derivedTab: TabPosition[] = [];
       if (isTabRequested && instrumentProfile.tuning) {
+        let prevFret: number | null = null;
+        let prevString: number | null = null;
+        const usedStringsByTick = new Map<number, Set<number>>();
+
         for (const note of allMeasureNotes) {
-          const tabPos = TablatureCalculator.calculatePosition(
-            note.pitch,
-            instrumentProfile.tuning,
-            capoFret,
-            note.durationTicks,
-            note.voice
-          );
+          const tickKey = note.startTick ?? -1;
+          let usedAtTick = usedStringsByTick.get(tickKey);
+          if (!usedAtTick) {
+            usedAtTick = new Set<number>();
+            usedStringsByTick.set(tickKey, usedAtTick);
+          }
+
+          const explicitPos = extractValidatedTablatureOverride(note, instrumentProfile, capoFret);
+          const tabPos = explicitPos
+            ? {
+                noteId: note.id,
+                stringNumber: explicitPos.stringNumber,
+                fret: explicitPos.fret,
+                canonicalPitch: note.pitch,
+                durationTicks: note.durationTicks,
+                voice: note.voice,
+                tuningReference: instrumentProfile.tuning.name,
+                isExplicitSource: true,
+              }
+            : (() => {
+                const calculated = TablatureCalculator.calculatePosition(
+                  note.pitch,
+                  instrumentProfile.tuning!,
+                  capoFret,
+                  note.durationTicks,
+                  note.voice,
+                  {
+                    previousFret: prevFret,
+                    previousString: prevString,
+                    usedStringsAtTick: note.startTick !== null ? usedAtTick : undefined,
+                  }
+                );
+                return calculated ? { ...calculated, noteId: note.id } : null;
+              })();
+
           if (tabPos) {
+            if (note.startTick !== null) {
+              usedAtTick.add(tabPos.stringNumber);
+            }
+            prevFret = tabPos.fret;
+            prevString = tabPos.stringNumber;
             derivedTab.push(tabPos);
           } else {
             diagnostics.push({
@@ -239,6 +278,7 @@ export class ProjectionService {
               code: 'NOTE_OUT_OF_TAB_RANGE',
               message: `La nota ${note.pitch.toString()} en compás ${measure.number} excede el rango de tablatura para ${instrumentProfile.name}.`,
               context: {
+                noteId: note.id,
                 measureNumber: measure.number,
                 pitch: note.pitch.toString(),
                 midi: note.pitch.midiNumber,

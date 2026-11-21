@@ -11,6 +11,9 @@ import { DrizzleUserRepository } from './repositories/user-repository.ts';
 import { Argon2PasswordHasher } from './domain/crypto/password-hasher.ts';
 import { DrizzleAuditLogRepository } from './repositories/audit-repository.ts';
 import { AuditService } from './application/audit-service.ts';
+import { ConversionWorker } from './application/conversion-worker.ts';
+import { stopConversionQueue } from './infrastructure/queue/conversion-queue.ts';
+import { globalAudioService } from './interfaces/http/routes/audio.routes.ts';
 
 async function start() {
   try {
@@ -31,11 +34,43 @@ async function start() {
       await bootstrapSuperAdmin(userRepo, hasher, auditService);
     }
 
-    // 3. Construir e iniciar servidor Fastify
+    // 3. Construir aplicación y ejecutar recuperación durable controlada de audio tras DB y almacenamiento
     const app = await buildApp();
+    const audioRecoveryStatus = await globalAudioService.runStartupRecovery({
+      enabled: env.AUDIO_STARTUP_RECOVERY_ENABLED,
+      purgeConfirmedOrphans: env.AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS,
+      logger: app.log,
+    });
+    console.log(
+      `🛡️ Recuperación durable de audio al arranque: estado=${audioRecoveryStatus.status}, rehidratación=${audioRecoveryStatus.rehydrationSucceeded}, purgaAuto=${env.AUDIO_STARTUP_PURGE_CONFIRMED_ORPHANS}`
+    );
+
     const address = await app.listen({ port: env.PORT, host: env.HOST });
     console.log(`\n🎵 Bethesda Worship Studio API escuchando en: ${address}`);
     console.log(`📖 Documentación Swagger disponible en: ${address}/documentation\n`);
+
+    // 4. Iniciar ConversionWorker de segundo plano (CR-01)
+    const conversionWorker = new ConversionWorker();
+    await conversionWorker.start();
+    console.log('⚙️ ConversionWorker de segundo plano iniciado y escuchando la cola de pg-boss.\n');
+
+    // 5. Manejo de señales de terminación segura (Graceful Shutdown)
+    const shutdown = async (signal: string) => {
+      console.log(`\n🛑 Recibida señal ${signal}. Iniciando apagado ordenado...`);
+      try {
+        await conversionWorker.stop();
+        await stopConversionQueue();
+        await app.close();
+        console.log('✅ Servidor y trabajadores de segundo plano detenidos correctamente.');
+        process.exit(0);
+      } catch (shutdownErr) {
+        console.error('❌ Error durante el apagado ordenado:', shutdownErr);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
   } catch (err) {
     console.error('❌ Error fatal al iniciar el servidor:', err);
     process.exit(1);

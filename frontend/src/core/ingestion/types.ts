@@ -5,7 +5,7 @@
 
 import { CanonicalMusicPayload } from '../canonical-model/canonical-music-payload.ts';
 
-export type ImportFormat = 'MUSIC_XML' | 'CHORD_PRO' | 'PDF' | 'IMAGE';
+export type ImportFormat = 'MUSIC_XML' | 'CHORD_PRO' | 'PDF' | 'IMAGE' | 'TABLATURE';
 
 export type IngestionStatus = 'SUCCESS' | 'SUCCESS_WITH_WARNINGS' | 'FAILED';
 
@@ -47,8 +47,8 @@ export interface ImportStatistics {
   lyricCount: number;
   sectionCount: number;
   trackCount: number;
-  durationTicks: number;
-  durationSeconds: number;
+  durationTicks: number | null;
+  durationSeconds: number | null;
 }
 
 export interface ImportOptions {

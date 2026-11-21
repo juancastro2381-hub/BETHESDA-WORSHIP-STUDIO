@@ -71,3 +71,23 @@ export const pool = new Pool({
 export const db = drizzle(pool, { schema });
 
 export type Database = typeof db;
+
+/**
+ * Verifica en tiempo de ejecución que el rol de conexión en producción sea un rol de ejecución restringido (R3.2-02).
+ * Falla de forma segura (fail-safe) si se intenta ejecutar la aplicación de producción con una cuenta de superusuario o DBA.
+ */
+export async function assertNonSuperuserRuntimeRole(activePool: pg.Pool = pool): Promise<void> {
+  if (env.NODE_ENV !== 'production') return;
+
+  const res = await activePool.query(`
+    SELECT r.rolname, r.rolsuper, r.rolcreaterole, r.rolcreatedb
+    FROM pg_roles r
+    WHERE r.rolname = current_user
+  `);
+  const currentRole = res.rows[0];
+  if (currentRole && currentRole.rolsuper) {
+    throw new Error(
+      `❌ Invariante de Seguridad Violada: La aplicación en producción no puede ejecutarse como superusuario de PostgreSQL ("${currentRole.rolname}"). Configure una cuenta de ejecución no privilegiada (e.g. bethesda_app_runtime).`
+    );
+  }
+}

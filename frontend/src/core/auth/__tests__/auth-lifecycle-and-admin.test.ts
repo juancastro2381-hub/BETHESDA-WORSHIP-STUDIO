@@ -7,6 +7,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { BethesdaApiClient } from '../../api/api-client.ts';
+import { ApiError } from '../../api/api-error.ts';
+import { isServerAuthRejectionError } from '../../offline/offline-session-identity.ts';
 import { tokenManager } from '../token-manager.ts';
 import type { AuthUser, UserRole } from '../types.ts';
 
@@ -381,5 +383,120 @@ describe('Frontend Auth Lifecycle & User Administration Suite', () => {
     assert.strictEqual(capturedPath, '/api/v1/auth/change-initial-password');
     assert.strictEqual(capturedBody?.currentPassword, 'CurrentPass123!');
     assert.strictEqual(capturedBody?.newPassword, 'NewDefinitivePass2026!');
+  });
+
+  it('10. uploadSongAudio sends explicit Content-Type: application/json header and valid JSON body', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+    tokenManager.setToken('valid-director-jwt', 900);
+
+    let capturedContentType: string | null = null;
+    let capturedAuth: string | null = null;
+    let capturedBody: Record<string, unknown> | null = null;
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      capturedContentType = headers.get('content-type');
+      capturedAuth = headers.get('authorization');
+      capturedBody = init?.body ? JSON.parse(String(init.body)) : null;
+
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: 'audio-asset-001',
+            songId: '4cb6240b-3657-4662-b26c-abb26dd4fa8d',
+            title: 'El Señor Está en Este Lugar',
+            filename: 'El Señor Está en Este Lugar.mp3',
+            mimeType: 'audio/mpeg',
+            fileSizeBytes: 1256,
+            checksumSha256: 'a'.repeat(64),
+            durationSeconds: null,
+            createdAt: new Date().toISOString(),
+          },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const result = await apiClient.uploadSongAudio({
+      songId: '4cb6240b-3657-4662-b26c-abb26dd4fa8d',
+      title: 'El Señor Está en Este Lugar',
+      filename: 'El Señor Está en Este Lugar.mp3',
+      mimeType: 'audio/mpeg',
+      dataBase64: 'SUQzAwAAAAA=',
+    });
+
+    assert.strictEqual(capturedContentType, 'application/json');
+    assert.strictEqual(capturedAuth, 'Bearer valid-director-jwt');
+    assert.strictEqual(capturedBody?.['title'], 'El Señor Está en Este Lugar');
+    assert.strictEqual(capturedBody?.['filename'], 'El Señor Está en Este Lugar.mp3');
+    assert.strictEqual(capturedBody?.['mimeType'], 'audio/mpeg');
+    assert.strictEqual(capturedBody?.['dataBase64'], 'SUQzAwAAAAA=');
+    assert.strictEqual('durationSeconds' in (capturedBody ?? {}), false);
+    assert.strictEqual(result.id, 'audio-asset-001');
+  });
+
+  it('11. refreshSession throws structured ApiError(401) recognized by isServerAuthRejectionError', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+
+    globalThis.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'Cookie de refresco ausente o inválida.',
+            statusCode: 401,
+          },
+        }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    let caughtError: unknown = null;
+    try {
+      await apiClient.refreshSession();
+    } catch (err) {
+      caughtError = err;
+    }
+
+    assert.ok(caughtError instanceof ApiError);
+    assert.strictEqual((caughtError as ApiError).statusCode, 401);
+    assert.strictEqual((caughtError as ApiError).code, 'UNAUTHORIZED');
+    assert.strictEqual(isServerAuthRejectionError(caughtError), true);
+  });
+
+  it('12. fetchWithAuth notifies registerAuthFailureListener and clears token when 401 refresh fails', async () => {
+    const apiClient = new BethesdaApiClient({ baseUrl: 'http://localhost:3001/api/v1' });
+    tokenManager.setToken('expired-jwt', 900);
+
+    const notifiedErrors: unknown[] = [];
+    const unsubscribe = apiClient.registerAuthFailureListener((err) => {
+      notifiedErrors.push(err);
+    });
+
+    globalThis.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'Cookie de refresco ausente o inválida.',
+            statusCode: 401,
+          },
+        }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const res = await apiClient.fetchWithAuth('/songs/4cb6240b-3657-4662-b26c-abb26dd4fa8d/audio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Test' }),
+    });
+
+    unsubscribe();
+
+    assert.strictEqual(res.status, 401);
+    assert.strictEqual(tokenManager.getToken(), null);
+    assert.strictEqual(notifiedErrors.length, 1);
+    assert.strictEqual(isServerAuthRejectionError(notifiedErrors[0]), true);
   });
 });

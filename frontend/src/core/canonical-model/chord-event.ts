@@ -24,30 +24,41 @@ export interface ChordStructuredJSON {
   symbol: string;
 }
 
+export type ChordEvidenceStatus = 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'HUMAN_VERIFIED';
+
 export interface ChordEventJSON {
   id: string;
   chord: ChordStructuredJSON;
-  startTick: number;
-  durationTicks?: number;
+  startTick: number | null;
+  durationTicks?: number | null;
   measureNumber: number;
   voice?: number;
+  evidenceStatus?: ChordEvidenceStatus;
+  confidence?: number;
+  alternativeSymbol?: string | null;
 }
 
 export class ChordEvent {
   public readonly id: string;
   public readonly chord: Chord;
-  public readonly startTick: number;
-  public readonly durationTicks?: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks?: number | null;
   public readonly measureNumber: number;
   public readonly voice?: number;
+  public readonly evidenceStatus?: ChordEvidenceStatus;
+  public readonly confidence?: number;
+  public readonly alternativeSymbol?: string | null;
 
   public constructor(init: {
     id: string;
     chord: Chord;
-    startTick: number;
-    durationTicks?: number;
+    startTick: number | null;
+    durationTicks?: number | null;
     measureNumber: number;
     voice?: number;
+    evidenceStatus?: ChordEvidenceStatus;
+    confidence?: number;
+    alternativeSymbol?: string | null;
   }) {
     if (!init.id || typeof init.id !== 'string') {
       throw new Error(`ID de evento de acorde requerido e inválido: ${init.id}`);
@@ -55,11 +66,15 @@ export class ChordEvent {
     if (!init.chord || !(init.chord instanceof Chord)) {
       throw new Error(`Objeto Chord requerido en evento ${init.id}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`Tick inicial de acorde inválido: ${init.startTick}. Debe ser >= 0.`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`Tick inicial de acorde inválido: ${init.startTick}. Debe ser >= 0 o null.`);
     }
-    if (init.durationTicks !== undefined && (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)) {
-      throw new Error(`Duración en ticks de acorde inválida: ${init.durationTicks}. Debe ser >= 1.`);
+    if (
+      init.durationTicks !== undefined &&
+      init.durationTicks !== null &&
+      (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)
+    ) {
+      throw new Error(`Duración en ticks de acorde inválida: ${init.durationTicks}. Debe ser >= 1 o null.`);
     }
     if (!Number.isInteger(init.measureNumber) || init.measureNumber <= 0) {
       throw new Error(`Número de compás de acorde inválido: ${init.measureNumber}. Debe ser >= 1.`);
@@ -68,13 +83,18 @@ export class ChordEvent {
     this.id = init.id;
     this.chord = init.chord;
     this.startTick = init.startTick;
-    if (init.durationTicks !== undefined) this.durationTicks = init.durationTicks;
+    this.durationTicks = init.durationTicks ?? null;
     this.measureNumber = init.measureNumber;
     if (init.voice !== undefined) this.voice = init.voice;
+    if (init.evidenceStatus !== undefined) this.evidenceStatus = init.evidenceStatus;
+    if (init.confidence !== undefined) this.confidence = init.confidence;
+    if (init.alternativeSymbol !== undefined) this.alternativeSymbol = init.alternativeSymbol;
   }
 
-  public get endTick(): number | undefined {
-    return this.durationTicks !== undefined ? this.startTick + this.durationTicks : undefined;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null && this.durationTicks !== undefined
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public toJSON(): ChordEventJSON {
@@ -95,6 +115,9 @@ export class ChordEvent {
     };
     if (this.durationTicks !== undefined) json.durationTicks = this.durationTicks;
     if (this.voice !== undefined) json.voice = this.voice;
+    if (this.evidenceStatus !== undefined) json.evidenceStatus = this.evidenceStatus;
+    if (this.confidence !== undefined) json.confidence = this.confidence;
+    if (this.alternativeSymbol !== undefined) json.alternativeSymbol = this.alternativeSymbol;
     return json;
   }
 
@@ -113,18 +136,24 @@ export class ChordEvent {
     const init: {
       id: string;
       chord: Chord;
-      startTick: number;
-      durationTicks?: number;
+      startTick: number | null;
+      durationTicks?: number | null;
       measureNumber: number;
       voice?: number;
+      evidenceStatus?: ChordEvidenceStatus;
+      confidence?: number;
+      alternativeSymbol?: string | null;
     } = {
       id: json.id,
       chord,
-      startTick: json.startTick,
+      startTick: json.startTick ?? null,
       measureNumber: json.measureNumber,
     };
     if (json.durationTicks !== undefined) init.durationTicks = json.durationTicks;
     if (json.voice !== undefined) init.voice = json.voice;
+    if (json.evidenceStatus !== undefined) init.evidenceStatus = json.evidenceStatus;
+    if (json.confidence !== undefined) init.confidence = json.confidence;
+    if (json.alternativeSymbol !== undefined) init.alternativeSymbol = json.alternativeSymbol;
     return new ChordEvent(init);
   }
 }

@@ -26,7 +26,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
 };
 
 export const UserProfileBadge: React.FC = () => {
-  const { user, isAuthenticated, isLoading, logout, canManageUsers } = useAuth();
+  const { user, isAuthenticated, isLoading, isOfflineSession, isReadOnlyOffline, logout, canManageUsers } = useAuth();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isUserMgmtOpen, setIsUserMgmtOpen] = useState(false);
 
@@ -70,6 +70,20 @@ export const UserProfileBadge: React.FC = () => {
           >
             {roleLabel}
           </span>
+          {(isOfflineSession || isReadOnlyOffline) && (
+            <span
+              className="user-role-badge offline-readonly-session-badge"
+              style={{
+                backgroundColor: 'rgba(245, 158, 11, 0.16)',
+                color: '#fbbf24',
+                borderColor: '#f59e0b',
+              }}
+              title="Sesión restaurada localmente en Modo Sin Conexión. Solo lectura; las modificaciones requieren reconectar con el servidor."
+              id="offline-readonly-session-badge"
+            >
+              Modo Offline (Solo Lectura)
+            </span>
+          )}
         </div>
 
         {canManageUsers && (

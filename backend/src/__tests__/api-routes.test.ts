@@ -541,17 +541,39 @@ describe('Phase 2A / Post-Doc Remediation — Song Catalog RBAC & Fastify HTTP A
       role: 'WORSHIP_LEADER',
     }).token;
 
-    // Se degrada en la base de datos a VIEWER
+    // Se degrada en la base de datos a VIEWER (también incrementa tokenVersion a 2)
     await userRepo.updateRole(demotedUser.id, 'VIEWER');
 
     const canonicalSong = createReferenceSongFixture();
     const canonicalJSON = CanonicalSerializer.serialize(canonicalSong);
 
-    // Intentar crear canción con token antiguo que dice WORSHIP_LEADER
-    const staleAttemptRes = await app.inject({
+    // 1. Token previo con tokenVersion=1 queda revocado de inmediato (401 Unauthorized — R1.3)
+    const revokedAttemptRes = await app.inject({
       method: 'POST',
       url: '/api/v1/songs',
       headers: { authorization: `Bearer ${staledLeaderToken}` },
+      payload: {
+        title: 'Canción Intento Degradado',
+        defaultKey: 'A',
+        sourceFormat: 'INTERNAL',
+        canonicalPayload: canonicalJSON,
+      },
+    });
+    assert.strictEqual(revokedAttemptRes.statusCode, 401);
+    assert.match(JSON.parse(revokedAttemptRes.payload).error.message, /revocado/i);
+
+    // 2. Incluso si el token tuviera tokenVersion=2 actual pero claim de rol antiguo, el rol autoritativo VIEWER en PostgreSQL bloquea (403)
+    const staleRoleCurrentVersionToken = tokenService.signAccessToken({
+      sub: demotedUser.id,
+      email: demotedUser.email,
+      role: 'WORSHIP_LEADER',
+      tokenVersion: 2,
+    }).token;
+
+    const staleAttemptRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/songs',
+      headers: { authorization: `Bearer ${staleRoleCurrentVersionToken}` },
       payload: {
         title: 'Canción Intento Degradado',
         defaultKey: 'A',

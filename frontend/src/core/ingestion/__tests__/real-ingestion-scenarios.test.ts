@@ -56,9 +56,9 @@ describe('Phase 1H — Real Music Ingestion & Normalization Tests', () => {
 
     // Medida 1: Compás 4/4, tonalidad Sol Mayor (G)
     const m1 = song.measures[0]!;
-    assert.strictEqual(m1.timeSignature.numerator, 4);
-    assert.strictEqual(m1.timeSignature.denominator, 4);
-    assert.strictEqual(m1.keySignature.toMusicalKey().tonic.toString(), 'G');
+    assert.strictEqual(m1.timeSignature?.numerator, 4);
+    assert.strictEqual(m1.timeSignature?.denominator, 4);
+    assert.strictEqual(m1.keySignature?.toMusicalKey().tonic.toString(), 'G');
 
     // Notas de compás 1: G4 (480 ticks = negra), B4 (480 ticks = negra), D5 (960 ticks = blanca)
     const notesM1 = m1.getAllNotes();

@@ -289,4 +289,88 @@ describe('Workstream B — WP-05 Autoscroll Logic & Timing Suite (No Pedal Integ
       'AutoscrollControl.tsx no debe contener referencias a pedal'
     );
   });
+
+  it('9. resolveScrollTarget should target ONLY the dedicated musical viewport (never document.scrollingElement or window.scrollTo) and prefer nested visual viewports', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { resolveScrollTarget } = await import('../use-autoscroll.ts');
+
+    const prevDocument = (globalThis as any).document;
+    const fakeDocScroller = { scrollHeight: 2400, clientHeight: 800 };
+    (globalThis as any).document = { scrollingElement: fakeDocScroller, documentElement: fakeDocScroller };
+
+    try {
+      // Caso 1: <main class="workspace-viewport-area"> -> debe devolver siempre el propio viewport musical, NUNCA el documento raíz
+      const dedicatedMainViewport = {
+        scrollHeight: 2200,
+        clientHeight: 600,
+        querySelector: () => null,
+      } as unknown as HTMLElement;
+      assert.strictEqual(resolveScrollTarget(dedicatedMainViewport), dedicatedMainViewport);
+      assert.notStrictEqual(resolveScrollTarget(dedicatedMainViewport), fakeDocScroller);
+
+      // Caso 2: Visor PDF con .visual-document-viewport desplazable -> debe priorizar el contenedor anidado
+      const nestedVisualViewport = {
+        scrollHeight: 1800,
+        clientHeight: 700,
+      } as unknown as HTMLElement;
+      const wrapperWithNested = {
+        scrollHeight: 700,
+        clientHeight: 700,
+        querySelector: (selector: string) =>
+          selector.includes('.visual-document-viewport') ? nestedVisualViewport : null,
+      } as unknown as HTMLElement;
+      assert.strictEqual(resolveScrollTarget(wrapperWithNested), nestedVisualViewport);
+
+      // Caso 3: Verificar que use-autoscroll.ts no invoca window.scrollTo ni document.scrollingElement
+      const autoscrollSource = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/core/autoscroll/use-autoscroll.ts'),
+        'utf-8'
+      );
+      assert.equal(autoscrollSource.includes('window.scrollTo'), false);
+      assert.equal(autoscrollSource.includes('document.scrollingElement'), false);
+    } finally {
+      (globalThis as any).document = prevDocument;
+    }
+  });
+
+  it('10. AutoscrollControl should render floating controls (Start/Resume/Pause, Stop, Home, 6 speeds, progress bar)', async () => {
+    const React = await import('react');
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { AutoscrollControl } = await import('../../../components/workspace/AutoscrollControl.tsx');
+
+    const baseController = {
+      state: {
+        status: 'PAUSED' as const,
+        isRunning: false,
+        isPaused: true,
+        speed: 1.5 as const,
+        currentScrollTop: 300,
+        maxScrollTop: 1000,
+        progressPercentage: 30,
+      },
+      start: () => {},
+      pause: () => {},
+      resume: () => {},
+      stop: () => {},
+      togglePlayPause: () => {},
+      setSpeed: () => {},
+      increaseSpeed: () => {},
+      decreaseSpeed: () => {},
+      reset: () => {},
+    };
+
+    const html = renderToStaticMarkup(
+      React.createElement(AutoscrollControl, { controller: baseController, isVisible: true })
+    );
+
+    assert.ok(html.includes('Reanudar'));
+    assert.ok(html.includes('Detener'));
+    assert.ok(html.includes('Inicio'));
+    assert.ok(html.includes('30%'));
+    assert.ok(html.includes('role="progressbar"'));
+    for (const s of ['0.5x', '0.75x', '1x', '1.5x', '2x', '3x']) {
+      assert.ok(html.includes(s), `Debe renderizar opción de velocidad ${s}`);
+    }
+  });
 });

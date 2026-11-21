@@ -20,17 +20,25 @@
 import React, { useEffect, useState, useCallback, useId } from 'react';
 import { BethesdaApiClient } from '../../core/api/api-client.ts';
 import { ApiError } from '../../core/api/api-error.ts';
-import type {
-  FrontendSetlistSummary,
-  FrontendSetlistStatus,
+import {
+  WORSHIP_SERVICE_STATUS_LABELS,
+  type FrontendSetlistSummary,
+  type FrontendSetlistStatus,
+  type FrontendWorshipService,
+  type FrontendWorshipServiceStatus,
 } from '../../core/api/setlist-types.ts';
+import {
+  filterWorshipServices,
+  type WorshipServiceFilterTab,
+} from '../../core/workspace/music-stand-controller.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 import { SetlistDetailEditor } from './SetlistDetailEditor.tsx';
 import { offlineStorage } from '../../core/offline/storage/indexeddb-storage.ts';
 import { DownloadActionButton } from '../offline/DownloadActionButton.tsx';
 import { ModalCloseButton, SetlistIcon, TrashIcon } from '../common/Icons.tsx';
 
-export type SetlistTab = 'ALL' | 'ACTIVE' | 'PLANNING' | 'HISTORY';
+export type SetlistTab = 'ALL' | 'ACTIVE' | 'PLANNING' | 'TEMPLATES' | 'HISTORY';
+export type CatalogSection = 'SETLISTS' | 'SERVICES';
 
 export interface SetlistsModalProps {
   readonly isOpen: boolean;
@@ -51,7 +59,9 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
   const { user } = useAuth();
   const titleId = useId();
 
+  const [catalogSection, setCatalogSection] = useState<CatalogSection>('SETLISTS');
   const [setlists, setSetlists] = useState<FrontendSetlistSummary[]>([]);
+  const [worshipServices, setWorshipServices] = useState<FrontendWorshipService[]>([]);
   const [missingDepsMap, setMissingDepsMap] = useState<Map<string, string[]>>(new Map());
   const [isOfflineMode, setIsOfflineMode] = useState<boolean>(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
@@ -59,6 +69,8 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<SetlistTab>('ALL');
+  const [serviceTab, setServiceTab] = useState<WorshipServiceFilterTab>('UPCOMING');
+  const [serviceTypeFilter, setServiceTypeFilter] = useState<string>('');
   const [actionInProgressId, setActionInProgressId] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -71,7 +83,20 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
   const [newTitle, setNewTitle] = useState<string>('');
   const [newScheduledDate, setNewScheduledDate] = useState<string>('');
   const [newNotes, setNewNotes] = useState<string>('');
+  const [newIsTemplate, setNewIsTemplate] = useState<boolean>(false);
   const [creating, setCreating] = useState<boolean>(false);
+
+  // Formulario para Crear / Editar Culto o Evento (Fase 2C — 4.1)
+  const [showServiceForm, setShowServiceForm] = useState<boolean>(false);
+  const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [svcName, setSvcName] = useState<string>('');
+  const [svcType, setSvcType] = useState<string>('Culto Dominical');
+  const [svcScheduledAt, setSvcScheduledAt] = useState<string>('');
+  const [svcDescription, setSvcDescription] = useState<string>('');
+  const [svcNotes, setSvcNotes] = useState<string>('');
+  const [svcSetlistId, setSvcSetlistId] = useState<string>('');
+  const [svcStatus, setSvcStatus] = useState<FrontendWorshipServiceStatus>('UPCOMING');
+  const [savingService, setSavingService] = useState<boolean>(false);
 
   // Estado para confirmación de eliminación (GAP-03: solo SUPER_ADMIN y ADMIN)
   const [setlistToDelete, setSetlistToDelete] = useState<FrontendSetlistSummary | null>(null);
@@ -83,7 +108,7 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
     user?.role === 'ADMIN' ||
     user?.role === 'WORSHIP_LEADER';
 
-  // Solo ADMIN y SUPER_ADMIN pueden eliminar repertorios (WORSHIP_LEADER = false)
+  // Solo ADMIN y SUPER_ADMIN pueden eliminar repertorios o servicios (WORSHIP_LEADER = false)
   const canDeleteSetlists =
     user?.role === 'SUPER_ADMIN' ||
     user?.role === 'ADMIN';
@@ -97,8 +122,12 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
         throw new Error('Sin conexión al servidor.');
       }
 
-      const result = await client.listSetlists({ limit: 50 });
+      const [result, servicesResult] = await Promise.all([
+        client.listSetlists({ limit: 50 }),
+        client.listWorshipServices({ limit: 50 }).catch(() => ({ items: [], pagination: { total: 0, limit: 50, offset: 0, hasMore: false } })),
+      ]);
       setSetlists(result.items);
+      setWorshipServices(servicesResult.items);
       setIsOfflineMode(false);
 
       // Cargar metadatos locales de dependencias faltantes
@@ -244,11 +273,13 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
         title: newTitle.trim(),
         scheduledDateTime: newScheduledDate ? new Date(newScheduledDate).toISOString() : null,
         notes: newNotes.trim() || null,
+        isTemplate: newIsTemplate,
       });
       setSuccessMessage(`Repertorio "${newTitle.trim()}" creado exitosamente.`);
       setNewTitle('');
       setNewScheduledDate('');
       setNewNotes('');
+      setNewIsTemplate(false);
       setShowCreateForm(false);
       await loadData();
       // Abrir inmediatamente en modo detalle para que el líder pueda agregar canciones y momentos
@@ -258,6 +289,120 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
       setError(err instanceof Error ? err.message : 'Error al crear el repertorio.');
     } finally {
       setCreating(false);
+    }
+  };
+
+  // Fase 2C (4.2): Duplicar repertorio o plantilla
+  const handleDuplicateSetlist = async (s: FrontendSetlistSummary) => {
+    setActionInProgressId(s.id);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const duplicated = await client.duplicateSetlist(s.id, {
+        newTitle: `${s.title} (Copia)`,
+        isTemplate: false,
+      });
+      setSuccessMessage(`Repertorio duplicado como "${duplicated.title}".`);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al duplicar el repertorio.');
+    } finally {
+      setActionInProgressId(null);
+    }
+  };
+
+  // Fase 2C (4.1): Crear o Actualizar Culto / Evento
+  const resetServiceForm = () => {
+    setEditingServiceId(null);
+    setSvcName('');
+    setSvcType('Culto Dominical');
+    setSvcScheduledAt('');
+    setSvcDescription('');
+    setSvcNotes('');
+    setSvcSetlistId('');
+    setSvcStatus('UPCOMING');
+    setShowServiceForm(false);
+  };
+
+  const handleStartEditService = (svc: FrontendWorshipService) => {
+    setEditingServiceId(svc.id);
+    setSvcName(svc.name);
+    setSvcType(svc.serviceType);
+    setSvcScheduledAt(svc.scheduledAt ? svc.scheduledAt.split('T')[0] ?? '' : '');
+    setSvcDescription(svc.description ?? '');
+    setSvcNotes(svc.notes ?? '');
+    setSvcSetlistId(svc.setlistId ?? '');
+    setSvcStatus(svc.status);
+    setShowServiceForm(true);
+  };
+
+  const handleSaveServiceSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!svcName.trim() || !svcType.trim()) return;
+
+    setSavingService(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const payload = {
+        name: svcName.trim(),
+        serviceType: svcType.trim(),
+        scheduledAt: svcScheduledAt
+          ? new Date(svcScheduledAt).toISOString()
+          : new Date().toISOString(),
+        description: svcDescription.trim() || null,
+        notes: svcNotes.trim() || null,
+        setlistId: svcSetlistId || null,
+        status: svcStatus,
+      };
+
+      if (editingServiceId) {
+        await client.updateWorshipService(editingServiceId, payload);
+        setSuccessMessage(`Servicio "${svcName.trim()}" actualizado exitosamente.`);
+      } else {
+        await client.createWorshipService(payload);
+        setSuccessMessage(`Servicio "${svcName.trim()}" programado exitosamente.`);
+      }
+      resetServiceForm();
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al guardar el servicio de culto.');
+    } finally {
+      setSavingService(false);
+    }
+  };
+
+  const handleArchiveService = async (svc: FrontendWorshipService) => {
+    setActionInProgressId(svc.id);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      await client.updateWorshipService(svc.id, { status: 'ARCHIVED' });
+      setSuccessMessage(`Servicio "${svc.name}" archivado.`);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al archivar el servicio.');
+    } finally {
+      setActionInProgressId(null);
+    }
+  };
+
+  const handleDeleteService = async (svc: FrontendWorshipService) => {
+    if (!canDeleteSetlists) return;
+    const confirmed = window.confirm(`¿Eliminar permanentemente el servicio "${svc.name}"?`);
+    if (!confirmed) return;
+
+    setActionInProgressId(svc.id);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      await client.deleteWorshipService(svc.id);
+      setSuccessMessage(`Servicio "${svc.name}" eliminado.`);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al eliminar el servicio.');
+    } finally {
+      setActionInProgressId(null);
     }
   };
 
@@ -290,9 +435,17 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
   const filteredSetlists = setlists.filter((s) => {
     if (activeTab === 'ACTIVE') return s.status === 'ACTIVE';
     if (activeTab === 'PLANNING') return s.status === 'PLANNING';
+    if (activeTab === 'TEMPLATES') return Boolean(s.isTemplate);
     if (activeTab === 'HISTORY') return s.status === 'COMPLETED' || s.status === 'ARCHIVED';
     return true;
   });
+
+  // Filtrado reactivo de servicios de culto (Fase 2C — 4.1)
+  const filteredWorshipServices = filterWorshipServices(
+    worshipServices,
+    serviceTab,
+    serviceTypeFilter
+  );
 
   return (
     <div
@@ -357,267 +510,656 @@ export const SetlistsModal: React.FC<SetlistsModalProps> = ({
             apiClient={client}
           />
         ) : (
-          /* Sub-vista 2: Catálogo de Repertorios */
+          /* Sub-vista 2: Catálogo de Repertorios y Servicios de Culto */
           <>
-            {/* Pestañas de Filtrado y Botón Crear */}
-            <div className="setlists-toolbar-row">
-              <div className="setlists-tabs" role="tablist" aria-label="Filtrar repertorios por estado">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === 'ALL'}
-                  className={`setlists-tab ${activeTab === 'ALL' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('ALL')}
-                >
-                  Todos ({setlists.length})
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === 'ACTIVE'}
-                  className={`setlists-tab ${activeTab === 'ACTIVE' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('ACTIVE')}
-                >
-                  Activo ({setlists.filter((s) => s.status === 'ACTIVE').length})
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === 'PLANNING'}
-                  className={`setlists-tab ${activeTab === 'PLANNING' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('PLANNING')}
-                >
-                  En Planificación ({setlists.filter((s) => s.status === 'PLANNING').length})
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === 'HISTORY'}
-                  className={`setlists-tab ${activeTab === 'HISTORY' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('HISTORY')}
-                >
-                  Historial ({setlists.filter((s) => s.status === 'COMPLETED' || s.status === 'ARCHIVED').length})
-                </button>
-              </div>
-
-              {canManageSetlists && (
-                <button
-                  type="button"
-                  className={`btn-action-create ${showCreateForm ? 'cancel' : ''}`}
-                  onClick={() => setShowCreateForm((prev) => !prev)}
-                  aria-expanded={showCreateForm}
-                >
-                  {showCreateForm ? '✕ Cancelar' : '+ Nuevo Repertorio'}
-                </button>
-              )}
+            {/* Selector de Sección Principal (Fase 2C — 4.1 & 4.2) */}
+            <div className="catalog-section-switcher" role="tablist" aria-label="Secciones de gestión litúrgica">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={catalogSection === 'SETLISTS'}
+                className={`catalog-section-btn ${catalogSection === 'SETLISTS' ? 'active' : ''}`}
+                onClick={() => setCatalogSection('SETLISTS')}
+              >
+                📋 Repertorios ({setlists.length})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={catalogSection === 'SERVICES'}
+                className={`catalog-section-btn ${catalogSection === 'SERVICES' ? 'active' : ''}`}
+                onClick={() => setCatalogSection('SERVICES')}
+              >
+                🏛️ Cultos y Eventos ({worshipServices.length})
+              </button>
             </div>
 
-            {/* Formulario de Creación Rápida */}
-            {showCreateForm && (
-              <form onSubmit={handleCreateSubmit} className="setlist-create-form" aria-label="Crear nuevo repertorio">
-                <h3 className="create-form-title">Crear Nuevo Repertorio de Culto</h3>
-                <div className="create-form-grid">
-                  <div className="form-group">
-                    <label htmlFor="setlist-title-input">Título del Servicio *</label>
-                    <input
-                      id="setlist-title-input"
-                      type="text"
-                      required
-                      placeholder="Ej. Culto Dominical — 28 de Septiembre"
-                      value={newTitle}
-                      onChange={(e) => setNewTitle(e.target.value)}
-                      className="auth-input"
-                      disabled={creating}
-                    />
+            {catalogSection === 'SETLISTS' ? (
+              <>
+                {/* Pestañas de Filtrado y Botón Crear Repertorio */}
+                <div className="setlists-toolbar-row">
+                  <div className="setlists-tabs" role="tablist" aria-label="Filtrar repertorios por estado">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === 'ALL'}
+                      className={`setlists-tab ${activeTab === 'ALL' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('ALL')}
+                    >
+                      Todos ({setlists.length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === 'ACTIVE'}
+                      className={`setlists-tab ${activeTab === 'ACTIVE' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('ACTIVE')}
+                    >
+                      Activo ({setlists.filter((s) => s.status === 'ACTIVE').length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === 'PLANNING'}
+                      className={`setlists-tab ${activeTab === 'PLANNING' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('PLANNING')}
+                    >
+                      En Planificación ({setlists.filter((s) => s.status === 'PLANNING').length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === 'TEMPLATES'}
+                      className={`setlists-tab ${activeTab === 'TEMPLATES' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('TEMPLATES')}
+                    >
+                      Plantillas ({setlists.filter((s) => Boolean(s.isTemplate)).length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === 'HISTORY'}
+                      className={`setlists-tab ${activeTab === 'HISTORY' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('HISTORY')}
+                    >
+                      Historial ({setlists.filter((s) => s.status === 'COMPLETED' || s.status === 'ARCHIVED').length})
+                    </button>
                   </div>
-                  <div className="form-group">
-                    <label htmlFor="setlist-date-input">Fecha del Servicio</label>
-                    <input
-                      id="setlist-date-input"
-                      type="date"
-                      value={newScheduledDate}
-                      onChange={(e) => setNewScheduledDate(e.target.value)}
-                      className="auth-input"
-                      disabled={creating}
-                    />
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label htmlFor="setlist-notes-input">Notas / Indicaciones Litúrgicas</label>
-                  <textarea
-                    id="setlist-notes-input"
-                    rows={2}
-                    placeholder="Observaciones generales para el equipo de alabanza..."
-                    value={newNotes}
-                    onChange={(e) => setNewNotes(e.target.value)}
-                    className="auth-input setlist-textarea"
-                    disabled={creating}
-                  />
-                </div>
-                <div className="create-form-actions">
-                  <button
-                    type="submit"
-                    className="action-button primary"
-                    disabled={creating || !newTitle.trim()}
-                  >
-                    {creating ? 'Guardando...' : 'Crear y Administrar Ítems'}
-                  </button>
-                </div>
-              </form>
-            )}
 
-            {/* Lista de Repertorios */}
-            <div className="setlists-list-container">
-              {loading ? (
-                <div className="setlists-loading-state" role="status">
-                  <span className="auth-spinner" aria-hidden="true" />
-                  <p>Cargando repertorios litúrgicos desde el servidor...</p>
+                  {canManageSetlists && (
+                    <button
+                      type="button"
+                      className={`btn-action-create ${showCreateForm ? 'cancel' : ''}`}
+                      onClick={() => setShowCreateForm((prev) => !prev)}
+                      aria-expanded={showCreateForm}
+                    >
+                      {showCreateForm ? '✕ Cancelar' : '+ Nuevo Repertorio'}
+                    </button>
+                  )}
                 </div>
-              ) : filteredSetlists.length === 0 ? (
-                <div className="setlists-empty-state" role="status">
-                  <p className="empty-title">No hay repertorios disponibles en esta categoría.</p>
-                  <p className="empty-hint">
-                    {canManageSetlists
-                      ? 'Utilice el botón "+ Nuevo Repertorio" para programar el orden del culto.'
-                      : 'Los directores de alabanza programarán los repertorios de los próximos servicios.'}
-                  </p>
-                </div>
-              ) : (
-                <ul className="setlists-list" role="list">
-                  {filteredSetlists.map((s) => {
-                    const isActive = s.id === activeSetlistId;
-                    const isOperating = actionInProgressId === s.id;
 
-                    return (
-                      <li
-                        key={s.id}
-                        className={`setlist-card-item ${s.status === 'ACTIVE' ? 'status-active' : ''} ${
-                          isActive ? 'currently-loaded' : ''
-                        }`}
+                {/* Formulario de Creación Rápida de Repertorio */}
+                {showCreateForm && (
+                  <form onSubmit={handleCreateSubmit} className="setlist-create-form" aria-label="Crear nuevo repertorio">
+                    <h3 className="create-form-title">Crear Nuevo Repertorio de Culto</h3>
+                    <div className="create-form-grid">
+                      <div className="form-group">
+                        <label htmlFor="setlist-title-input">Título del Servicio *</label>
+                        <input
+                          id="setlist-title-input"
+                          type="text"
+                          required
+                          placeholder="Ej. Culto Dominical — 28 de Septiembre"
+                          value={newTitle}
+                          onChange={(e) => setNewTitle(e.target.value)}
+                          className="auth-input"
+                          disabled={creating}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label htmlFor="setlist-date-input">Fecha del Servicio</label>
+                        <input
+                          id="setlist-date-input"
+                          type="date"
+                          value={newScheduledDate}
+                          onChange={(e) => setNewScheduledDate(e.target.value)}
+                          className="auth-input"
+                          disabled={creating}
+                        />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label htmlFor="setlist-notes-input">Notas / Indicaciones Litúrgicas</label>
+                      <textarea
+                        id="setlist-notes-input"
+                        rows={2}
+                        placeholder="Observaciones generales para el equipo de alabanza..."
+                        value={newNotes}
+                        onChange={(e) => setNewNotes(e.target.value)}
+                        className="auth-input setlist-textarea"
+                        disabled={creating}
+                      />
+                    </div>
+                    <div className="form-group form-checkbox-row">
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={newIsTemplate}
+                          onChange={(e) => setNewIsTemplate(e.target.checked)}
+                          disabled={creating}
+                        />
+                        <span>Guardar como plantilla litúrgica reutilizable</span>
+                      </label>
+                    </div>
+                    <div className="create-form-actions">
+                      <button
+                        type="submit"
+                        className="action-button primary"
+                        disabled={creating || !newTitle.trim()}
                       >
-                        <div className="setlist-card-header">
-                          <div className="setlist-card-meta-row">
-                            <span className={`setlist-status-badge ${s.status.toLowerCase()}`}>
-                              {s.status === 'ACTIVE' && '● EN CULTO / ACTIVO'}
-                              {s.status === 'PLANNING' && 'EN PLANIFICACIÓN'}
-                              {s.status === 'COMPLETED' && 'COMPLETADO'}
-                              {s.status === 'ARCHIVED' && 'ARCHIVADO'}
-                            </span>
-                            {missingDepsMap.has(s.id) && (
-                              <span
-                                className="setlist-missing-dep-badge"
-                                role="alert"
-                                title={`Repertorio incompleto: Faltan ${missingDepsMap.get(s.id)?.length} canciones por descargar para poder ejecutarlo sin conexión`}
+                        {creating ? 'Guardando...' : 'Crear y Administrar Ítems'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* Lista de Repertorios */}
+                <div className="setlists-list-container">
+                  {loading ? (
+                    <div className="setlists-loading-state" role="status">
+                      <span className="auth-spinner" aria-hidden="true" />
+                      <p>Cargando repertorios litúrgicos desde el servidor...</p>
+                    </div>
+                  ) : filteredSetlists.length === 0 ? (
+                    <div className="setlists-empty-state" role="status">
+                      <p className="empty-title">No hay repertorios disponibles en esta categoría.</p>
+                      <p className="empty-hint">
+                        {canManageSetlists
+                          ? 'Utilice el botón "+ Nuevo Repertorio" para programar el orden del culto.'
+                          : 'Los directores de alabanza programarán los repertorios de los próximos servicios.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="setlists-list" role="list">
+                      {filteredSetlists.map((s) => {
+                        const isActive = s.id === activeSetlistId;
+                        const isOperating = actionInProgressId === s.id;
+
+                        return (
+                          <li
+                            key={s.id}
+                            className={`setlist-card-item ${s.status === 'ACTIVE' ? 'status-active' : ''} ${
+                              isActive ? 'currently-loaded' : ''
+                            }`}
+                          >
+                            <div className="setlist-card-header">
+                              <div className="setlist-card-meta-row">
+                                <span className={`setlist-status-badge ${s.status.toLowerCase()}`}>
+                                  {s.status === 'ACTIVE' && '● EN CULTO / ACTIVO'}
+                                  {s.status === 'PLANNING' && 'EN PLANIFICACIÓN'}
+                                  {s.status === 'COMPLETED' && 'COMPLETADO'}
+                                  {s.status === 'ARCHIVED' && 'ARCHIVADO'}
+                                </span>
+                                {s.isTemplate && (
+                                  <span className="setlist-template-badge" title="Plantilla reutilizable">
+                                    📑 PLANTILLA
+                                  </span>
+                                )}
+                                {missingDepsMap.has(s.id) && (
+                                  <span
+                                    className="setlist-missing-dep-badge"
+                                    role="alert"
+                                    title={`Repertorio incompleto: Faltan ${missingDepsMap.get(s.id)?.length} canciones por descargar para poder ejecutarlo sin conexión`}
+                                  >
+                                    ⚠️ Incompleto ({missingDepsMap.get(s.id)?.length} faltantes)
+                                  </span>
+                                )}
+                                {s.scheduledDateTime && (
+                                  <span className="setlist-date-badge">
+                                    📅 {new Date(s.scheduledDateTime).toLocaleDateString()}
+                                  </span>
+                                )}
+                                {isActive && (
+                                  <span className="setlist-loaded-tag" title="Este repertorio está actualmente activo en el atril">
+                                    ✓ En Atril
+                                  </span>
+                                )}
+                              </div>
+                              <h4 className="setlist-card-title">{s.title}</h4>
+                              <div className="setlist-card-footer-info">
+                                <span>Director: {s.directorName ?? 'Equipo Pastoral'}</span>
+                                <span>•</span>
+                                <span>{s.totalItems} {s.totalItems === 1 ? 'ítem' : 'ítems'}</span>
+                              </div>
+                            </div>
+
+                            <div className="setlist-card-actions">
+                              {/* Guardar / Gestionar Copia Local Offline (WP-04) */}
+                              <DownloadActionButton
+                                resourceId={s.id}
+                                resourceType="SETLIST"
+                                title={s.title}
+                                compact={true}
+                              />
+
+                              {/* Administrar Ítems (GAP-01, GAP-02, GAP-03) */}
+                              <button
+                                type="button"
+                                className="btn-setlist-action manage"
+                                onClick={() => {
+                                  setSelectedSetlistIdForDetail(s.id);
+                                  setActiveView('DETAIL');
+                                }}
+                                disabled={isOperating}
+                                title="Ver secuencia y administrar elementos del repertorio"
+                                aria-label={`Administrar elementos de ${s.title}`}
                               >
-                                ⚠️ Incompleto ({missingDepsMap.get(s.id)?.length} faltantes)
-                              </span>
-                            )}
-                            {s.scheduledDateTime && (
-                              <span className="setlist-date-badge">
-                                📅 {new Date(s.scheduledDateTime).toLocaleDateString()}
-                              </span>
-                            )}
-                            {isActive && (
-                              <span className="setlist-loaded-tag" title="Este repertorio está actualmente activo en el atril">
-                                ✓ En Atril
-                              </span>
-                            )}
-                          </div>
-                          <h4 className="setlist-card-title">{s.title}</h4>
-                          <div className="setlist-card-footer-info">
-                            <span>Director: {s.directorName ?? 'Equipo Pastoral'}</span>
-                            <span>•</span>
-                            <span>{s.totalItems} {s.totalItems === 1 ? 'ítem' : 'ítems'}</span>
-                          </div>
-                        </div>
+                                {canManageSetlists && s.status !== 'COMPLETED' && s.status !== 'ARCHIVED'
+                                  ? '⚙️ Administrar'
+                                  : '👁️ Ver Ítems'}
+                              </button>
 
-                        <div className="setlist-card-actions">
-                          {/* Guardar / Gestionar Copia Local Offline (WP-04) */}
-                          <DownloadActionButton
-                            resourceId={s.id}
-                            resourceType="SETLIST"
-                            title={s.title}
-                            compact={true}
-                          />
-
-                          {/* Administrar Ítems (GAP-01, GAP-02, GAP-03) */}
-                          <button
-                            type="button"
-                            className="btn-setlist-action manage"
-                            onClick={() => {
-                              setSelectedSetlistIdForDetail(s.id);
-                              setActiveView('DETAIL');
-                            }}
-                            disabled={isOperating}
-                            title="Ver secuencia y administrar elementos del repertorio"
-                            aria-label={`Administrar elementos de ${s.title}`}
-                          >
-                            {canManageSetlists && s.status !== 'COMPLETED' && s.status !== 'ARCHIVED'
-                              ? '⚙️ Administrar'
-                              : '👁️ Ver Ítems'}
-                          </button>
-
-                          {/* Cargar en atril */}
-                          <button
-                            type="button"
-                            className="btn-load-atril"
-                            onClick={() => handleSelectSetlist(s.id)}
-                            disabled={isOperating}
-                            aria-label={`Cargar repertorio ${s.title} en atril`}
-                          >
-                            {isOperating ? 'Cargando...' : isActive ? 'Ver en Atril' : 'Cargar en Atril'}
-                          </button>
-
-                          {/* Acciones de estado para Worship Leader / Admin */}
-                          {canManageSetlists && (
-                            <>
-                              {s.status === 'PLANNING' && (
+                              {/* Duplicar Repertorio / Plantilla (Fase 2C — 4.2) */}
+                              {canManageSetlists && (
                                 <button
                                   type="button"
-                                  className="btn-setlist-action activate"
-                                  onClick={() => handleStatusTransition(s.id, 'ACTIVE')}
+                                  className="btn-setlist-action duplicate"
+                                  onClick={() => handleDuplicateSetlist(s)}
                                   disabled={isOperating}
-                                  title="Activar este repertorio para el culto de la congregación"
-                                  aria-label={`Activar repertorio ${s.title}`}
+                                  title="Duplicar este repertorio con todos sus elementos y configuraciones"
+                                  aria-label={`Duplicar repertorio ${s.title}`}
                                 >
-                                  Activar
+                                  📋 Duplicar
                                 </button>
                               )}
-                              {s.status === 'ACTIVE' && (
+
+                              {/* Cargar en atril */}
+                              <button
+                                type="button"
+                                className="btn-load-atril"
+                                onClick={() => handleSelectSetlist(s.id)}
+                                disabled={isOperating}
+                                aria-label={`Cargar repertorio ${s.title} en atril`}
+                              >
+                                {isOperating ? 'Cargando...' : isActive ? 'Ver en Atril' : 'Cargar en Atril'}
+                              </button>
+
+                              {/* Acciones de estado para Worship Leader / Admin */}
+                              {canManageSetlists && (
+                                <>
+                                  {s.status === 'PLANNING' && (
+                                    <button
+                                      type="button"
+                                      className="btn-setlist-action activate"
+                                      onClick={() => handleStatusTransition(s.id, 'ACTIVE')}
+                                      disabled={isOperating}
+                                      title="Activar este repertorio para el culto de la congregación"
+                                      aria-label={`Activar repertorio ${s.title}`}
+                                    >
+                                      Activar
+                                    </button>
+                                  )}
+                                  {s.status === 'ACTIVE' && (
+                                    <button
+                                      type="button"
+                                      className="btn-setlist-action complete"
+                                      onClick={() => handleStatusTransition(s.id, 'COMPLETED')}
+                                      disabled={isOperating}
+                                      title="Finalizar el culto activo"
+                                      aria-label={`Finalizar repertorio ${s.title}`}
+                                    >
+                                      Finalizar
+                                    </button>
+                                  )}
+                                </>
+                              )}
+
+                              {/* GAP-03: Eliminar repertorio (EXCLUSIVO para SUPER_ADMIN y ADMIN; HIDDEN para Worship Leader) */}
+                              {canDeleteSetlists && (
                                 <button
                                   type="button"
-                                  className="btn-setlist-action complete"
-                                  onClick={() => handleStatusTransition(s.id, 'COMPLETED')}
+                                  className="btn-setlist-action delete"
+                                  onClick={() => setSetlistToDelete(s)}
                                   disabled={isOperating}
-                                  title="Finalizar el culto activo"
-                                  aria-label={`Finalizar repertorio ${s.title}`}
+                                  title="Eliminar este repertorio"
+                                  aria-label={`Eliminar repertorio ${s.title}`}
                                 >
-                                  Finalizar
+                                  <TrashIcon size={16} />
                                 </button>
                               )}
-                            </>
-                          )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </>
+            ) : (
+              /* Sección: Cultos y Eventos (Servicios — Fase 2C 4.1) */
+              <>
+                <div className="setlists-toolbar-row">
+                  <div className="setlists-tabs" role="tablist" aria-label="Filtrar cultos y eventos">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={serviceTab === 'UPCOMING'}
+                      className={`setlists-tab ${serviceTab === 'UPCOMING' ? 'active' : ''}`}
+                      onClick={() => setServiceTab('UPCOMING')}
+                    >
+                      Próximos ({filterWorshipServices(worshipServices, 'UPCOMING').length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={serviceTab === 'DRAFT'}
+                      className={`setlists-tab ${serviceTab === 'DRAFT' ? 'active' : ''}`}
+                      onClick={() => setServiceTab('DRAFT')}
+                    >
+                      Borradores ({filterWorshipServices(worshipServices, 'DRAFT').length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={serviceTab === 'COMPLETED'}
+                      className={`setlists-tab ${serviceTab === 'COMPLETED' ? 'active' : ''}`}
+                      onClick={() => setServiceTab('COMPLETED')}
+                    >
+                      Realizados ({filterWorshipServices(worshipServices, 'COMPLETED').length})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={serviceTab === 'ALL'}
+                      className={`setlists-tab ${serviceTab === 'ALL' ? 'active' : ''}`}
+                      onClick={() => setServiceTab('ALL')}
+                    >
+                      Todos ({worshipServices.length})
+                    </button>
+                  </div>
 
-                          {/* GAP-03: Eliminar repertorio (EXCLUSIVO para SUPER_ADMIN y ADMIN; HIDDEN para Worship Leader) */}
-                          {canDeleteSetlists && (
-                            <button
-                              type="button"
-                              className="btn-setlist-action delete"
-                              onClick={() => setSetlistToDelete(s)}
-                              disabled={isOperating}
-                              title="Eliminar este repertorio"
-                              aria-label={`Eliminar repertorio ${s.title}`}
-                            >
-                              <TrashIcon size={16} />
-                            </button>
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
+                  <div className="services-toolbar-actions">
+                    <input
+                      type="text"
+                      className="auth-input service-type-filter-input"
+                      placeholder="Filtrar tipo (ej. Dominical, Ensayo)..."
+                      value={serviceTypeFilter}
+                      onChange={(e) => setServiceTypeFilter(e.target.value)}
+                      aria-label="Filtrar por categoría de servicio"
+                    />
+                    {canManageSetlists && (
+                      <button
+                        type="button"
+                        className={`btn-action-create ${showServiceForm ? 'cancel' : ''}`}
+                        onClick={() => {
+                          if (showServiceForm) {
+                            resetServiceForm();
+                          } else {
+                            setShowServiceForm(true);
+                          }
+                        }}
+                        aria-expanded={showServiceForm}
+                      >
+                        {showServiceForm ? '✕ Cancelar' : '+ Nuevo Culto / Evento'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {showServiceForm && (
+                  <form
+                    onSubmit={handleSaveServiceSubmit}
+                    className="setlist-create-form"
+                    aria-label={editingServiceId ? 'Editar culto o evento' : 'Crear nuevo culto o evento'}
+                  >
+                    <h3 className="create-form-title">
+                      {editingServiceId ? 'Editar Culto / Evento' : 'Programar Culto o Evento'}
+                    </h3>
+                    <div className="create-form-grid">
+                      <div className="form-group">
+                        <label htmlFor="svc-name-input">Nombre del Servicio / Evento *</label>
+                        <input
+                          id="svc-name-input"
+                          type="text"
+                          required
+                          placeholder="Ej. Culto Dominical — Santa Cena"
+                          value={svcName}
+                          onChange={(e) => setSvcName(e.target.value)}
+                          className="auth-input"
+                          disabled={savingService}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="svc-type-input">Tipo / Categoría (Libre) *</label>
+                        <input
+                          id="svc-type-input"
+                          type="text"
+                          required
+                          list="service-type-suggestions"
+                          placeholder="Ej. Culto Dominical, Ensayo, Vigilia, Jóvenes..."
+                          value={svcType}
+                          onChange={(e) => setSvcType(e.target.value)}
+                          className="auth-input"
+                          disabled={savingService}
+                        />
+                        <datalist id="service-type-suggestions">
+                          <option value="Culto Dominical" />
+                          <option value="Ensayo General" />
+                          <option value="Culto de Oración" />
+                          <option value="Vigilia" />
+                          <option value="Reunión de Jóvenes" />
+                          <option value="Evento Especial" />
+                        </datalist>
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="svc-date-input">Fecha Programada</label>
+                        <input
+                          id="svc-date-input"
+                          type="date"
+                          value={svcScheduledAt}
+                          onChange={(e) => setSvcScheduledAt(e.target.value)}
+                          className="auth-input"
+                          disabled={savingService}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="svc-status-select">Estado del Servicio</label>
+                        <select
+                          id="svc-status-select"
+                          className="auth-input"
+                          value={svcStatus}
+                          onChange={(e) => setSvcStatus(e.target.value as FrontendWorshipServiceStatus)}
+                          disabled={savingService}
+                        >
+                          <option value="DRAFT">Borrador</option>
+                          <option value="UPCOMING">Próximo</option>
+                          <option value="ACTIVE">En Curso</option>
+                          <option value="COMPLETED">Completado</option>
+                          <option value="ARCHIVED">Archivado</option>
+                        </select>
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="svc-setlist-select">Repertorio Asociado (Setlist)</label>
+                        <select
+                          id="svc-setlist-select"
+                          className="auth-input"
+                          value={svcSetlistId}
+                          onChange={(e) => setSvcSetlistId(e.target.value)}
+                          disabled={savingService}
+                        >
+                          <option value="">— Sin repertorio asignado aún —</option>
+                          {setlists.map((sl) => (
+                            <option key={sl.id} value={sl.id}>
+                              {sl.title} ({sl.totalItems} ítems)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="svc-desc-input">Descripción / Tema</label>
+                        <input
+                          id="svc-desc-input"
+                          type="text"
+                          placeholder="Ej. Serie: Fidelidad de Dios"
+                          value={svcDescription}
+                          onChange={(e) => setSvcDescription(e.target.value)}
+                          className="auth-input"
+                          disabled={savingService}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="svc-notes-input">Notas Ministeriales / Logística</label>
+                      <textarea
+                        id="svc-notes-input"
+                        rows={2}
+                        placeholder="Indicaciones de sonido, vestimenta, horarios de prueba..."
+                        value={svcNotes}
+                        onChange={(e) => setSvcNotes(e.target.value)}
+                        className="auth-input setlist-textarea"
+                        disabled={savingService}
+                      />
+                    </div>
+
+                    <div className="create-form-actions">
+                      <button
+                        type="submit"
+                        className="action-button primary"
+                        disabled={savingService || !svcName.trim() || !svcType.trim()}
+                      >
+                        {savingService
+                          ? 'Guardando...'
+                          : editingServiceId
+                          ? 'Guardar Cambios del Servicio'
+                          : 'Programar Servicio'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                <div className="setlists-list-container">
+                  {loading ? (
+                    <div className="setlists-loading-state" role="status">
+                      <span className="auth-spinner" aria-hidden="true" />
+                      <p>Cargando calendario de cultos y eventos...</p>
+                    </div>
+                  ) : filteredWorshipServices.length === 0 ? (
+                    <div className="setlists-empty-state" role="status">
+                      <p className="empty-title">No hay cultos o eventos en esta vista.</p>
+                      <p className="empty-hint">
+                        {canManageSetlists
+                          ? 'Utilice "+ Nuevo Culto / Evento" para programar un servicio y asociar un repertorio.'
+                          : 'Los servicios programados por la dirección de alabanza aparecerán aquí.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="setlists-list" role="list">
+                      {filteredWorshipServices.map((svc) => {
+                        const isOperating = actionInProgressId === svc.id;
+                        return (
+                          <li key={svc.id} className="setlist-card-item worship-service-card">
+                            <div className="setlist-card-header">
+                              <div className="setlist-card-meta-row">
+                                <span className={`setlist-status-badge ${svc.status.toLowerCase()}`}>
+                                  {WORSHIP_SERVICE_STATUS_LABELS[svc.status]}
+                                </span>
+                                <span className="service-type-pill">🏛️ {svc.serviceType}</span>
+                                {svc.scheduledAt && (
+                                  <span className="setlist-date-badge">
+                                    📅 {new Date(svc.scheduledAt).toLocaleDateString()}
+                                  </span>
+                                )}
+                                {svc.setlist?.title && (
+                                  <span className="service-linked-setlist-badge" title="Repertorio vinculado">
+                                    📋 {svc.setlist.title}
+                                  </span>
+                                )}
+                              </div>
+                              <h4 className="setlist-card-title">{svc.name}</h4>
+                              {svc.description && <p className="service-card-description">{svc.description}</p>}
+                              {svc.notes && <p className="service-card-notes">💬 {svc.notes}</p>}
+                              <div className="setlist-card-footer-info">
+                                <span>Líder: {svc.worshipLeaderName ?? 'Equipo de Alabanza'}</span>
+                              </div>
+                            </div>
+
+                            <div className="setlist-card-actions">
+                              {svc.setlistId && (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-setlist-action manage"
+                                    onClick={() => {
+                                      setSelectedSetlistIdForDetail(svc.setlistId!);
+                                      setActiveView('DETAIL');
+                                    }}
+                                    disabled={isOperating}
+                                  >
+                                    📋 Ver Repertorio
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-load-atril"
+                                    onClick={() => handleSelectSetlist(svc.setlistId!)}
+                                    disabled={isOperating}
+                                  >
+                                    Cargar en Atril
+                                  </button>
+                                </>
+                              )}
+
+                              {canManageSetlists && (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-setlist-action edit"
+                                    onClick={() => handleStartEditService(svc)}
+                                    disabled={isOperating}
+                                    aria-label={`Editar servicio ${svc.name}`}
+                                  >
+                                    ✏️ Editar
+                                  </button>
+                                  {svc.status !== 'ARCHIVED' && (
+                                    <button
+                                      type="button"
+                                      className="btn-setlist-action archive"
+                                      onClick={() => handleArchiveService(svc)}
+                                      disabled={isOperating}
+                                      aria-label={`Archivar servicio ${svc.name}`}
+                                    >
+                                      📦 Archivar
+                                    </button>
+                                  )}
+                                </>
+                              )}
+
+                              {canDeleteSetlists && (
+                                <button
+                                  type="button"
+                                  className="btn-setlist-action delete"
+                                  onClick={() => handleDeleteService(svc)}
+                                  disabled={isOperating}
+                                  title="Eliminar servicio"
+                                  aria-label={`Eliminar servicio ${svc.name}`}
+                                >
+                                  <TrashIcon size={16} />
+                                </button>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </>
+            )}
 
             {/* Pie del Modal */}
             <div className="modal-actions setlists-modal-footer">

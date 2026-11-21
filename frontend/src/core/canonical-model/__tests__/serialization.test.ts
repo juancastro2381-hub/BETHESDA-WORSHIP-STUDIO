@@ -144,8 +144,8 @@ describe('Deterministic JSON Serialization & Deserialization Tests', () => {
     const m1 = deserialized.getMeasure(1);
     assert.ok(m1);
     assert.strictEqual(m1.repeatStart, true);
-    assert.strictEqual(m1.keySignature.tonic.toString(), 'D');
-    assert.strictEqual(m1.keySignature.mode, 'MAJOR');
+    assert.strictEqual(m1.keySignature?.tonic.toString(), 'D');
+    assert.strictEqual(m1.keySignature?.mode, 'MAJOR');
 
     // Nota deserializada
     const notes = m1.getAllNotes();

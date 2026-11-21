@@ -15,10 +15,10 @@ import { TimeSignature, type TimeSignatureJSON } from './time-signature.ts';
 
 export interface MeasureJSON {
   number: number;
-  timeSignature: TimeSignatureJSON;
-  keySignature: KeySignatureReferenceJSON;
-  startTick: number;
-  durationTicks: number;
+  timeSignature?: TimeSignatureJSON | null;
+  keySignature?: KeySignatureReferenceJSON | null;
+  startTick: number | null;
+  durationTicks: number | null;
   voices: VoiceJSON[];
   chords: ChordEventJSON[];
   lyrics: LyricSyllableJSON[];
@@ -30,10 +30,10 @@ export interface MeasureJSON {
 
 export class Measure {
   public readonly number: number;
-  public readonly timeSignature: TimeSignature;
-  public readonly keySignature: KeySignatureReference;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly timeSignature: TimeSignature | null;
+  public readonly keySignature: KeySignatureReference | null;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly voices: readonly Voice[];
   public readonly chords: readonly ChordEvent[];
   public readonly lyrics: readonly LyricSyllable[];
@@ -44,10 +44,10 @@ export class Measure {
 
   public constructor(init: {
     number: number;
-    timeSignature: TimeSignature;
-    keySignature: KeySignatureReference;
-    startTick: number;
-    durationTicks?: number;
+    timeSignature?: TimeSignature | null;
+    keySignature?: KeySignatureReference | null;
+    startTick: number | null;
+    durationTicks?: number | null;
     voices?: Voice[];
     chords?: ChordEvent[];
     lyrics?: LyricSyllable[];
@@ -59,25 +59,25 @@ export class Measure {
     if (!Number.isInteger(init.number) || init.number <= 0) {
       throw new Error(`Número de compás inválido: ${init.number}. Debe ser >= 1.`);
     }
-    if (!init.timeSignature || !(init.timeSignature instanceof TimeSignature)) {
+    if (init.timeSignature !== undefined && init.timeSignature !== null && !(init.timeSignature instanceof TimeSignature)) {
       throw new Error(`TimeSignature inválido en compás ${init.number}`);
     }
-    if (!init.keySignature || !(init.keySignature instanceof KeySignatureReference)) {
+    if (init.keySignature !== undefined && init.keySignature !== null && !(init.keySignature instanceof KeySignatureReference)) {
       throw new Error(`KeySignatureReference inválido en compás ${init.number}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`startTick inválido en compás ${init.number}: ${init.startTick}`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`startTick inválido en compás ${init.number}: ${init.startTick}. Debe ser >= 0 o null.`);
     }
 
-    const calculatedDuration = init.timeSignature.calculateMeasureDurationTicks();
-    const duration = init.durationTicks ?? calculatedDuration;
-    if (!Number.isInteger(duration) || duration <= 0) {
-      throw new Error(`Duración en ticks inválida en compás ${init.number}: ${duration}`);
+    const calculatedDuration = init.timeSignature ? init.timeSignature.calculateMeasureDurationTicks() : null;
+    const duration = init.durationTicks !== undefined ? init.durationTicks : calculatedDuration;
+    if (duration !== null && (!Number.isInteger(duration) || duration < 0)) {
+      throw new Error(`Duración en ticks inválida en compás ${init.number}: ${duration}. Debe ser >= 0 o null.`);
     }
 
     this.number = init.number;
-    this.timeSignature = init.timeSignature;
-    this.keySignature = init.keySignature;
+    this.timeSignature = init.timeSignature ?? null;
+    this.keySignature = init.keySignature ?? null;
     this.startTick = init.startTick;
     this.durationTicks = duration;
     this.voices = Object.freeze([...(init.voices ?? [])]);
@@ -90,12 +90,15 @@ export class Measure {
     if (init.endingNumber !== undefined) this.endingNumber = init.endingNumber;
   }
 
-  public get endTick(): number {
-    return this.startTick + this.durationTicks;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public containsTick(tick: number): boolean {
-    return tick >= this.startTick && tick < this.endTick;
+    if (this.startTick === null || this.durationTicks === null) return false;
+    return tick >= this.startTick && tick < this.startTick + this.durationTicks;
   }
 
   public getVoice(voiceId: number): Voice | undefined {
@@ -113,8 +116,8 @@ export class Measure {
   public toJSON(): MeasureJSON {
     const json: MeasureJSON = {
       number: this.number,
-      timeSignature: this.timeSignature.toJSON(),
-      keySignature: this.keySignature.toJSON(),
+      timeSignature: this.timeSignature ? this.timeSignature.toJSON() : null,
+      keySignature: this.keySignature ? this.keySignature.toJSON() : null,
       startTick: this.startTick,
       durationTicks: this.durationTicks,
       voices: this.voices.map((v) => v.toJSON()),
@@ -129,18 +132,18 @@ export class Measure {
   }
 
   public static fromJSON(json: MeasureJSON): Measure {
-    const timeSignature = TimeSignature.fromJSON(json.timeSignature);
-    const keySignature = KeySignatureReference.fromJSON(json.keySignature);
+    const timeSignature = json.timeSignature ? TimeSignature.fromJSON(json.timeSignature) : null;
+    const keySignature = json.keySignature ? KeySignatureReference.fromJSON(json.keySignature) : null;
     const voices = (json.voices || []).map((v) => Voice.fromJSON(v));
     const chords = (json.chords || []).map((c) => ChordEvent.fromJSON(c));
     const lyrics = (json.lyrics || []).map((l) => LyricSyllable.fromJSON(l));
 
     const init: {
       number: number;
-      timeSignature: TimeSignature;
-      keySignature: KeySignatureReference;
-      startTick: number;
-      durationTicks: number;
+      timeSignature: TimeSignature | null;
+      keySignature: KeySignatureReference | null;
+      startTick: number | null;
+      durationTicks: number | null;
       voices: Voice[];
       chords: ChordEvent[];
       lyrics: LyricSyllable[];
@@ -152,8 +155,8 @@ export class Measure {
       number: json.number,
       timeSignature,
       keySignature,
-      startTick: json.startTick,
-      durationTicks: json.durationTicks,
+      startTick: json.startTick ?? null,
+      durationTicks: json.durationTicks ?? null,
       voices,
       chords,
       lyrics,

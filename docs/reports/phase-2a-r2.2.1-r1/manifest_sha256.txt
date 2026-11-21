@@ -1,0 +1,15 @@
+﻿16b1a25f6ab85678c66ff827240b0f509ae0047b3bfa31a28af6eb53275cb363  backend/src/__tests__/conversion-worker-certification.test.ts
+1a7e8325587e4c843b095017c47b03873d1245f4fb04fc69f9034ca75af7cece  backend/src/application/conversion-worker.ts
+e2fcba526bc9f0bb26ff64ab980f701fbdbc894c9e1620e7945ea2c1fb7f728d  backend/src/domain/ingestion/source-storage-provider.ts
+73b2fc4763b449a367e43cae31bc9829b5eecfd85f1c400d6cea0c4b1b3c8d9d  docs/reports/phase-2a-r2.2.1-r1/01_PREFLIGHT_AND_GIT_GOVERNANCE.md
+dd650f866625ebf1b55cfc561a378ae5fc14285366bd5a1b313a639f4ee1d29e  docs/reports/phase-2a-r2.2.1-r1/02_GRACEFUL_SHUTDOWN_REMEDIATION.md
+65ea9280529a15f60f93956dae29835b5aa40746612acb3fbdf236361dfb872c  docs/reports/phase-2a-r2.2.1-r1/03_PERIODIC_RECOVERY_AND_CONCURRENCY_EVIDENCE.md
+6c982d49c2fa07c7ab684c15946c6bc9096fe282aaf125b271ce9163e79bf8c1  docs/reports/phase-2a-r2.2.1-r1/04_FILESYSTEM_ERROR_SEMANTICS.md
+0798a5b48606bea99c2f7d4d6f22326647d2fbee332cbcd172757684a9db6310  docs/reports/phase-2a-r2.2.1-r1/05_TEST_EXECUTION_EVIDENCE.md
+0ad6b7f7fcf1fc998144ac5089ad8f1a26cea5fcf59cde47cd4fb6165f329281  docs/reports/phase-2a-r2.2.1-r1/06_FINAL_REMEDIATION_REPORT.md
+2baa734f7c2c13a55c74b8866aa5d89d929d7f7b377d80c2b22f62c37b4c751a  docs/reports/phase-2a-r2.2.1-r1/07_REMAINING_RISKS_AND_LIMITATIONS.md
+ea1285944d54a243f06da21a76a8ef7652c60e35a3f183551ab71dc5745aa800  docs/reports/phase-2a-r2.2.1-r1/backend_test_execution_log.txt
+64011c088ad9c409c17457c8de71caddb4514ca350d546583af488ab59d23fb1  docs/reports/phase-2a-r2.2.1-r1/certification_test_log.txt
+7d75e6bbc77fc93986510154b43cbbfe445afc17bfd7c7c197169fc2bc4cf735  docs/reports/phase-2a-r2.2.1-r1/frontend_test_execution_log.txt
+fa19fad52c8d2e002828f8c2c028d4ca4eda2a60e39a122771ecd7eec1e33919  docs/reports/phase-2a-r2.2.1-r1/git_diff_phase_2a_r2.2.1_r1.patch
+aac7e5b8499f850b9ad3bb33597aad96de8b82161c0ee585a5b9cd534fc58211  docs/reports/phase-2a-r2.2.1-r1/git_status_phase_2a_r2.2.1_r1.txt

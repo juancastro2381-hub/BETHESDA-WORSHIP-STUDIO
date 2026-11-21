@@ -1,0 +1,4 @@
+﻿## feature/phase-1a-core-foundation...origin/feature/phase-1a-core-foundation
+ M backend/src/__tests__/conversion-worker-certification.test.ts
+ M backend/src/application/conversion-worker.ts
+?? docs/reports/phase-2a-r2.2.1-r3.3.1/

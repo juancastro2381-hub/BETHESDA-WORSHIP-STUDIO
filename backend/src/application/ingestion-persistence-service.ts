@@ -43,17 +43,17 @@ export class IngestionPersistenceService {
     const payload = result.payload;
     const format = result.provenance.sourceFormat;
 
-    // Obtener tonalidad por defecto del primer compás si existe
+    // Obtener metadatos musicales del primer compás si existen (sin fabricaciones por defecto)
     const firstMeasure = payload.measures[0];
-    const defaultKey = firstMeasure
+    const defaultKey = firstMeasure?.keySignature
       ? firstMeasure.keySignature.toMusicalKey().toString()
-      : 'C Major';
+      : null;
 
-    const timeSig = firstMeasure
+    const timeSig = firstMeasure?.timeSignature
       ? `${firstMeasure.timeSignature.numerator}/${firstMeasure.timeSignature.denominator}`
-      : '4/4';
+      : null;
 
-    const defaultBpm = payload.timeline.tempoMap.events[0]?.bpm ?? 120;
+    const defaultBpm = payload.timeline.tempoMap.events[0]?.bpm ?? null;
 
     const canonicalJSON = CanonicalSerializer.serialize(payload);
 

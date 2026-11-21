@@ -38,6 +38,7 @@ export interface SetlistEntity {
   status: SetlistStatus;
   directorUserId: string | null;
   notes: string | null;
+  isTemplate: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +62,10 @@ export interface SetlistItemEntity {
   musicalKey: string | null;
   // Notas generales de dinámica y dirección
   notesForTeam: string | null;
+  // Configuración musical extendida por entrada (Fase 2C)
+  preferredInstrument: string | null;
+  preferredTuning: string | null;
+  preferredFormat: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -98,6 +103,7 @@ export interface SetlistSummaryEntity {
   status: SetlistStatus;
   directorUserId: string | null;
   directorName?: string | null;
+  isTemplate: boolean;
   totalItems: number;
   totalSongs: number;
   createdAt: Date;
@@ -110,6 +116,7 @@ export interface SetlistSummaryEntity {
 export interface SetlistFilterOptions {
   status?: SetlistStatus;
   upcoming?: boolean;
+  isTemplate?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -124,6 +131,7 @@ export interface CreateSetlistDTO {
   status?: SetlistStatus;
   directorUserId?: string | null;
   notes?: string | null;
+  isTemplate?: boolean;
 }
 
 export interface UpdateSetlistDTO {
@@ -131,6 +139,13 @@ export interface UpdateSetlistDTO {
   scheduledDateTime?: Date | string | null;
   directorUserId?: string | null;
   notes?: string | null;
+  isTemplate?: boolean;
+}
+
+export interface DuplicateSetlistDTO {
+  newTitle: string;
+  scheduledDateTime?: Date | string | null;
+  isTemplate?: boolean;
 }
 
 export interface CreateSetlistItemDTO {
@@ -146,6 +161,10 @@ export interface CreateSetlistItemDTO {
   momentTitle?: string | null;
   durationMinutes?: number | null;
   musicalKey?: string | null;
+  // Configuración musical extendida por entrada (Fase 2C)
+  preferredInstrument?: string | null;
+  preferredTuning?: string | null;
+  preferredFormat?: string | null;
 }
 
 export interface UpdateSetlistItemDTO {
@@ -156,6 +175,9 @@ export interface UpdateSetlistItemDTO {
   durationMinutes?: number | null;
   musicalKey?: string | null;
   notesForTeam?: string | null;
+  preferredInstrument?: string | null;
+  preferredTuning?: string | null;
+  preferredFormat?: string | null;
 }
 
 export interface ReorderSetlistItemsDTO {

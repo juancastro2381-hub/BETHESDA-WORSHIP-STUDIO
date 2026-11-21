@@ -17,10 +17,16 @@ import { songRoutes } from './interfaces/http/routes/song.routes.ts';
 import { authRoutes } from './interfaces/http/routes/auth.routes.ts';
 import { userRoutes } from './interfaces/http/routes/user.routes.ts';
 import { setlistRoutes } from './interfaces/http/routes/setlist.routes.ts';
+import { worshipServiceRoutes } from './interfaces/http/routes/worship-service.routes.ts';
 import { audioRoutes } from './interfaces/http/routes/audio.routes.ts';
 import { realtimeRoutes } from './interfaces/http/routes/realtime.routes.ts';
 import { multitrackRoutes } from './interfaces/http/routes/multitrack.routes.ts';
 import { documentRoutes } from './interfaces/http/routes/document.routes.ts';
+import { omrRoutes } from './interfaces/http/routes/omr.routes.ts';
+import { ingestionRoutes } from './interfaces/http/routes/ingestion.routes.ts';
+import { conversionRoutes } from './interfaces/http/routes/conversion.routes.ts';
+import { stopConversionQueue } from './infrastructure/queue/conversion-queue.ts';
+import { MAX_OMR_HTTP_BODY_LIMIT_BYTES } from './domain/omr/types.ts';
 import { JwtTokenService } from './application/token-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
 import { AuthGuard } from './interfaces/http/middlewares/auth-middleware.ts';
@@ -30,7 +36,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: {
       level: env.LOG_LEVEL,
     },
-    bodyLimit: 10 * 1024 * 1024, // 10 MB límite para archivos MusicXML grandes
+    // R3.2-05: Límite coherente de 25 MiB para acomodar archivos binarios de hasta 15 MiB codificados en Base64 (~20 MiB) + JSON
+    bodyLimit: MAX_OMR_HTTP_BODY_LIMIT_BYTES,
   });
 
   // 1. Manejo de Errores Global
@@ -129,13 +136,22 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(userRoutes, { prefix: '/users' });
       await v1.register(songRoutes, { prefix: '/songs' });
       await v1.register(setlistRoutes, { prefix: '/setlists' });
+      await v1.register(worshipServiceRoutes, { prefix: '/worship-services' });
       await v1.register(audioRoutes);
       await v1.register(realtimeRoutes, { prefix: '/realtime' });
       await v1.register(multitrackRoutes, { prefix: '/multitrack' });
       await v1.register(documentRoutes, { prefix: '/documents' });
+      await v1.register(omrRoutes, { prefix: '/omr' });
+      await v1.register(ingestionRoutes, { prefix: '/ingestion' });
+      await v1.register(conversionRoutes, { prefix: '/conversion' });
     },
     { prefix: '/api/v1' }
   );
+
+  // 7. Hook de Cierre Ordenado (Graceful Shutdown)
+  fastify.addHook('onClose', async () => {
+    await stopConversionQueue();
+  });
 
   return fastify;
 }

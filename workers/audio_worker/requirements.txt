@@ -1,0 +1,20 @@
+# Local Python Audio Worker Dependencies — Bethesda Worship Studio (WS-AUDIO-01)
+# All libraries are free/open-source, executed locally, and require zero external commercial services.
+# Install ONLY explicitly (never at runtime):
+#   python -m venv workers/audio_worker/.venv
+#   workers/audio_worker/.venv/Scripts/python.exe -m pip install -r workers/audio_worker/requirements.txt
+# See docs/audio/AUDIO_ARCHITECTURE_AND_OPERATIONS.md for the license/CPU/memory analysis.
+
+# Numerical arrays for decoded-PCM verification and upcoming DSP stages (BSD-3-Clause)
+numpy>=2.1.0,<3.0.0
+
+# Versioned IPC request schema validation (MIT)
+pydantic>=2.10.0,<3.0.0
+
+# Ships a pre-built FFmpeg executable INSIDE the pip wheel (no runtime download).
+# Wrapper: BSD-2-Clause. The bundled FFmpeg build is GPLv3 (--enable-gpl --enable-version3, gyan.dev "essentials"),
+# invoked strictly as a separate local process (never linked). Do not redistribute the venv without GPLv3 compliance.
+imageio-ffmpeg>=0.6.0,<1.0.0
+
+# Offline test runner (MIT)
+pytest>=8.0.0,<10.0.0

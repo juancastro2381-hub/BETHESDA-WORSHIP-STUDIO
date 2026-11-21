@@ -20,8 +20,8 @@ export interface NoteJSON {
     noteName: string;
     octave: number;
   };
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
   voice: number;
   staff: number;
   velocity: number;
@@ -35,8 +35,8 @@ export interface NoteJSON {
 export interface RestJSON {
   type: 'REST';
   id: string;
-  startTick: number;
-  durationTicks: number;
+  startTick: number | null;
+  durationTicks: number | null;
   voice: number;
   staff: number;
 }
@@ -47,8 +47,8 @@ export class Note {
   public readonly isRest: false = false;
   public readonly id: string;
   public readonly pitch: Pitch;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly voice: number;
   public readonly staff: number;
   public readonly velocity: number;
@@ -61,8 +61,8 @@ export class Note {
   public constructor(init: {
     id: string;
     pitch: Pitch;
-    startTick: number;
-    durationTicks: number;
+    startTick: number | null;
+    durationTicks: number | null;
     voice?: number;
     staff?: number;
     velocity?: number;
@@ -78,11 +78,11 @@ export class Note {
     if (!init.pitch || !(init.pitch instanceof Pitch)) {
       throw new Error(`Tono (Pitch) de nota inválido o no proporcionado en nota ${init.id}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`Tick inicial de nota inválido: ${init.startTick}. Debe ser >= 0.`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`Tick inicial de nota inválido: ${init.startTick}. Debe ser >= 0 o null.`);
     }
-    if (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0) {
-      throw new Error(`Duración en ticks de nota inválida: ${init.durationTicks}. Debe ser >= 1.`);
+    if (init.durationTicks !== null && (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)) {
+      throw new Error(`Duración en ticks de nota inválida: ${init.durationTicks}. Debe ser >= 1 o null.`);
     }
 
     this.id = init.id;
@@ -101,8 +101,10 @@ export class Note {
     }
   }
 
-  public get endTick(): number {
-    return this.startTick + this.durationTicks;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public toJSON(): NoteJSON {
@@ -133,8 +135,8 @@ export class Note {
     const init: {
       id: string;
       pitch: Pitch;
-      startTick: number;
-      durationTicks: number;
+      startTick: number | null;
+      durationTicks: number | null;
       voice: number;
       staff: number;
       velocity: number;
@@ -164,26 +166,26 @@ export class Note {
 export class Rest {
   public readonly isRest: true = true;
   public readonly id: string;
-  public readonly startTick: number;
-  public readonly durationTicks: number;
+  public readonly startTick: number | null;
+  public readonly durationTicks: number | null;
   public readonly voice: number;
   public readonly staff: number;
 
   public constructor(init: {
     id: string;
-    startTick: number;
-    durationTicks: number;
+    startTick: number | null;
+    durationTicks: number | null;
     voice?: number;
     staff?: number;
   }) {
     if (!init.id || typeof init.id !== 'string') {
       throw new Error(`ID de silencio requerido e inválido: ${init.id}`);
     }
-    if (!Number.isInteger(init.startTick) || init.startTick < 0) {
-      throw new Error(`Tick inicial de silencio inválido: ${init.startTick}. Debe ser >= 0.`);
+    if (init.startTick !== null && (!Number.isInteger(init.startTick) || init.startTick < 0)) {
+      throw new Error(`Tick inicial de silencio inválido: ${init.startTick}. Debe ser >= 0 o null.`);
     }
-    if (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0) {
-      throw new Error(`Duración en ticks de silencio inválida: ${init.durationTicks}. Debe ser >= 1.`);
+    if (init.durationTicks !== null && (!Number.isInteger(init.durationTicks) || init.durationTicks <= 0)) {
+      throw new Error(`Duración en ticks de silencio inválida: ${init.durationTicks}. Debe ser >= 1 o null.`);
     }
 
     this.id = init.id;
@@ -193,8 +195,10 @@ export class Rest {
     this.staff = init.staff ?? 1;
   }
 
-  public get endTick(): number {
-    return this.startTick + this.durationTicks;
+  public get endTick(): number | null {
+    return this.startTick !== null && this.durationTicks !== null
+      ? this.startTick + this.durationTicks
+      : null;
   }
 
   public toJSON(): RestJSON {
@@ -230,7 +234,12 @@ export class Voice {
     }
 
     // Verificar que los eventos asignados a esta voz correspondan a su ID
-    const sorted = [...events].sort((a, b) => a.startTick - b.startTick);
+    const sorted = [...events].sort((a, b) => {
+      if (a.startTick === null && b.startTick === null) return 0;
+      if (a.startTick === null) return 1;
+      if (b.startTick === null) return -1;
+      return a.startTick - b.startTick;
+    });
     for (const ev of sorted) {
       if (ev.voice !== id) {
         throw new Error(
@@ -252,7 +261,7 @@ export class Voice {
   }
 
   public calculateTotalDurationTicks(): number {
-    return this.events.reduce((acc, ev) => acc + ev.durationTicks, 0);
+    return this.events.reduce((acc, ev) => acc + (ev.durationTicks ?? 0), 0);
   }
 
   public toJSON(): VoiceJSON {

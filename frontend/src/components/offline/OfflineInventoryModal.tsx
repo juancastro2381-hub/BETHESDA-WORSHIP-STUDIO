@@ -8,7 +8,7 @@ import React, { useState, useEffect, useId } from 'react';
 import { useOffline } from '../../core/offline/use-offline.ts';
 import { offlineManager } from '../../core/offline/offline-manager.ts';
 import type { OfflineResourceMetadata, OfflineResourceType } from '../../core/offline/types.ts';
-import { ModalCloseButton, CloseIcon, TrashIcon } from '../common/Icons.tsx';
+import { ModalCloseButton, TrashIcon } from '../common/Icons.tsx';
 
 export interface OfflineInventoryModalProps {
   readonly isOpen: boolean;
@@ -29,14 +29,11 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
     summary,
     storageUsage,
     deleteLocalResource,
-    getAudioUrl,
     refreshInventory,
     isOnline,
   } = useOffline();
 
   const [activeTab, setActiveTab] = useState<'ALL' | OfflineResourceType>('ALL');
-  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
-  const [playingAudioUrl, setPlayingAudioUrl] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // Escuchar tecla Escape
@@ -73,26 +70,6 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   };
 
-  const handlePlayAudio = async (audioId: string) => {
-    if (playingAudioId === audioId) {
-      setPlayingAudioId(null);
-      setPlayingAudioUrl(null);
-      return;
-    }
-
-    try {
-      const url = await getAudioUrl(audioId);
-      if (url) {
-        setPlayingAudioId(audioId);
-        setPlayingAudioUrl(url);
-      } else {
-        alert('No se pudo cargar el audio local. El archivo podría estar corrupto.');
-      }
-    } catch (err: any) {
-      alert(err.message || 'Error al reproducir audio local.');
-    }
-  };
-
   const handleDeleteItem = async (item: OfflineResourceMetadata) => {
     const confirmDelete = window.confirm(
       `¿Eliminar la copia local de "${item.title}"?\n\nEsta acción solo libera espacio en este dispositivo. No altera la base de datos del servidor.`
@@ -101,10 +78,6 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
 
     setDeletingId(item.id);
     try {
-      if (playingAudioId === item.id) {
-        setPlayingAudioId(null);
-        setPlayingAudioUrl(null);
-      }
       await deleteLocalResource(item.id);
     } finally {
       setDeletingId(null);
@@ -227,28 +200,6 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
           </div>
         )}
 
-        {/* Reproductor de Audio Activo si hay uno seleccionado */}
-        {playingAudioUrl && (
-          <div className="offline-audio-player-bar" role="region" aria-label="Reproductor de audio offline">
-            <span className="player-icon" aria-hidden="true">🎵</span>
-            <div className="player-controls">
-              <audio src={playingAudioUrl} controls autoPlay className="html5-audio-element" />
-            </div>
-            <button
-              type="button"
-              className="btn-close-player"
-              onClick={() => {
-                setPlayingAudioId(null);
-                setPlayingAudioUrl(null);
-              }}
-              title="Cerrar reproductor"
-              aria-label="Cerrar reproductor"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-        )}
-
         {/* Lista de Recursos */}
         <div className="offline-items-list" role="region" aria-label="Lista de recursos guardados">
           {filteredItems.length === 0 ? (
@@ -318,27 +269,6 @@ export const OfflineInventoryModal: React.FC<OfflineInventoryModalProps> = ({
                 </div>
 
                 <div className="item-actions">
-                  {/* Botón de reproducción de audio si es AUDIO */}
-                  {item.resourceType === 'AUDIO' && (
-                    <button
-                      type="button"
-                      className="btn-item-action play"
-                      disabled={item.status === 'FAILED' || (offlineManager.isAuthorizationExpired(item) && !isOnline)}
-                      onClick={() => handlePlayAudio(item.id)}
-                      title={
-                        item.status === 'FAILED'
-                          ? `Pista revocada o no disponible: ${item.errorMessage ?? 'Error de autorización'}`
-                          : offlineManager.isAuthorizationExpired(item) && !isOnline
-                          ? 'Autorización offline expirada. Conéctese a internet para renovar.'
-                          : playingAudioId === item.id
-                          ? 'Detener'
-                          : 'Reproducir'
-                      }
-                    >
-                      {playingAudioId === item.id ? '⏹️ Detener' : '▶️ Reproducir'}
-                    </button>
-                  )}
-
                   {/* Botón de abrir en atril si es CANCIÓN */}
                   {item.resourceType === 'SONG' && onSelectSong && (
                     <button

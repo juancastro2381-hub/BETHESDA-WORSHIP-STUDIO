@@ -9,18 +9,30 @@
 import { CanonicalMusicPayload, type CanonicalMusicPayloadJSON } from '../canonical-model/index.ts';
 import { tokenManager } from '../auth/token-manager.ts';
 import type { AuthResponseData, UserRole, AccountStatus } from '../auth/types.ts';
+import {
+  assertServerMutationAllowed,
+  isMutatingHttpMethod,
+  isClientCurrentlyOnline,
+  isOfflineReadOnlyMutationGuardActive,
+} from '../offline/offline-session-identity.ts';
 import { ApiError } from './api-error.ts';
 import type {
   CreateSetlistItemPayload,
   CreateSetlistPayload,
+  CreateWorshipServicePayload,
+  DuplicateSetlistPayload,
   FrontendListSetlistsResult,
+  FrontendListWorshipServicesResult,
   FrontendSetlistDetail,
   FrontendSetlistEntity,
   FrontendSetlistItem,
   FrontendSetlistStatus,
+  FrontendWorshipService,
   HttpListSetlistsResponse,
+  ListWorshipServicesParams,
   UpdateSetlistItemPayload,
   UpdateSetlistPayload,
+  UpdateWorshipServicePayload,
 } from './setlist-types.ts';
 import type {
   GetUserPreferencesResponse,
@@ -28,6 +40,11 @@ import type {
   UpdateUserViewPreferencePayload,
   UserViewPreferenceData,
 } from './preference-types.ts';
+import type {
+  SongContentSummary,
+  StandFormatCapabilityDescriptor,
+  StandReadingFormatId,
+} from '../workspace/stand-format-capabilities.ts';
 
 export * from './setlist-types.ts';
 export * from './preference-types.ts';
@@ -75,6 +92,7 @@ export class BethesdaApiClient {
   private static instance: BethesdaApiClient | null = null;
   public readonly baseUrl: string;
   private refreshPromise: Promise<AuthResponseData> | null = null;
+  private authFailureListeners: Set<(error: unknown) => void> = new Set();
 
   public constructor(config?: ApiClientConfig) {
     this.baseUrl = config?.baseUrl ?? (import.meta as any).env?.VITE_API_URL ?? '/api/v1';
@@ -88,9 +106,37 @@ export class BethesdaApiClient {
   }
 
   /**
-   * Petición HTTP con inyección automática de Bearer token y soporte de renovación silenciosa ante 401.
+   * Registra un listener notificado cuando una renovación automática de sesión (`refreshSession`)
+   * falla con un rechazo explícito del servidor (401/403) durante `fetchWithAuth`.
+   * Permite que `AuthProvider` invalide de inmediato el estado local obsoleto y redirija a login.
+   */
+  public registerAuthFailureListener(listener: (error: unknown) => void): () => void {
+    this.authFailureListeners.add(listener);
+    return () => {
+      this.authFailureListeners.delete(listener);
+    };
+  }
+
+  private notifyAuthFailure(error: unknown): void {
+    for (const listener of this.authFailureListeners) {
+      try {
+        listener(error);
+      } catch {
+        // Ignorar errores en listeners de UI
+      }
+    }
+  }
+
+  /**
+   * Petición HTTP con inyección automática de Bearer token, compuerta centralizada fail-closed
+   * contra mutaciones en modo offline (Finding C) y soporte de renovación silenciosa ante 401.
    */
   public async fetchWithAuth(input: string, init?: RequestInit): Promise<Response> {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (isMutatingHttpMethod(method)) {
+      assertServerMutationAllowed(method, input);
+    }
+
     const url = input.startsWith('http') ? input : `${this.baseUrl}${input.startsWith('/') ? '' : '/'}${input}`;
     const headers = new Headers(init?.headers);
 
@@ -107,17 +153,27 @@ export class BethesdaApiClient {
 
     let response = await fetch(url, requestInit);
 
-    // Si el servidor responde 401 y no es ya una petición de auth, intentar refrescar una vez
-    if (response.status === 401 && !input.includes('/auth/')) {
+    // Si el servidor responde 401 y no es ya una petición de auth, intentar refrescar una vez (solo si sigue en línea y fuera de guardia offline)
+    if (
+      response.status === 401 &&
+      !input.includes('/auth/') &&
+      isClientCurrentlyOnline() &&
+      !isOfflineReadOnlyMutationGuardActive()
+    ) {
       try {
         const refreshData = await this.refreshSession();
+        if (!isClientCurrentlyOnline() || isOfflineReadOnlyMutationGuardActive()) {
+          tokenManager.clearToken();
+          return response;
+        }
         tokenManager.setToken(refreshData.accessToken, refreshData.expiresIn);
 
         // Reintentar la solicitud original con el nuevo token
         headers.set('Authorization', `Bearer ${refreshData.accessToken}`);
         response = await fetch(url, { ...requestInit, headers });
-      } catch {
+      } catch (refreshErr) {
         tokenManager.clearToken();
+        this.notifyAuthFailure(refreshErr);
       }
     }
 
@@ -172,8 +228,7 @@ export class BethesdaApiClient {
         });
 
         if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err?.error?.message ?? `Sesión expirada o no iniciada: HTTP ${res.status}`);
+          throw await ApiError.fromResponse(res);
         }
 
         const json = await res.json();
@@ -249,6 +304,33 @@ export class BethesdaApiClient {
   }
 
   /**
+   * Crea y persiste una canción canónica en el catálogo del servidor (Finding C: ruta centralizada vía fetchWithAuth).
+   */
+  public async createSong(payload: {
+    title: string;
+    defaultKey: string;
+    defaultBpm: number;
+    timeSignature: string;
+    status?: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+    sourceFormat: 'MUSIC_XML' | 'CHORD_PRO' | 'INTERNAL' | 'PDF' | 'IMAGE';
+    canonicalPayload: CanonicalMusicPayloadJSON;
+  }): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth('/songs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson?.error?.message ?? `HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
    * Importa una fuente (MusicXML / ChordPro) y la persiste inmediatamente en el servidor.
    */
   public async importAndPersist(source: string, filename?: string): Promise<BackendSongResponse> {
@@ -311,12 +393,14 @@ export class BethesdaApiClient {
   public async listSetlists(params?: {
     status?: FrontendSetlistStatus;
     upcoming?: boolean;
+    isTemplate?: boolean;
     limit?: number;
     offset?: number;
   }): Promise<FrontendListSetlistsResult> {
     const query = new URLSearchParams();
     if (params?.status) query.set('status', params.status);
     if (params?.upcoming !== undefined) query.set('upcoming', String(params.upcoming));
+    if (params?.isTemplate !== undefined) query.set('isTemplate', String(params.isTemplate));
     if (params?.limit !== undefined) query.set('limit', String(params.limit));
     if (params?.offset !== undefined) query.set('offset', String(params.offset));
 
@@ -500,6 +584,135 @@ export class BethesdaApiClient {
   }
 
   /**
+   * Duplica un setlist existente o lo guarda como plantilla reutilizable.
+   * Endpoint: POST /api/v1/setlists/:id/duplicate
+   */
+  public async duplicateSetlist(
+    setlistId: string,
+    payload: DuplicateSetlistPayload
+  ): Promise<FrontendSetlistDetail> {
+    const res = await this.fetchWithAuth(`/setlists/${setlistId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  // ==========================================================================
+  // MÉTODOS DE CULTOS Y SERVICIOS LITÚRGICOS (FASE 2C)
+  // ==========================================================================
+
+  /**
+   * Consulta el listado paginado de cultos/servicios con filtros opcionales.
+   * Endpoint: GET /api/v1/worship-services
+   */
+  public async listWorshipServices(
+    params?: ListWorshipServicesParams
+  ): Promise<FrontendListWorshipServicesResult> {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.serviceType) query.set('serviceType', params.serviceType);
+    if (params?.timeframe) query.set('timeframe', params.timeframe);
+    if (params?.worshipLeaderId) query.set('worshipLeaderId', params.worshipLeaderId);
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    if (params?.offset !== undefined) query.set('offset', String(params.offset));
+
+    const path = `/worship-services${query.toString() ? `?${query.toString()}` : ''}`;
+    const res = await this.fetchWithAuth(path);
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return {
+      items: json.data,
+      total: json.pagination.total,
+      limit: json.pagination.limit,
+      offset: json.pagination.offset,
+    };
+  }
+
+  /**
+   * Obtiene el detalle de un culto/servicio litúrgico.
+   * Endpoint: GET /api/v1/worship-services/:id
+   */
+  public async getWorshipService(id: string): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`);
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Crea un nuevo culto/servicio litúrgico.
+   * Endpoint: POST /api/v1/worship-services
+   */
+  public async createWorshipService(
+    payload: CreateWorshipServicePayload
+  ): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth('/worship-services', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Modifica un culto/servicio litúrgico existente.
+   * Endpoint: PUT /api/v1/worship-services/:id
+   */
+  public async updateWorshipService(
+    id: string,
+    payload: UpdateWorshipServicePayload
+  ): Promise<FrontendWorshipService> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Elimina un culto/servicio litúrgico (ADMIN / SUPER_ADMIN).
+   * Endpoint: DELETE /api/v1/worship-services/:id
+   */
+  public async deleteWorshipService(id: string): Promise<{ success: boolean; message: string }> {
+    const res = await this.fetchWithAuth(`/worship-services/${id}`, {
+      method: 'DELETE',
+    });
+
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+
+    return await res.json();
+  }
+
+  /**
    * Obtiene las preferencias de visualización del usuario autenticado (Fase 3A — WP-02).
    * Si no existen registros en base de datos, retorna los valores por defecto del rol.
    * Endpoint: GET /api/v1/users/me/preferences
@@ -543,6 +756,47 @@ export class BethesdaApiClient {
   // ============================================================================
 
   /**
+   * Sube un activo de audio asociado a una canción (WS-AUDIO-01).
+   */
+  public async uploadSongAudio(params: {
+    songId: string;
+    title: string;
+    filename: string;
+    mimeType: string;
+    dataBase64: string;
+    durationSeconds?: number;
+    verifyWithWorker?: boolean;
+    idempotencyKey?: string;
+  }): Promise<AudioAssetDTO> {
+    const payload: Record<string, unknown> = {
+      title: params.title,
+      filename: params.filename,
+      mimeType: params.mimeType,
+      dataBase64: params.dataBase64,
+    };
+    if (typeof params.durationSeconds === 'number' && Number.isFinite(params.durationSeconds) && params.durationSeconds > 0) {
+      payload.durationSeconds = params.durationSeconds;
+    }
+    if (typeof params.verifyWithWorker === 'boolean') {
+      payload.verifyWithWorker = params.verifyWithWorker;
+    }
+    if (typeof params.idempotencyKey === 'string' && params.idempotencyKey.trim().length > 0) {
+      payload.idempotencyKey = params.idempotencyKey.trim();
+    }
+
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(params.songId)}/audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
    * Obtiene la lista de pistas de audio asociadas a una canción (Workstream A).
    */
   public async getSongAudioAssets(songId: string): Promise<AudioAssetDTO[]> {
@@ -567,28 +821,7 @@ export class BethesdaApiClient {
   }
 
   /**
-   * Retorna la URL de streaming base para un activo de audio.
-   */
-  public getAudioStreamUrl(audioId: string): string {
-    return `${this.baseUrl}/audio/${audioId}/stream`;
-  }
-
-  /**
-   * Obtiene una URL de streaming autenticada mediante un ticket temporal de corta duración (R1-P0).
-   * Compatible con el elemento nativo <audio> sin exponer el token de acceso JWT en URLs persistentes.
-   */
-  public async getAudioPlaybackStreamUrl(audioId: string): Promise<string> {
-    const res = await this.fetchWithAuth(`/audio/${audioId}/ticket`, { method: 'POST' });
-    if (!res.ok) {
-      throw await ApiError.fromResponse(res);
-    }
-    const json = await res.json();
-    const ticket = json.data?.ticket;
-    return `${this.baseUrl}/audio/${audioId}/stream?ticket=${encodeURIComponent(ticket)}`;
-  }
-
-  /**
-   * Descarga el archivo de audio como Blob para almacenamiento local en IndexedDB.
+   * Descarga el archivo de audio como Blob para almacenamiento o inspección privada.
    */
   public async downloadAudioBlob(audioId: string): Promise<{ blob: Blob; filename: string; mimeType: string }> {
     const res = await this.fetchWithAuth(`/audio/${audioId}/download`, { method: 'GET' });
@@ -858,6 +1091,752 @@ export class BethesdaApiClient {
     const json = await res.json();
     return json.data;
   }
+
+  // =========================================================================
+  // CENTRO DE CONVERSIÓN MUSICAL (Fase 2A-R)
+  // =========================================================================
+
+  /**
+   * Valida compatibilidad y matriz de capacidades de formato en el servidor.
+   */
+  public async validateConversionSource(payload: {
+    filename: string;
+    rawText?: string;
+    dataBase64?: string;
+  }): Promise<{
+    filename: string;
+    detectedCategory: string;
+    isSupportedInPhase2A: boolean;
+    reasonIfDeferred?: string;
+    viableTargets: Array<{
+      targetFormat: string;
+      displayName: string;
+      extension: string;
+      isSupported: boolean;
+      preservesFullNotation: boolean;
+      preservesHarmony: boolean;
+      preservesLyrics: boolean;
+      lossWarning?: string;
+    }>;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Ejecuta transpilación directa en memoria en el servidor.
+   */
+  public async transpileConversionDirect(payload: {
+    filename: string;
+    targetFormat: string;
+    rawText?: string;
+    dataBase64?: string;
+    options?: {
+      transposeSemitones?: number;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    };
+  }): Promise<{
+    success: boolean;
+    targetFormat: string;
+    filename: string;
+    mimeType: string;
+    content: string | Uint8Array;
+    diagnostics: Array<{
+      code: string;
+      severity: 'INFO' | 'WARNING' | 'ERROR';
+      message: string;
+      measureNumber?: number;
+    }>;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/transpile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Crea y encola un trabajo de conversión asíncrono con persistencia en pg-boss.
+   */
+  public async createConversionJob(payload: {
+    filename: string;
+    targetFormat: string;
+    rawText?: string;
+    dataBase64?: string;
+    options?: {
+      transposeSemitones?: number;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    };
+  }): Promise<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    errorDetails?: any;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const res = await this.fetchWithAuth('/conversion/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Consulta el estado y progreso en tiempo real de un trabajo de conversión.
+   */
+  public async getConversionJob(jobId: string): Promise<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    errorDetails?: any;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista todos los trabajos de conversión del usuario autenticado.
+   */
+  public async listConversionJobs(): Promise<Array<{
+    id: string;
+    type: string;
+    status: 'PENDING' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    progress: number;
+    inputRef: string;
+    outputRef?: string;
+    createdAt: string;
+  }>> {
+    const res = await this.fetchWithAuth('/conversion/jobs', {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Reintenta un trabajo de conversión fallido tras verificar el hash SHA-256 del archivo en disco.
+   */
+  public async retryConversionJob(jobId: string): Promise<{
+    id: string;
+    status: string;
+    progress: number;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Cancela un trabajo de conversión en curso o pendiente.
+   */
+  public async cancelConversionJob(jobId: string): Promise<{
+    id: string;
+    status: string;
+    progress: number;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Descarga el archivo generado por el trabajo de conversión completado.
+   */
+  public async downloadConversionOutput(jobId: string): Promise<{
+    blob: Blob;
+    filename: string;
+    mimeType: string;
+  }> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/download`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const contentDisposition = res.headers.get('content-disposition') || '';
+    let filename = 'conversion_output';
+    const match = contentDisposition.match(/filename="?([^";]+)"?/);
+    if (match && match[1]) {
+      filename = match[1];
+    }
+    const mimeType = res.headers.get('content-type') || 'application/octet-stream';
+    const blob = await res.blob();
+    return { blob, filename, mimeType };
+  }
+
+  /**
+   * Guarda el resultado convertido directamente en el catálogo de canciones de Bethesda (CR-06).
+   */
+  public async commitConversionJobToCatalog(
+    jobId: string,
+    overrides?: { title?: string; artist?: string }
+  ): Promise<any> {
+    const res = await this.fetchWithAuth(`/conversion/jobs/${encodeURIComponent(jobId)}/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overrides ?? {}),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  // ==========================================================================
+  // SCOPE 1C: WS-AUDIO-02, WS-AUDIO-03, REVISIÓN HUMANA Y VERSIONES CANÓNICAS
+  // ==========================================================================
+
+  /**
+   * Crea una canción contenedor en estado DRAFT para asociar un nuevo archivo de audio
+   * sin sobrescribir ni mezclar con canciones canónicas existentes (WS-AUDIO-01 / Sección 8).
+   */
+  public async createAudioDraftSong(params: {
+    title: string;
+    artist?: string;
+  }): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth('/audio/songs/draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Ejecuta el análisis acústico Python de 10 etapas (WS-AUDIO-02) y la transcripción musical
+   * a borradores (WS-AUDIO-03) sobre un activo de audio preservado.
+   */
+  public async analyzeAndTranscribeAudio(
+    audioId: string,
+    params?: {
+      verifiedLyrics?: string;
+      selectedInstrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+      titleOverride?: string;
+      keyOverride?: string;
+      bpmOverride?: number;
+      timeSignatureOverride?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(`/audio/${encodeURIComponent(audioId)}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params ?? {}),
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista los borradores de transcripción asociados a un activo de audio.
+   */
+  public async listAudioDrafts(audioId: string): Promise<AudioDraftProposalDTO[]> {
+    const res = await this.fetchWithAuth(`/audio/${encodeURIComponent(audioId)}/drafts`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista los borradores de transcripción de audio asociados a una canción del catálogo.
+   */
+  public async listSongAudioDrafts(songId: string): Promise<AudioDraftProposalDTO[]> {
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/audio-drafts`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Edita el borrador propuesto durante la Revisión Humana obligatoria (Gate 4).
+   */
+  public async updateAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload: {
+      title?: string;
+      key?: string;
+      bpm?: number;
+      timeSignature?: string;
+      proposedChordPro?: string;
+      verifiedLyrics?: string;
+      selectedInstrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+      reason?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Registra la decisión de revisión humana: REJECTED, CORRECTION_REQUESTED o APPROVED_FOR_IMPORT.
+   */
+  public async reviewAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload: {
+      decision: 'REJECTED' | 'CORRECTION_REQUESTED' | 'APPROVED_FOR_IMPORT';
+      notes?: string;
+    }
+  ): Promise<AudioDraftProposalDTO> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Aprueba explícitamente un borrador revisado y publica una nueva versión controlada en `song_versions`
+   * para su visualización inmediata en el Atril Digital (preservando las versiones anteriores).
+   */
+  public async approveAndPublishAudioDraft(
+    audioId: string,
+    proposalId: string,
+    payload?: {
+      targetSongId?: string;
+      versionName?: string;
+      versionDescription?: string;
+      setAsCurrent?: boolean;
+      reviewNotes?: string;
+      approvedFormats?: Array<'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY'>;
+    }
+  ): Promise<{
+    draft: AudioDraftProposalDTO;
+    songId: string;
+    versionId: string;
+    versionNumber: number;
+    approvalMetadata: AudioDraftApprovalMetadataDTO;
+  }> {
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload ?? {}),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Exporta un formato específico ('CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY')
+   * de un borrador derivado de audio si está habilitado.
+   */
+  public async exportAudioDraftFormat(
+    audioId: string,
+    proposalId: string,
+    format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY',
+    instrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL'
+  ): Promise<GeneratedTargetArtifactDTO> {
+    const query = instrument ? `?instrument=${encodeURIComponent(instrument)}` : '';
+    const res = await this.fetchWithAuth(
+      `/audio/${encodeURIComponent(audioId)}/drafts/${encodeURIComponent(proposalId)}/export/${encodeURIComponent(format)}${query}`,
+      { method: 'GET' }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Lista todas las versiones históricas y aprobadas de una canción en PostgreSQL.
+   */
+  public async listSongVersions(songId: string): Promise<BackendVersionItem[]> {
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/versions`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Activa una versión específica de una canción como su versión actual para el Atril Digital.
+   */
+  public async activateSongVersion(songId: string, versionId: string): Promise<BackendSongResponse> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/versions/${encodeURIComponent(versionId)}/activate`,
+      { method: 'PUT' }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  // ============================================================================
+  // COMPLETITUD DE CONTENIDO MUSICAL Y FORMATOS DEL ATRIL (SCOPE 1C INTEGRATION)
+  // ============================================================================
+
+  /**
+   * Consulta las capacidades autoritativas del backend para los 4 formatos del Atril Digital.
+   */
+  public async getSongFormatCapabilities(
+    songId: string,
+    params?: {
+      versionId?: string | undefined;
+      instrumentId?: string | undefined;
+      capoFret?: number | undefined;
+    }
+  ): Promise<SongFormatCapabilitiesDTO> {
+    const query = new URLSearchParams();
+    if (params?.versionId) query.set('versionId', params.versionId);
+    if (params?.instrumentId) query.set('instrumentId', params.instrumentId);
+    if (typeof params?.capoFret === 'number') query.set('capoFret', String(params.capoFret));
+    const qs = query.toString() ? `?${query.toString()}` : '';
+
+    const res = await this.fetchWithAuth(`/songs/${encodeURIComponent(songId)}/format-capabilities${qs}`, {
+      method: 'GET',
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Valida y previsualiza una aportación de contenido musical sin modificar la versión canónica.
+   */
+  public async validateSongCompletionPreview(
+    songId: string,
+    payload: MusicalCompletionPayloadDTO
+  ): Promise<CompletionPreviewResponseDTO> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/validate-preview`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Preserva el origen suministrado y crea una propuesta en revisión (PENDING_REVIEW) en `omr_proposals`.
+   */
+  public async createSongCompletionProposal(
+    songId: string,
+    payload: MusicalCompletionPayloadDTO
+  ): Promise<CompletionProposalSummaryDTO> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/proposals`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+
+  /**
+   * Aprueba y publica nueva versión v(N+1), solicita corrección o rechaza una propuesta de completitud.
+   */
+  public async reviewSongCompletionProposal(
+    songId: string,
+    proposalId: string,
+    payload: {
+      decision: 'APPROVED' | 'REJECTED' | 'CORRECTION_REQUESTED';
+      notes?: string | undefined;
+      versionName?: string | undefined;
+      setAsCurrent?: boolean | undefined;
+    }
+  ): Promise<{
+    proposal: CompletionProposalSummaryDTO;
+    capabilitiesResponse: SongFormatCapabilitiesDTO;
+  }> {
+    const res = await this.fetchWithAuth(
+      `/songs/${encodeURIComponent(songId)}/completion/proposals/${encodeURIComponent(proposalId)}/review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    const json = await res.json();
+    return json.data;
+  }
+}
+
+export type AudioConversionWorkflowStateDTO =
+  | 'AUDIO_PRESERVED'
+  | 'ANALYSIS_QUEUED'
+  | 'ANALYSIS_RUNNING'
+  | 'ANALYSIS_COMPLETED'
+  | 'ANALYSIS_PARTIAL'
+  | 'TRANSCRIPTION_RUNNING'
+  | 'DRAFT_READY'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'FAILED';
+
+export interface GeneratedTargetArtifactDTO {
+  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly status: 'DRAFT_READY' | 'REVIEW_REQUIRED' | 'NOT_GENERATABLE';
+  readonly generatable: boolean;
+  readonly confidence: number;
+  readonly reason: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly isBinary: boolean;
+  readonly content: string | null;
+  readonly instrument?: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+}
+
+export interface AudioDraftReviewChangeRecordDTO {
+  readonly changedAt: string;
+  readonly changedByUserId: string;
+  readonly summary: string;
+  readonly fieldsModified: string[];
+}
+
+export interface HarmonicEvidenceBreakdownDTO {
+  readonly totalChords: number;
+  readonly detectedCount: number;
+  readonly estimatedCount: number;
+  readonly ambiguousCount: number;
+  readonly humanVerifiedCount: number;
+  readonly melodicNotesCount: number;
+}
+
+export interface BlockedFormatRecordDTO {
+  readonly format: 'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY';
+  readonly status: 'NOT_GENERATABLE' | 'EXCLUDED_BY_REVIEWER';
+  readonly reason: string;
+}
+
+export interface AudioDraftApprovalMetadataDTO {
+  readonly approvedByUserId: string;
+  readonly approvedAt: string;
+  readonly sourceAudioAssetId: string;
+  readonly sourceAudioSha256: string;
+  readonly analysisVersion: string;
+  readonly transcriptionVersion: string;
+  readonly targetSongId: string;
+  readonly approvedSongVersionId: string;
+  readonly approvedVersionNumber: number;
+  readonly setAsCurrent: boolean;
+  readonly reviewNotes?: string;
+  readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
+  readonly approvedFormats?: Array<'CHORD_PRO' | 'MUSIC_XML' | 'MIDI' | 'TABLATURE' | 'LYRICS_ONLY'>;
+  readonly blockedFormats?: BlockedFormatRecordDTO[];
+  readonly approvalScope?: 'HARMONIC_LEAD_SHEET_ONLY' | 'MELODIC_AND_HARMONIC';
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdownDTO;
+}
+
+export interface AudioAnalysisSummaryDTO {
+  readonly contractVersion: string;
+  readonly workerVersion: string;
+  readonly analysisVersion: string;
+  readonly verifiedSha256: string;
+  readonly fileSizeBytes: number;
+  readonly detectedFormat: string;
+  readonly mimeType: string;
+  readonly durationSeconds: number;
+  readonly originalSampleRateHz: number | null;
+  readonly analysisSampleRateHz: number;
+  readonly originalChannels: number;
+  readonly stereoCorrelation: number | null;
+  readonly channelBalanceDb: number | null;
+  readonly resampled: boolean;
+  readonly rmsDb: number;
+  readonly peakDb: number;
+  readonly activeFrameRatio: number;
+  readonly harmonicEnergyRatio: number;
+  readonly percussiveEnergyRatio: number;
+  readonly bpm: number | null;
+  readonly bpmExact: number | null;
+  readonly bpmConfidence: number;
+  readonly bpmStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly key: string | null;
+  readonly keyMode: string | null;
+  readonly keyConfidence: number;
+  readonly keyStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly keyAlternatives: Array<{ key: string; mode: string; correlation: number }>;
+  readonly timeSignature: string | null;
+  readonly meterConfidence: number;
+  readonly meterStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly chromaDistribution: Record<string, number>;
+  readonly chordTimeline: Array<{
+    measureNumber: number;
+    beat: number;
+    tickOffset: number;
+    startTimeSec: number;
+    endTimeSec: number;
+    chord: string;
+    root: string;
+    quality: string;
+    confidence: number;
+    status: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+    alternativeChord?: string | null;
+  }>;
+  readonly sections: Array<{
+    id: string;
+    label: string;
+    type: string;
+    startMeasure: number;
+    measureCount: number;
+    startTimeSec: number;
+    endTimeSec: number;
+    confidence: number;
+  }>;
+  readonly polyphonyIndex: number;
+  readonly monophonicSalience: number;
+  readonly noteExtractionStatus: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+  readonly noteExtractionReason: string;
+  readonly totalNotesDetected: number;
+  readonly totalChordsDetected: number;
+  readonly overallConfidence: number;
+  readonly overallStatus: 'ANALYSIS_COMPLETED' | 'ANALYSIS_PARTIAL' | 'UNSUPPORTED';
+  readonly stages: Array<{
+    stageNumber: number;
+    stageName: string;
+    status: 'DETECTED' | 'ESTIMATED' | 'AMBIGUOUS' | 'UNSUPPORTED';
+    confidence: number;
+    summary: string;
+    details: Record<string, unknown>;
+  }>;
+  readonly warnings: string[];
+}
+
+export interface AudioDraftProposalDTO {
+  readonly proposalId: string;
+  readonly jobId: string | null;
+  readonly audioAssetId: string;
+  readonly songId: string;
+  readonly songTitle: string;
+  readonly sourceFilename: string;
+  readonly sourceSha256: string;
+  readonly workflowState: AudioConversionWorkflowStateDTO;
+  readonly reviewStatus: 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED_FOR_IMPORT' | 'REJECTED' | 'COMMITTED';
+  readonly isAiDraft: boolean;
+  readonly analysisVersion: string;
+  readonly transcriptionVersion: string;
+  readonly title: string;
+  readonly detectedKey: string | null;
+  readonly detectedBpm: number | null;
+  readonly detectedTimeSignature: string | null;
+  readonly overallConfidence: number;
+  readonly selectedInstrument: 'GUITAR' | 'BASS' | 'PIANO' | 'VOCAL';
+  readonly verifiedLyrics: string;
+  readonly proposedChordPro: string;
+  readonly proposedCanonicalPayload: CanonicalMusicPayloadJSON;
+  readonly analysisSummary: AudioAnalysisSummaryDTO;
+  readonly targets: Record<string, GeneratedTargetArtifactDTO>;
+  readonly changesMadeDuringReview: AudioDraftReviewChangeRecordDTO[];
+  readonly approvalMetadata: AudioDraftApprovalMetadataDTO | null;
+  readonly harmonicEvidenceSummary?: HarmonicEvidenceBreakdownDTO;
+  readonly createdAt: string;
+  readonly reviewedAt: string | null;
+  readonly reviewedByUserId: string | null;
 }
 
 export interface DocumentAnalysisSongDTO {
@@ -947,5 +1926,87 @@ export interface AudioAssetDTO {
   readonly checksumSha256: string;
   readonly durationSeconds?: number | null;
   readonly createdAt: string;
+}
+
+export type CompletionSourceKindDTO =
+  | 'MUSICXML'
+  | 'MIDI'
+  | 'CHORDPRO'
+  | 'WRITTEN_NOTES'
+  | 'LYRICS_TEXT'
+  | 'TABLATURE_ASCII'
+  | 'EXISTING_NOTES_FRET_OVERRIDE';
+
+export interface MusicalCompletionPayloadDTO {
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly instrumentId?: string;
+  readonly filename?: string;
+  readonly rawText?: string;
+  readonly dataBase64?: string;
+  readonly writtenNotes?: Record<string, unknown>;
+  readonly lyricsData?: {
+    readonly lyricsText: string;
+    readonly alignmentMode: 'BY_MEASURE' | 'BY_SECTION' | 'UNALIGNED';
+    readonly measureAllocations?: ReadonlyArray<{
+      readonly measureNumber: number;
+      readonly text: string;
+    }>;
+    readonly sourceOrigin?: 'MANUAL_ENTRY' | 'TXT_IMPORT' | 'UNVERIFIED_AUDIO_SPEECH';
+    readonly verifiedByHuman?: boolean;
+  };
+  readonly tablatureConfig?: {
+    readonly instrumentId: string;
+    readonly capoFret?: number;
+    readonly fretOverrides?: ReadonlyArray<{
+      readonly noteId: string;
+      readonly stringNumber: number;
+      readonly fret: number;
+    }>;
+    readonly tablatureVerified?: boolean;
+  };
+  readonly mergeMode?: 'MERGE_INTO_SONG' | 'REPLACE_DRAFT';
+  readonly notes?: string;
+}
+
+export interface CompletionProposalSummaryDTO {
+  readonly proposalId: string;
+  readonly songId: string;
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly reviewStatus: 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED_FOR_IMPORT' | 'REJECTED' | 'COMMITTED';
+  readonly sourceFilename: string;
+  readonly sourceHash: string;
+  readonly createdAt: string;
+  readonly reviewedAt: string | null;
+  readonly notes: string | null;
+  readonly capabilitiesPreview: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly approvedVersionId?: string | null;
+  readonly approvedVersionNumber?: number | null;
+}
+
+export interface SongFormatCapabilitiesDTO {
+  readonly songId: string;
+  readonly songStatus: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+  readonly versionId: string;
+  readonly versionNumber: number;
+  readonly instrumentId: string;
+  readonly capoFret: number;
+  readonly contentSummary: SongContentSummary;
+  readonly capabilities: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly proposals: CompletionProposalSummaryDTO[];
+}
+
+export interface CompletionPreviewResponseDTO {
+  readonly songId: string;
+  readonly targetFormat: StandReadingFormatId;
+  readonly sourceKind: CompletionSourceKindDTO;
+  readonly valid: boolean;
+  readonly validationErrors: readonly string[];
+  readonly validationWarnings: readonly string[];
+  readonly contentSummary: SongContentSummary;
+  readonly capabilities: Record<StandReadingFormatId, StandFormatCapabilityDescriptor>;
+  readonly candidateCanonicalPayload: CanonicalMusicPayloadJSON;
+  readonly diagnostics: ReadonlyArray<{ code: string; severity: string; message: string }>;
 }
 

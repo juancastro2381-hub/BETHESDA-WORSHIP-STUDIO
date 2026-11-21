@@ -16,4 +16,6 @@ export * from './instrument-track.ts';
 export * from './timeline.ts';
 export * from './canonical-music-payload.ts';
 export * from './validator.ts';
+export * from './temporal-validator.ts';
+export * from './midi-export-gatekeeper.ts';
 export * from './fixtures/reference-song.ts';

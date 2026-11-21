@@ -14,10 +14,12 @@
 import React, { useState, useEffect, useCallback, useId } from 'react';
 import { BethesdaApiClient, type BackendSongItem } from '../../core/api/api-client.ts';
 import { ApiError } from '../../core/api/api-error.ts';
-import type {
-  FrontendSetlistDetail,
-  FrontendSetlistItem,
-  FrontendTransitionType,
+import {
+  READING_FORMAT_LABELS,
+  type FrontendReadingFormat,
+  type FrontendSetlistDetail,
+  type FrontendSetlistItem,
+  type FrontendTransitionType,
 } from '../../core/api/setlist-types.ts';
 import { useAuth } from '../../core/auth/use-auth.ts';
 
@@ -58,18 +60,35 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
   const [editTitle, setEditTitle] = useState<string>('');
   const [editScheduledDate, setEditScheduledDate] = useState<string>('');
   const [editNotes, setEditNotes] = useState<string>('');
+  const [editIsTemplate, setEditIsTemplate] = useState<boolean>(false);
   const [savingMetadata, setSavingMetadata] = useState<boolean>(false);
 
-  // Estado para GAP-01: Agregar Canción (Song Search Combobox)
+  // Estado para GAP-01 & Fase 2C (4.3): Agregar Canción (Song Search Combobox + Configuración Musical)
   const [songSearchQuery, setSongSearchQuery] = useState<string>('');
   const [songSearchResults, setSongSearchResults] = useState<BackendSongItem[]>([]);
   const [songSearchLoading, setSongSearchLoading] = useState<boolean>(false);
   const [selectedSong, setSelectedSong] = useState<BackendSongItem | null>(null);
   const [songTargetKey, setSongTargetKey] = useState<string>('');
   const [songTargetBpm, setSongTargetBpm] = useState<string>('');
+  const [songPreferredInstrument, setSongPreferredInstrument] = useState<string>('');
+  const [songPreferredTuning, setSongPreferredTuning] = useState<string>('');
+  const [songPreferredFormat, setSongPreferredFormat] = useState<FrontendReadingFormat | ''>('');
   const [songTransitionType, setSongTransitionType] = useState<FrontendTransitionType>('STOP');
   const [songNotesForTeam, setSongNotesForTeam] = useState<string>('');
   const [addingSong, setAddingSong] = useState<boolean>(false);
+
+  // Estado para edición inline de configuración de ítem existente (Fase 2C — 4.3)
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [itemEditKey, setItemEditKey] = useState<string>('');
+  const [itemEditBpm, setItemEditBpm] = useState<string>('');
+  const [itemEditInstrument, setItemEditInstrument] = useState<string>('');
+  const [itemEditTuning, setItemEditTuning] = useState<string>('');
+  const [itemEditFormat, setItemEditFormat] = useState<FrontendReadingFormat | ''>('');
+  const [itemEditTransition, setItemEditTransition] = useState<FrontendTransitionType>('STOP');
+  const [itemEditNotes, setItemEditNotes] = useState<string>('');
+  const [itemEditMomentTitle, setItemEditMomentTitle] = useState<string>('');
+  const [itemEditDuration, setItemEditDuration] = useState<string>('');
+  const [savingItemEdit, setSavingItemEdit] = useState<boolean>(false);
 
   // Estado para GAP-01: Agregar Momento Litúrgico
   const [momentTitle, setMomentTitle] = useState<string>('');
@@ -99,6 +118,7 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
         data.scheduledDateTime ? data.scheduledDateTime.split('T')[0] ?? '' : ''
       );
       setEditNotes(data.notes ?? '');
+      setEditIsTemplate(Boolean(data.isTemplate));
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.statusCode === 404) {
@@ -155,6 +175,9 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
     setSelectedSong(song);
     setSongTargetKey(song.defaultKey);
     setSongTargetBpm(String(song.defaultBpm));
+    setSongPreferredInstrument('');
+    setSongPreferredTuning('');
+    setSongPreferredFormat('');
     setSongTransitionType('STOP');
     setSongNotesForTeam('');
   };
@@ -163,10 +186,13 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
     setSelectedSong(null);
     setSongTargetKey('');
     setSongTargetBpm('');
+    setSongPreferredInstrument('');
+    setSongPreferredTuning('');
+    setSongPreferredFormat('');
     setSongNotesForTeam('');
   };
 
-  // GAP-01: Guardar ítem Canción
+  // GAP-01 & Fase 2C (4.3): Guardar ítem Canción con configuración musical
   const handleAddSongSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedSong) return;
@@ -180,6 +206,9 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
         songId: selectedSong.id,
         targetKey: songTargetKey.trim() || selectedSong.defaultKey,
         targetBpm: songTargetBpm ? Number(songTargetBpm) : selectedSong.defaultBpm,
+        preferredInstrument: songPreferredInstrument.trim() || null,
+        preferredTuning: songPreferredTuning.trim() || null,
+        preferredFormat: songPreferredFormat || null,
         transitionType: songTransitionType,
         notesForTeam: songNotesForTeam.trim() || null,
       });
@@ -197,6 +226,63 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
       }
     } finally {
       setAddingSong(false);
+    }
+  };
+
+  // Fase 2C (4.3): Iniciar edición inline de un ítem existente
+  const handleStartEditItem = (item: FrontendSetlistItem) => {
+    setEditingItemId(item.id);
+    if (item.itemType === 'SONG') {
+      setItemEditKey(item.targetKey ?? item.song?.defaultKey ?? '');
+      setItemEditBpm(item.targetBpm ? String(item.targetBpm) : item.song?.defaultBpm ? String(item.song.defaultBpm) : '');
+      setItemEditInstrument(item.preferredInstrument ?? '');
+      setItemEditTuning(item.preferredTuning ?? '');
+      setItemEditFormat(item.preferredFormat ?? '');
+    } else {
+      setItemEditMomentTitle(item.momentTitle ?? '');
+      setItemEditDuration(item.durationMinutes ? String(item.durationMinutes) : '');
+      setItemEditKey(item.musicalKey ?? '');
+    }
+    setItemEditTransition(item.transitionType ?? 'STOP');
+    setItemEditNotes(item.notesForTeam ?? '');
+  };
+
+  const handleSaveEditItem = async (e: React.FormEvent, item: FrontendSetlistItem) => {
+    e.preventDefault();
+    if (isReadOnly || !canManage) return;
+
+    setSavingItemEdit(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const payload =
+        item.itemType === 'SONG'
+          ? {
+              targetKey: itemEditKey.trim() || null,
+              targetBpm: itemEditBpm ? Number(itemEditBpm) : null,
+              preferredInstrument: itemEditInstrument.trim() || null,
+              preferredTuning: itemEditTuning.trim() || null,
+              preferredFormat: itemEditFormat || null,
+              transitionType: itemEditTransition,
+              notesForTeam: itemEditNotes.trim() || null,
+            }
+          : {
+              momentTitle: itemEditMomentTitle.trim() || item.momentTitle || 'Momento Litúrgico',
+              durationMinutes: itemEditDuration ? Number(itemEditDuration) : null,
+              musicalKey: itemEditKey.trim() || null,
+              transitionType: itemEditTransition,
+              notesForTeam: itemEditNotes.trim() || null,
+            };
+
+      await client.updateSetlistItem(setlistId, item.id, payload);
+      setEditingItemId(null);
+      setSuccessMessage('Configuración del elemento actualizada.');
+      await loadDetail();
+      onSetlistUpdated?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al actualizar la configuración del elemento.');
+    } finally {
+      setSavingItemEdit(false);
     }
   };
 
@@ -318,6 +404,7 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
         title: editTitle.trim(),
         scheduledDateTime: editScheduledDate ? new Date(editScheduledDate).toISOString() : null,
         notes: editNotes.trim() || null,
+        isTemplate: editIsTemplate,
       });
 
       setDetail((prev) =>
@@ -327,6 +414,7 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
               title: updated.title,
               scheduledDateTime: updated.scheduledDateTime,
               notes: updated.notes,
+              isTemplate: updated.isTemplate ?? editIsTemplate,
             }
           : null
       );
@@ -432,6 +520,11 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
                   {detail.status === 'COMPLETED' && 'COMPLETADO'}
                   {detail.status === 'ARCHIVED' && 'ARCHIVADO'}
                 </span>
+                {detail.isTemplate && (
+                  <span className="setlist-template-badge" title="Plantilla litúrgica reutilizable">
+                    📑 PLANTILLA
+                  </span>
+                )}
                 {detail.scheduledDateTime && (
                   <span className="setlist-date-badge">
                     📅 {new Date(detail.scheduledDateTime).toLocaleDateString()}
@@ -500,6 +593,17 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
                 disabled={savingMetadata}
               />
             </div>
+            <div className="form-group form-checkbox-row">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={editIsTemplate}
+                  onChange={(e) => setEditIsTemplate(e.target.checked)}
+                  disabled={savingMetadata}
+                />
+                <span>Guardar como plantilla reutilizable</span>
+              </label>
+            </div>
             <div className="metadata-form-actions">
               <button
                 type="button"
@@ -546,7 +650,7 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
             </div>
           </div>
 
-          {/* Formulario GAP-01: Agregar Canción */}
+          {/* Formulario GAP-01 & Fase 2C (4.3): Agregar Canción */}
           {authoringMode === 'ADD_SONG' && (
             <div className="authoring-subform-box" role="region" aria-label="Agregar canción al repertorio">
               <h4 className="subform-title">Seleccionar Canción del Cancionero Canónico</h4>
@@ -665,6 +769,48 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
                         <option value="SEGUE">SEGUE — Continuo directo</option>
                         <option value="CROSSFADE">CROSSFADE — Empalme suave</option>
                         <option value="MEDLEY">MEDLEY — Unión en Popurrí</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="song-preferred-instrument">Instrumento Principal</label>
+                      <input
+                        id="song-preferred-instrument"
+                        type="text"
+                        className="auth-input"
+                        placeholder="Ej. Guitarra Acústica, Piano, Bajo"
+                        value={songPreferredInstrument}
+                        onChange={(e) => setSongPreferredInstrument(e.target.value)}
+                        maxLength={64}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="song-preferred-tuning">Afinación / Capo</label>
+                      <input
+                        id="song-preferred-tuning"
+                        type="text"
+                        className="auth-input"
+                        placeholder="Ej. Estándar (EADGBE), Drop D, Capo 2"
+                        value={songPreferredTuning}
+                        onChange={(e) => setSongPreferredTuning(e.target.value)}
+                        maxLength={64}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="song-preferred-format">Formato de Lectura Sugerido</label>
+                      <select
+                        id="song-preferred-format"
+                        className="auth-input"
+                        value={songPreferredFormat}
+                        onChange={(e) => setSongPreferredFormat(e.target.value as FrontendReadingFormat | '')}
+                      >
+                        <option value="">Según preferencia del músico</option>
+                        <option value="SCORE">Partitura Estándar</option>
+                        <option value="CHORD_SHEET">Cifrado + Letra</option>
+                        <option value="LYRICS">Solo Letra</option>
+                        <option value="TAB">Tablatura (Guitarra/Bajo)</option>
                       </select>
                     </div>
                   </div>
@@ -806,6 +952,7 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
               const isFirst = index === 0;
               const isLast = index === detail.items.length - 1;
               const isReorderingThis = reorderingItemId === item.id;
+              const isEditingThis = editingItemId === item.id;
 
               const title =
                 item.itemType === 'SONG'
@@ -867,6 +1014,15 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
                         <>
                           <span className="detail-tag">Tono: <strong>{item.targetKey ?? item.song?.defaultKey ?? '—'}</strong></span>
                           <span className="detail-tag">BPM: <strong>{item.targetBpm ?? item.song?.defaultBpm ?? '—'}</strong></span>
+                          {item.preferredInstrument && (
+                            <span className="detail-tag">🎸 {item.preferredInstrument}</span>
+                          )}
+                          {item.preferredTuning && (
+                            <span className="detail-tag">🔧 {item.preferredTuning}</span>
+                          )}
+                          {item.preferredFormat && (
+                            <span className="detail-tag">📄 {READING_FORMAT_LABELS[item.preferredFormat]}</span>
+                          )}
                         </>
                       ) : (
                         <>
@@ -886,11 +1042,163 @@ export const SetlistDetailEditor: React.FC<SetlistDetailEditorProps> = ({
                     {item.notesForTeam && (
                       <p className="item-team-notes">💬 {item.notesForTeam}</p>
                     )}
+
+                    {/* Formulario inline de configuración del ítem (Fase 2C — 4.3) */}
+                    {isEditingThis && (
+                      <form
+                        onSubmit={(e) => handleSaveEditItem(e, item)}
+                        className="item-inline-edit-form"
+                        aria-label={`Editar configuración de ${title}`}
+                      >
+                        {item.itemType === 'SONG' ? (
+                          <div className="song-override-grid">
+                            <div className="form-group">
+                              <label>Tono</label>
+                              <input
+                                type="text"
+                                className="auth-input"
+                                value={itemEditKey}
+                                onChange={(e) => setItemEditKey(e.target.value)}
+                                maxLength={16}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>BPM</label>
+                              <input
+                                type="number"
+                                min={20}
+                                max={300}
+                                className="auth-input"
+                                value={itemEditBpm}
+                                onChange={(e) => setItemEditBpm(e.target.value)}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Transición</label>
+                              <select
+                                className="auth-input"
+                                value={itemEditTransition}
+                                onChange={(e) => setItemEditTransition(e.target.value as FrontendTransitionType)}
+                              >
+                                <option value="STOP">STOP</option>
+                                <option value="SEGUE">SEGUE</option>
+                                <option value="CROSSFADE">CROSSFADE</option>
+                                <option value="MEDLEY">MEDLEY</option>
+                              </select>
+                            </div>
+                            <div className="form-group">
+                              <label>Instrumento</label>
+                              <input
+                                type="text"
+                                className="auth-input"
+                                placeholder="Ej. Guitarra, Piano"
+                                value={itemEditInstrument}
+                                onChange={(e) => setItemEditInstrument(e.target.value)}
+                                maxLength={64}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Afinación / Capo</label>
+                              <input
+                                type="text"
+                                className="auth-input"
+                                placeholder="Ej. EADGBE, Drop D"
+                                value={itemEditTuning}
+                                onChange={(e) => setItemEditTuning(e.target.value)}
+                                maxLength={64}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Formato Sugerido</label>
+                              <select
+                                className="auth-input"
+                                value={itemEditFormat}
+                                onChange={(e) => setItemEditFormat(e.target.value as FrontendReadingFormat | '')}
+                              >
+                                <option value="">Según preferencia del músico</option>
+                                <option value="SCORE">Partitura Estándar</option>
+                                <option value="CHORD_SHEET">Cifrado + Letra</option>
+                                <option value="LYRICS">Solo Letra</option>
+                                <option value="TAB">Tablatura (Guitarra/Bajo)</option>
+                              </select>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="create-form-grid">
+                            <div className="form-group">
+                              <label>Título del Momento *</label>
+                              <input
+                                type="text"
+                                required
+                                className="auth-input"
+                                value={itemEditMomentTitle}
+                                onChange={(e) => setItemEditMomentTitle(e.target.value)}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Duración (Minutos)</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={180}
+                                className="auth-input"
+                                value={itemEditDuration}
+                                onChange={(e) => setItemEditDuration(e.target.value)}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label>Tonalidad Pad</label>
+                              <input
+                                type="text"
+                                className="auth-input"
+                                value={itemEditKey}
+                                onChange={(e) => setItemEditKey(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="form-group">
+                          <label>Indicaciones para el equipo</label>
+                          <input
+                            type="text"
+                            className="auth-input"
+                            value={itemEditNotes}
+                            onChange={(e) => setItemEditNotes(e.target.value)}
+                            placeholder="Notas para músicos / transición..."
+                          />
+                        </div>
+
+                        <div className="subform-actions">
+                          <button
+                            type="button"
+                            className="action-button secondary"
+                            onClick={() => setEditingItemId(null)}
+                            disabled={savingItemEdit}
+                          >
+                            Cancelar
+                          </button>
+                          <button type="submit" className="action-button primary" disabled={savingItemEdit}>
+                            {savingItemEdit ? 'Guardando...' : 'Guardar Configuración'}
+                          </button>
+                        </div>
+                      </form>
+                    )}
                   </div>
 
-                  {/* Botón de eliminar ítem individual GAP-03 */}
+                  {/* Acciones de configuración y eliminación de ítem individual */}
                   {canManage && !isReadOnly && (
                     <div className="item-actions">
+                      <button
+                        type="button"
+                        className="btn-edit-item"
+                        onClick={() => (isEditingThis ? setEditingItemId(null) : handleStartEditItem(item))}
+                        disabled={actionInProgress}
+                        aria-label={`Configurar "${title}"`}
+                        title="Configurar tono, instrumento, afinación, formato y notas"
+                      >
+                        ✏️
+                      </button>
                       <button
                         type="button"
                         className="btn-delete-item"

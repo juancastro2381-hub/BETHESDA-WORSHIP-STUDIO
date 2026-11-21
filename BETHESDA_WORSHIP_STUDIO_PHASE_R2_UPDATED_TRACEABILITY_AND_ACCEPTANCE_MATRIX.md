@@ -2,12 +2,13 @@
 
 - **Date:** `2026-11-21`
 - **Repository / Branch:** `BETHESDA WORSHIP STUDIO` / `feature/phase-1a-core-foundation` (`origin/feature/phase-1a-core-foundation`, sync `0 0`)
-- **Verified HEAD SHA:** `d93534429039c0ad59da9c4fedd8e714f904eed9` (prior snapshot: `83fbe26a7c019fbd8e58265256afa18a3065d259`; R1 closure: `2ebb0fd1c4b70780e740da60342e07e81a166cdd`)
+- **Verified HEAD SHA:** `765a6312780ae155be3be7b2e19cbebbb56856c5` (prior snapshots: `d93534429039c0ad59da9c4fedd8e714f904eed9`, `83fbe26a7c019fbd8e58265256afa18a3065d259`; R1 closure: `2ebb0fd1c4b70780e740da60342e07e81a166cdd`)
 - **Scope:** Master traceability across all 38 findings (`R2-F01`–`R2-F38`), preserving strict documentation-only boundaries for `WS-R2.0` (`WS-R2.1`–`WS-R2.6` **NOT AUTHORIZED**)
 - **Methodology:** Direct source/Git inspection, static audit of `provision_app_runtime_role.sql` / `conversion-queue.ts` / `db/index.ts`, isolated `pytest` (`18/18`), live TypeScript checks, and read-only frontend test execution (`node` & `tsx`)
 - **Status / Gate Classification:** **`CONDITIONAL PASS`** — **`PROJECT OWNER REVIEW REQUIRED`** *(Prerequisites `WS-R2.0` and Decisions `POD-01`–`POD-05` pending approval)*
 - **Explicit Implementation Boundaries:** Zero source code, test, migration, DB role, config, or dependency edits executed; zero browser automation (`Playwright`/`Selenium`/`Cypress` excluded).
 - **Required Approvals & Companion Deliverables:**
+  - [WS-R2.0 Project Owner Decision Register & Remediation Execution Plan](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md)
   - [WS-R2.0 Final Certification and Blockers Report](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_FINAL_CERTIFICATION_AND_BLOCKERS_REPORT.md)
   - [WS-R2.0 Controlled Remediation Plan](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_REMEDIATION_PLAN.md)
   - [Owner Decision Analysis POD-01 to POD-05](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/BETHESDA_WORSHIP_STUDIO_PHASE_R2_OWNER_DECISION_ANALYSIS_POD_01_POD_05.md)

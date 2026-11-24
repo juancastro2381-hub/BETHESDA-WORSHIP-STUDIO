@@ -20,7 +20,7 @@ export class AuthGuard {
   constructor(
     private tokenService: JwtTokenService,
     private userRepository: IUserRepository
-  ) { }
+  ) {}
 
   /**
    * Hook opcional/base de autenticación: extrae el token Bearer si existe y lo verifica.

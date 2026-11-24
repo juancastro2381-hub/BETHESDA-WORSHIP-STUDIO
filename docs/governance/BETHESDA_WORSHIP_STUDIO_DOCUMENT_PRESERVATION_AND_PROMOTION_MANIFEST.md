@@ -51,3 +51,19 @@ Todos los `11` documentos posteriores a PR `#1` presentes en `feature/phase-1a-c
 - **Archivos de código fuente (`backend/`, `frontend/`, `workers/`), esquemas SQL, migraciones, dependencias e infraestructura tocados:** **`0`**.
 - **Ramas eliminadas o modificadas (`main`, `feature/phase-1a-core-foundation`):** **`0`** (ambas conservan intactos sus commits `97ae7c60` y `efd1edc8`).
 - **Estado `WS-R2.0`:** Permanece **NO AUTORIZADO y NO INICIADO**.
+
+---
+
+## 4. Adenda Fechada de Reconciliación del Inventario del PR (`2026-11-24`)
+
+> **Preservación histórica:** Las Secciones 1–3 reflejan el inventario original de los `7` documentos promovidos en `01f16e9aa0ef9c456a7fefa5f8cf87a501b4a9f4` (`2026-11-21`) y el respaldo externo `11/11` de `feature/phase-1a-core-foundation`. Esta adenda registra las `3` adiciones documentales posteriores y la remediación de la anomalía de código en `b411a4bab`, reconciliando el inventario real final del PR frente a `main` (`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`).
+
+| # | Archivo adicional incorporado tras `01f16e9a` | Commit / Origen | Categoría / Disposición reconciliada |
+|---|---|---|---|
+| **8** | `BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md` | `244f0ef764e9d91c3d831ccf64ee7561e9d9589b` (`2026-11-21`) | Revisión de aceptación documental añadida en raíz; reconciliada el `2026-11-24` mediante nota fechada (Sección 15). |
+| **9** | `docs/governance/FINAL_DOCUMENTARY_PROMOTION_REVIEW.md` | `b411a4bab0a268e8323387ffcd6ad6e5cc589d54` (`2026-11-24`) | Revisión final pre-merge añadida en `docs/governance/`; reconciliada el `2026-11-24` mediante nota fechada (Sección 8). |
+| **10** | `docs/incidents/2026-11-24-pre-merge-auth-anomaly/BETHESDA_WORSHIP_STUDIO_PRE_MERGE_AUTH_MIDDLEWARE_ANOMALY_AUDIT.md` | Remediación autorizada (`2026-11-24`) | Informe forense de la anomalía en `b411a4bab` incorporado íntegro sin alterar sus hallazgos (SHA-256 `F4D09BE1DCF7F3AF6007CA5DE7A40F3951F9C95728FE8D1603F6547B34AAD8EB`). |
+
+- **Anomalía temporal y restauración exacta:** El commit `b411a4bab0a268e8323387ffcd6ad6e5cc589d54` modificó de forma no autorizada la línea 23 de `backend/src/interfaces/http/middlewares/auth-middleware.ts` añadiendo `1` espacio ASCII (`) {}` → `) { }`, sin impacto funcional/AST sobre `AuthGuard`, DI, JWT HS256, `tokenVersion`, bloqueos ni RBAC, pero generando una violación de gobernanza de alcance y alteración de SHA-256. Mediante *forward restore* autorizado (`2026-11-24`, sin reescribir historial), el archivo volvió exactamente al blob de `main` `010be3ca6ad1752b9138d62b6b3eb4765f5a6cc6` (`5,351` bytes LF, SHA-256 `DD0CB68E0B82CE587C4B8131FA30FF5CB95B88259DD5E1341DDBFD9DEEDCC959`).
+- **Inventario neto final del PR (`main..HEAD`):** Exactamente **`10` archivos Markdown (`*.md`)** (`7` de `01f16e9a` + `3` listados arriba) y **`0` archivos de código fuente** (`git diff main..HEAD -- backend/` vacío).
+- **Limitación de validación en tiempo de ejecución:** Ni la auditoría forense ni esta remediación ejecutaron compilación TypeScript (`tsc`) ni pruebas automatizadas de seguridad/autenticación; dichas pruebas no se afirman ejecutadas ni aprobadas y quedan como verificación independiente opcional si el Project Owner lo requiere.

@@ -2,7 +2,7 @@
 
 - **Recovery Date:** `2026-11-21`
 - **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`
-- **Verified Local Path:** `C:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO`
+- **Verified Local Path:** `local repository workspace root (sanitized for public publication)`
 - **Active Working Branch:** `feature/phase-1a-core-foundation` (`765a6312780ae155be3be7b2e19cbebbb56856c5`)
 - **Governance Mode:** Safe fast-forward-only local `main` recovery & documentation (`0` commits, `0` pushes, `0` code/DB edits; report intentionally left uncommitted)
 - **Final Recovery Verdict:** **`SUCCESS — LOCAL MAIN FAST-FORWARDED SAFELY; REVERT ISOLATED; ZERO DATA LOSS`**
@@ -11,7 +11,7 @@
 
 ## 1. Incident Summary
 
-Pull Request `#1` merged `feature/phase-1a-core-foundation` (`765a6312780ae155be3be7b2e19cbebbb56856c5`) cleanly into `origin/main` (`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`) at `2026-11-21 16:56:13 -0500`. Sixty-seven seconds later (`16:57:20 -0500`), GitHub created revert branch `revert-1-feature/phase-1a-core-foundation` (`766650ceb3e8818ac3c32023d7d87338364850ac`), which would revert all `106` commits across `754` files (`132,410` deletions) back to the `2026-11-02` snapshot `36979be69cfc24677a54cf65bf34785afad6f494`. Forensic diagnosis ([`BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md)) confirmed the revert was never merged and must remain rejected, while local `main` remained `107` commits behind `origin/main` at `36979be`.
+Pull Request `#1` merged `feature/phase-1a-core-foundation` (`765a6312780ae155be3be7b2e19cbebbb56856c5`) cleanly into `origin/main` (`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`) at `2026-11-21 16:56:13 -0500`. Sixty-seven seconds later (`16:57:20 -0500`), GitHub created revert branch `revert-1-feature/phase-1a-core-foundation` (`766650ceb3e8818ac3c32023d7d87338364850ac`), which would revert all `106` commits across `754` files (`132,410` deletions) back to the `2026-11-02` snapshot `36979be69cfc24677a54cf65bf34785afad6f494`. Forensic diagnosis ([`BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md`](BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md)) confirmed the revert was never merged and must remain rejected, while local `main` remained `107` commits behind `origin/main` at `36979be`.
 
 ---
 
@@ -30,7 +30,7 @@ Pull Request `#1` merged `feature/phase-1a-core-foundation` (`765a6312780ae155be
 ## 3. Preflight & Safety Validation Evidence (Phases 1–2)
 
 All 12 preflight conditions and Phase 2 safety gates passed prior to updating local `main`:
-1. Verified repository path: `C:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO`.
+1. Verified repository path: `local repository workspace root (sanitized)`.
 2. Verified current branch (`feature/phase-1a-core-foundation`), `HEAD` (`765a6312`), and preserved uncommitted documentation files.
 3. Ran read-only `git fetch origin` without altering working files.
 4. Confirmed `origin/main` === `97ae7c6039aa208beb5a64c6592fba0085ba0d1d` (`Merge pull request #1`).
@@ -97,7 +97,7 @@ git diff --stat
 
 ## 9. Anomalies & Remaining Actions for Project Owner
 
-1. **Username Path Difference:** Prompt referenced `C:\Users\juan\...`; actual verified filesystem username directory is `C:\Users\juanc\...`.
+1. **Local Profile Path Typo Discrepancy (`2026-11-21`):** Initial incident instructions cited an abbreviated local workstation user directory string (`...`); live verification confirmed the active local repository workspace user directory differed by one character (exact workstation path redacted in public revision; original record retained in the **private external evidence backup**).
 2. **Uncommitted Working-Tree Documentation:** Prior to recovery, 3 uncommitted Markdown governance files existed on `feature/phase-1a-core-foundation`; safely preserved without stashing via `git fetch origin main:main`.
 3. **Remote Revert PR Still Present on GitHub (`Action Pending`):** Remote branch `remotes/origin/revert-1-feature/phase-1a-core-foundation` (`766650c`) still exists on `origin`. **Project Owner must close the revert PR on GitHub UI without merging** (and may optionally delete that remote branch on GitHub UI).
 
@@ -106,3 +106,10 @@ git diff --stat
 ## 10. Final Recovery Verdict
 
 **`SUCCESS — LOCAL MAIN FAST-FORWARDED SAFELY; REVERT ISOLATED; ZERO DATA LOSS`**
+
+---
+
+## 11. Public Privacy Sanitization & Forensic Provenance Note (`2026-11-24`)
+
+- **Distinction between original private evidence and sanitized public revision:** The original byte-identical recovery report dated `2026-11-21` (SHA-256 `ED3FB2C7737626EAC279AE3AE873B1C6128FD88B08B76C952DA086745A2B11DC`) is retained unmodified in the **private external evidence backup** and in Git commits `01f16e9a`–`cc9aec18`.
+- **Sanitization applied under Option B authorization (`2026-11-24`):** Removed local workstation paths and personal directory strings (`L5`, `L33`, `L100`) and converted the non-portable local file URI link in Section 1 to the sibling repository-relative Markdown link [`BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md`](BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md). All historical facts, SHAs, and findings remain unchanged. See [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](../../governance/BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md).

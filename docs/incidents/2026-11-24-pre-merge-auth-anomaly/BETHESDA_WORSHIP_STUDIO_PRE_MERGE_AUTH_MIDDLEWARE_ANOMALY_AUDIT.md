@@ -26,7 +26,7 @@ La auditoría forense de solo lectura confirma con evidencia exacta:
 
 | Parámetro verificado | Valor real exacto |
 |---|---|
-| **Raíz del repositorio (`--show-toplevel`)** | `C:/Users/juanc/OneDrive/Documentos/Desarrollo proyectos/Sistema Musical - Partituras/BETHESDA WORSHIP STUDIO` |
+| **Raíz del repositorio (`--show-toplevel`)** | `local repository workspace root (sanitized)` |
 | **Rama activa local** | `docs/git-governance-and-post-reversal-recovery` |
 | **`HEAD` local y remoto (`origin/...`)** | **`b411a4bab0a268e8323387ffcd6ad6e5cc589d54`** (`0 0` local vs `origin`) |
 | **Rama destino `main` y `origin/main`** | **`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`** (`0 0` local vs `origin`) |
@@ -65,7 +65,7 @@ Se inspeccionó el archivo completo (`144` líneas) en `main`, `01f16e9a` (promo
 | **SHA completo del commit responsable** | **`b411a4bab0a268e8323387ffcd6ad6e5cc589d54`** |
 | **Asunto (`Subject`)** | `PROJECT OWNER CONTROLLED DOCUMENTARY PULL REQUEST REVIEW AND MERGE READINESS` |
 | **Fecha y hora (`AuthorDate` / `CommitDate`)** | `Tue Nov 24 16:54:22 2026 -0500` |
-| **Autor / Committer** | `juancastro2381-hub <juancastro2381@gmail.com>` |
+| **Autor / Committer** | `juancastro2381-hub` *(personal email redacted from public prose; Git commit metadata preserved)* |
 | **Commit padre** | `244f0ef764e9d91c3d831ccf64ee7561e9d9589b` |
 | **Archivos modificados por `b411a4bab`** | 1) `backend/src/interfaces/http/middlewares/auth-middleware.ts` (`+1 / -1`)<br>2) `docs/governance/FINAL_DOCUMENTARY_PROMOTION_REVIEW.md` (`+95 / -0`) |
 
@@ -129,3 +129,14 @@ Para limpiar la rama sin reescribir historial publicado (`sin reset`, `sin rebas
 
 - **Comandos de solo lectura ejecutados:** `git rev-parse --show-toplevel`, `git ls-remote origin`, `git branch -avv`, `git status -uall --porcelain=v1`, `git diff --numstat main..HEAD`, `git log --format=fuller --stat main..origin/docs/...`, `git cat-file blob`, comparación Python línea por línea y hashes SHA-256, `read_file` completo (`144/144` líneas) de `auth-middleware.ts` e inspección vía API pública GitHub (`/pulls?state=all`).
 - **Limitaciones:** Auditoría estrictamente de solo lectura. No se ejecutó compilación TypeScript (`tsc`), ni pruebas unitarias/integración de autenticación, ni conexiones PostgreSQL, ni pruebas automatizadas de navegador; tampoco se realizó ninguna mutación Git, commit o push.
+
+---
+
+## 10. Nota Fechada de Remediación Post-Auditoría y Sanitización Pública (`2026-11-24` — Opción B)
+
+> **Preservación histórica:** Las Secciones 1–9 conservan fielmente el hallazgo forense `FAIL` observado el `2026-11-24 17:xx -0500` sobre el estado `b411a4bab0a268e8323387ffcd6ad6e5cc589d54` (copia original pre-sanitización SHA-256 `F4D09BE1DCF7F3AF6007CA5DE7A40F3951F9C95728FE8D1603F6547B34AAD8EB`, preservada en historial Git en el commit `cc9aec18c62b0bdd0710d37ea679af6513eca06d`).
+
+1. **Restauración posterior de `auth-middleware.ts` (`cc9aec18c62b0bdd0710d37ea679af6513eca06d`):** La modificación de 1 espacio en la línea 23 introducida por `b411a4bab` fue revertida hacia adelante sin reescribir historial, devolviendo `backend/src/interfaces/http/middlewares/auth-middleware.ts` al blob exacto de `main` (`010be3ca6ad1752b9138d62b6b3eb4765f5a6cc6`, SHA-256 `DD0CB68E0B82CE587C4B8131FA30FF5CB95B88259DD5E1341DDBFD9DEEDCC959`, `0` diferencias en `backend/`).
+2. **Sanitización pública de privacidad bajo autorización Opción B (`2026-11-24`):** En esta revisión pública sanitizada de PR `#2` se reemplazó la ruta local de estación en Sección 2 (`L29`) por `local repository workspace root (sanitized)` y se removió el correo electrónico personal del autor en Sección 4 (`L68`), manteniendo íntegras todas las conclusiones forenses.
+3. **Actualización del inventario final del PR `#2`:** Tras la reubicación de [`BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md`](../../governance/BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md) a `docs/governance/` y la incorporación del informe [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](../../governance/BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md), el PR `#2` comprende **`11` archivos Markdown (`0` código fuente)**.
+4. **Sin pruebas en tiempo de ejecución:** Se reitera que ni esta auditoría forense ni la remediación documental posterior ejecutaron compilación TypeScript (`tsc`) ni pruebas de autenticación/seguridad en ejecución.

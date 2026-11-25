@@ -26,7 +26,7 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 
 | Campo verificado | Valor real observado en vivo |
 |---|---|
-| **Raíz Git (`--show-toplevel`)** | `C:/Users/juanc/OneDrive/Documentos/Desarrollo proyectos/Sistema Musical - Partituras/BETHESDA WORSHIP STUDIO` |
+| **Raíz Git (`--show-toplevel`)** | `local repository workspace root (sanitized for public repository)` |
 | **Rama local activa** | `docs/git-governance-and-post-reversal-recovery` |
 | **`HEAD` exacto** | `01f16e9aa0ef9c456a7fefa5f8cf87a501b4a9f4` |
 | **Upstream y sincronización** | `origin/docs/git-governance-and-post-reversal-recovery` (`0 0`) |
@@ -35,7 +35,7 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 | **Relación `docs/git-governance-and-post-reversal-recovery` vs `main`** | **`1 0`** (`1` commit adelante, `0` atrás; padre directo = `97ae7c6039aa208beb5a64c6592fba0085ba0d1d`) |
 | **Árbol de trabajo e índice antes de crear esta revisión** | Limpios (`git status -uall --porcelain=v1` vacío, `git diff --stat` vacío, `git diff --cached` vacío, `<NONE>` *stashes*) |
 | **Referencia caché local obsoleta** | `remotes/origin/revert-1-feature/phase-1a-core-foundation` (`766650c`), confirmada ausente en `git ls-remote origin` |
-| **Respaldo externo (`C:\Users\Public\Documents\BETHESDA_WORSHIP_STUDIO_LOCAL_DOCS_BACKUP_20261121`)** | Existente con **`11`** archivos (`11/11` `EXACT_BIN = True` frente a los blobs de `feature/phase-1a-core-foundation`) |
+| **Respaldo externo (`private external evidence backup`)** | Existente con **`11`** archivos (`11/11` `EXACT_BIN = True` frente a los blobs de `feature/phase-1a-core-foundation`; ubicación física reservada por privacidad) |
 | **Estado público GitHub (`API REST`)** | `DEFAULT_BRANCH = main`, `PRIVATE = False`, `PROTECTED = False` en las 3 ramas, `GH_RULESETS_MAIN = 0`, `.github/workflows` inexistente (`False`) |
 
 ---
@@ -44,7 +44,7 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 
 - **SHA completo:** `01f16e9aa0ef9c456a7fefa5f8cf87a501b4a9f4`
 - **Commit padre (`HEAD^`):** `97ae7c6039aa208beb5a64c6592fba0085ba0d1d` (exactamente el commit verificado de `main`)
-- **Autor y fecha:** `juancastro2381-hub <juancastro2381@gmail.com>` — `Sat Nov 21 19:54:33 2026 -0500`
+- **Autor y fecha:** `juancastro2381-hub` — `Sat Nov 21 19:54:33 2026 -0500` *(correo personal omitido en prosa pública)*
 - **Mensaje:** `docs(governance): promote post-reversal incident history, decision register and git standard`
 - **Estadística de diff (`main..HEAD`):** `7 files changed, 846 insertions(+)`, **`0` modificaciones sobre archivos previos, `0` eliminaciones**.
 - **Alcance técnico verificado (`git diff --name-status main..HEAD`):** `0` cambios en código fuente (`backend/`, `frontend/`, `workers/`), `0` cambios SQL, `0` migraciones, `0` cambios de dependencias/lockfiles (`package*.json`, `requirements.txt`), `0` cambios de infraestructura y `0` trabajo de `WS-R2.0`.
@@ -75,15 +75,15 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 
 ## 5. Validación Independiente de los Siete Documentos Promovidos
 
-| Archivo promovido (`01f16e9a`) | Bytes / SHA-256 verificado | Secretos (`secret=0`) | Duplicado en `main` (`MAIN_DUP=0`) | Rutas locales de máquina (`WIN_PATHS`) / `file:///` | Evaluación independiente |
+| Archivo promovido (`01f16e9a`) | Bytes / SHA-256 verificado | Secretos (`secret=0`) | Duplicado en `main` (`MAIN_DUP=0`) | Rutas de estación / URLs locales en copia original | Evaluación independiente |
 |---|---|---|---|---|---|
-| `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md` | `26,654` B \| `CF2CB4EEA314D0DA9A8F83AA5ACDDA896C429D3CED8BF5AE2CE1C067686D898D` | `0` | `0` | `0` raw / `18` `file:///` | Copia exacta del registro `#2` en `feature` y respaldo (`MATCH=True`). Sus `18` `file:///` apuntan a reportes Phase R2 en raíz de `main` (portabilidad limitada fuera del equipo local). |
-| `docs/governance/BETHESDA_WORSHIP_STUDIO_GIT_WORKFLOW_STANDARD.md` | `8,056` B \| `E72B1D23EBB4CFD1666636CE3EDE991535D8940379E61718DAF6BE5366B8E2C1` | `0` | `0` | `0` raw / `0` `file:///` | Totalmente limpio y portable. No contradice procedimientos Git; contiene observaciones menores revisadas en Sección 8. |
-| `docs/governance/BETHESDA_WORSHIP_STUDIO_GIT_GOVERNANCE_RECOVERY_AND_PROMOTION_REPORT.md` | `11,347` B \| `C5327F24B6D31FA0081964C0A92F1A3C2C8011CC2FE046A83BB871ED9DD5384F` | `0` | `0` | `1` raw (`C:\Users\Public\Documents\...`) + raíz `C:/Users/...` | Documenta fielmente Preflight, respaldo `11/11` y veredicto `CONDITIONAL PASS`. Incluye ruta explícita de respaldo externo exigida por trazabilidad. |
-| `docs/governance/BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md` | `8,613` B \| `8A139B4438C95D647CA1711ED02BB89D36D76133AC832EAE22AC37BA5F7FBA4C` | `0` | `0` | `4` raw (`C:\Users\Public\Documents\...` y ejemplos) | Inventario íntegro de los `11` documentos fuente + los `7` promovidos. Verificado sin contradicciones. |
-| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md` | `12,096` B \| `7BAF0067B687C67BBC76971A108DBF8F885242E5B43C330B9CD6DF08E4BDD05F` | `0` | `0` | `0` raw / `1` `file:///` | Copia byte a byte idéntica a `feature` y respaldo (`MATCH=True`). `0` datos privados sensibles. |
-| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_GIT_SAFE_RECOVERY_REPORT.md` | `8,209` B \| `ED3FB2C7737626EAC279AE3AE873B1C6128FD88B08B76C952DA086745A2B11DC` | `0` | `0` | `3` raw (`C:\Users\juan\...`, `C:\Users\juanc\...`) / `1` `file:///` | Copia byte a byte idéntica (`MATCH=True`). Sus rutas son evidencia histórica del diagnóstico de ruta en recuperación; enlace interno a `#3` apunta al nombre raíz previo. |
-| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_POST_REVERSAL_RECONCILIATION_AUDIT.md` | `23,024` B \| `14723E655536DC354869347431B9AB3D4636169889E9082B429847DE0DF03E02` | `0` | `0` | `1` raw (`c:\Users\juanc\OneDrive\...`) / `0` `file:///` | Copia byte a byte idéntica (`MATCH=True`). Cierre probatorio del incidente; expone únicamente la ruta de carpeta del proyecto local como evidencia histórica. |
+| `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md` | `26,654` B \| `CF2CB4EEA314D0DA9A8F83AA5ACDDA896C429D3CED8BF5AE2CE1C067686D898D` | `0` | `0` | `0` raw / `18` URLs locales heredadas (convertidas a enlaces relativos en revisión `2026-11-24`) | Copia exacta del registro `#2` en `feature` y respaldo (`MATCH=True`). Portabilidad corregida en revisión pública posterior. |
+| `docs/governance/BETHESDA_WORSHIP_STUDIO_GIT_WORKFLOW_STANDARD.md` | `8,056` B \| `E72B1D23EBB4CFD1666636CE3EDE991535D8940379E61718DAF6BE5366B8E2C1` | `0` | `0` | `0` raw / `0` URLs locales | Totalmente limpio y portable. No contradice procedimientos Git; contiene observaciones menores revisadas en Sección 8. |
+| `docs/governance/BETHESDA_WORSHIP_STUDIO_GIT_GOVERNANCE_RECOVERY_AND_PROMOTION_REPORT.md` | `11,347` B \| `C5327F24B6D31FA0081964C0A92F1A3C2C8011CC2FE046A83BB871ED9DD5384F` | `0` | `0` | En versión original: cita de respaldo externo privado + raíz local (sanitizadas en revisión `2026-11-24`) | Documenta fielmente Preflight, respaldo `11/11` y veredicto `CONDITIONAL PASS`. |
+| `docs/governance/BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md` | `8,613` B \| `8A139B4438C95D647CA1711ED02BB89D36D76133AC832EAE22AC37BA5F7FBA4C` | `0` | `0` | En versión original: citas de respaldo privado y ejemplos de rutas (sanitizadas en revisión `2026-11-24`) | Inventario íntegro de los `11` documentos fuente + los documentos promovidos. Verificado sin contradicciones. |
+| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_GIT_REVERT_INCIDENT_DIAGNOSTIC_REPORT.md` | `12,096` B \| `7BAF0067B687C67BBC76971A108DBF8F885242E5B43C330B9CD6DF08E4BDD05F` | `0` | `0` | `0` raw / `1` enlace local heredado (convertido a relativo en revisión `2026-11-24`) | Copia byte a byte idéntica a `feature` y respaldo (`MATCH=True`). `0` datos privados sensibles. |
+| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_GIT_SAFE_RECOVERY_REPORT.md` | `8,209` B \| `ED3FB2C7737626EAC279AE3AE873B1C6128FD88B08B76C952DA086745A2B11DC` | `0` | `0` | En versión original: `3` citas de perfil local + `1` enlace local heredado (sanitizadas en revisión `2026-11-24`) | Copia byte a byte idéntica (`MATCH=True`). Enlace a `#3` corregido a hermano relativo en revisión pública. |
+| `docs/incidents/2026-11-21-post-reversal/BETHESDA_WORSHIP_STUDIO_POST_REVERSAL_RECONCILIATION_AUDIT.md` | `23,024` B \| `14723E655536DC354869347431B9AB3D4636169889E9082B429847DE0DF03E02` | `0` | `0` | En versión original: citas de raíz local de estación (sanitizadas en revisión `2026-11-24`) | Copia byte a byte idéntica (`MATCH=True`). Cierre probatorio del incidente. |
 
 *(Hallazgo adicional verificado: `git cat-file -e HEAD:docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_UPDATED_TRACEABILITY_AND_ACCEPTANCE_MATRIX.md` devuelve `exit 128` — confirmado ausente de `docs/governance/`, evitando duplicación).*
 
@@ -96,7 +96,7 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 3. **Versión en rama documental `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`):** Idéntica a `main` en raíz (`blob e2ccebc15104936968c39f36678d93e9f539b4fb`) y **ausente en `docs/governance/`** (`exit 128`).
 4. **Diferencia real exacta (`git diff main feature/phase-1a-core-foundation`):**
    - Línea `-Verified HEAD SHA: d93534429039c0ad59da9c4fedd8e714f904eed9 ...` → `+Verified HEAD SHA: 765a6312780ae155be3be7b2e19cbebbb56856c5 ...`
-   - Línea nueva añadida en `Required Approvals & Companion Deliverables`: `+  - [WS-R2.0 Project Owner Decision Register & Remediation Execution Plan](file:///.../BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md)`
+   - Línea nueva añadida en `Required Approvals & Companion Deliverables`: añade un enlace local de estación hacia [`WS-R2.0 Project Owner Decision Register & Remediation Execution Plan`](BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md) *(originalmente con esquema local de estación en el delta de `feature/phase-1a-core-foundation`, apuntando a raíz)*
 5. **Naturaleza de la diferencia:** **NO es solo formato; es una actualización sustantiva menor de trazabilidad** (actualiza el SHA de referencia de Fase R2 al commit de cierre de PR `#1` `765a6312` y enlaza oficialmente el Registro de Decisiones `#2`).
 6. **¿Promoverlo a `docs/governance/` crearía duplicación?** **Sí**, mientras siga existiendo `BETHESDA_WORSHIP_STUDIO_PHASE_R2_UPDATED_TRACEABILITY_AND_ACCEPTANCE_MATRIX.md` en la raíz de `main`, habría dos versiones divergentes en el repositorio.
 7. **¿Es mejor actualizar la versión en raíz?** **Sí**, porque todas las referencias R2 previas (`WS_R2_0_FINAL_CERTIFICATION_AND_BLOCKERS_REPORT.md` y demás documentos raíz) apuntan allí y evita romper rutas o reubicar en masa archivos de `main`. *Nota importante:* Si `#2` permanece en `docs/governance/` (como en `01f16e9a`), al actualizar la matriz raíz conviene corregir ese único enlace en la matriz raíz para apuntar a `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md` (en lugar de la raíz).
@@ -108,7 +108,7 @@ La rama `docs/git-governance-and-post-reversal-recovery` (`01f16e9a`) es **segur
 ## 7. Evaluación de Retiro de `feature/phase-1a-core-foundation`
 
 - **Commits únicos frente a `main` (`3 1`):** `953bb61`, `58a3cc7`, `efd1edc` (`11` documentos Markdown cambiados; `0` código/BD/migraciones/dependencias).
-- **Respaldo externo:** Los `11/11` documentos están respaldados con coincidencia binaria exacta (`EXACT_BIN = True`) en `C:\Users\Public\Documents\BETHESDA_WORSHIP_STUDIO_LOCAL_DOCS_BACKUP_20261121`.
+- **Respaldo externo:** Los `11/11` documentos están respaldados con coincidencia binaria exacta (`EXACT_BIN = True`) en el **respaldo externo privado de evidencia** (*private external evidence backup*).
 - **Pendientes en la rama:**
   1. Los `7` documentos del nuevo lote dependen de que el PR de `docs/git-governance-and-post-reversal-recovery` se fusione en `main`.
   2. El delta `+2/-1` de `#1` (Categoría D) sigue únicamente en `feature/phase-1a-core-foundation` (y en el respaldo externo), aún sin promover a `main`.
@@ -147,7 +147,7 @@ Estado actual verificado (`API REST`): **`PROTECTED = False`**, **`GH_RULESETS_M
 1. **`main` aún desprotegido (`PROTECTED = False`, `0` rulesets):** Cualquier push directo o error de interfaz sigue siendo técnicamente posible hasta activar protección tras el PR.
 2. **PR documental pendiente de creación y merge:** Los `7` documentos promovidos siguen solo en `docs/git-governance-and-post-reversal-recovery`, no aún en `main`.
 3. **Categoría D (`#1`) aún pendiente:** Si se retirara `feature/phase-1a-core-foundation` antes de decidir `#1`, su delta `+2/-1` quedaría solo en respaldo externo.
-4. **Rutas de estación local en archivos históricos y enlaces `file:///c:/Users/juanc/...`:** Aunque no contienen credenciales (`SECRETS = 0`), algunos documentos en `docs/incidents/` y `#2` mantienen enlaces `file:///` absolutos locales o citas de carpeta (`C:\Users\juanc\...`) que no son portables para colaboradores externos.
+4. **Rutas de estación local y enlaces locales heredados (estado del `2026-11-21`, sanitizado en `2026-11-24`):** Aunque no contenían credenciales (`SECRETS = 0`), las versiones originales de `docs/incidents/` y `#2` incluían enlaces absolutos locales (`<legacy-local-workspace-url>`) o citas de carpeta local (`<local-workstation-path>`) no portables fuera del entorno de verificación local *(sanitizados en la revisión pública del `2026-11-24`)*.
 5. **Caché local residual `remotes/origin/revert-1-feature/phase-1a-core-foundation` (`766650c`):** Persiste localmente hasta ejecutar `git fetch --prune origin` autorizado.
 6. **`BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md` sin seguimiento:** Este nuevo reporte queda en árbol local (`??`) conforme al alcance estrictamente de solo lectura autorizado.
 
@@ -202,3 +202,15 @@ Estado actual verificado (`API REST`): **`PROTECTED = False`**, **`GH_RULESETS_M
    - **Diferencias en `backend/` frente a `main` (`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`):** **`0`** (vacío).
 3. **Impacto funcional vs impacto de gobernanza:** El espacio adicional en el constructor vacío de `AuthGuard` (`) {}` vs `) { }`) tuvo **impacto funcional nulo** sobre DI, JWT HS256, `tokenVersion`, bloqueos o RBAC, pero constituyó un **incumplimiento de gobernanza bloqueante (`FAIL` forense)** por alterar fuera de alcance el SHA-256 de un archivo de seguridad y contradecir el alcance exclusivamente documental del PR; dicho bloqueo queda subsanado mediante restauración binaria exacta hacia adelante.
 4. **Pruebas en tiempo de ejecución no ejecutadas:** Ni la auditoría forense ni esta reconciliación ejecutaron compilación TypeScript (`tsc`) ni pruebas automatizadas de seguridad/autenticación; dichas pruebas no se reportan como ejecutadas ni aprobadas. Si el Project Owner desea validación en tiempo de ejecución adicional, debe solicitarla como verificación separada.
+
+---
+
+## 16. Nota Fechada de Sanitización de Privacidad Opción B, Reubicación y Alcance PR `#2` (`2026-11-24`)
+
+> **Preservación de evidencia original:** La versión previa sin sanitizar de este documento confirmada en `cc9aec18c62b0bdd0710d37ea679af6513eca06d` (SHA-256 `24CC4590AB92585D38E310BDCDF8831F3E1EC26B54877F71963C812F22A7BF39`, y su versión inicial `244f0ef7` SHA-256 `33E1C832FEECAB4C7F60404DFE73CAF7436A1EF0C0BDC8A28702326413CFCF78`) permanece preservada en el historial Git; los `11` documentos fuente originales de `feature/phase-1a-core-foundation` continúan íntegros y verificados por SHA-256 en el **respaldo externo privado de evidencia** (*private external evidence backup*).
+
+1. **Autorización Opción B del Project Owner (`2026-11-24`):** Autorizada únicamente la sanitización de privacidad pública, conversión de enlaces locales a enlaces relativos, reubicación de este documento y actualización documental de PR `#2` (sin autorizar merge de PR `#2`, modificación de `main`, eliminación de `feature/phase-1a-core-foundation`, `POD-01`–`POD-05`, `GATE 2`, `WS-R2.0` ni `Phase 2B.1`).
+2. **Reubicación ejecutada (`git mv`):** Este archivo fue trasladado desde la raíz del repositorio a su ubicación definitiva única `docs/governance/BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md` (`0` copias residuales en raíz).
+3. **Sanitización aplicada:** Se removieron rutas de estación Windows, nombre de usuario local, ubicación física del respaldo externo, ejemplos de URLs locales y el correo personal en Sección 3 (`L47`).
+4. **Inventario final actualizado de PR `#2`:** Tras esta remediación y la incorporación de [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md), PR `#2` comprende **`11` archivos Markdown (`*.md`)** y **`0` archivos de código fuente** (`backend/src/interfaces/http/middlewares/auth-middleware.ts` permanece byte a byte idéntico a `main`).
+5. **Trazabilidad de SHAs:** `HEAD` previo de PR `#2` = `cc9aec18c62b0bdd0710d37ea679af6513eca06d`; el SHA del nuevo commit correctivo único se registra tras su creación en la descripción de PR `#2` y en la matriz final de aceptación. Véanse [`BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md`](BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md) y [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md).

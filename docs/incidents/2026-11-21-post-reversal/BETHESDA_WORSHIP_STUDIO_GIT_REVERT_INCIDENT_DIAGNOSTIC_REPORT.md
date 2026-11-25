@@ -69,7 +69,7 @@ Merging `766650c` produces an exact snapshot identical to `36979be` (Phase 0E-R)
 ### Specific Critical Capabilities Destroyed If Merged
 1. **Database Schema & Migrations (`20` files):** Deletes `18` migration files (`0007` through `0020`, including all `.down.sql` rollbacks and CAS `0018`/`0019` state machine fixes certified in R1), deletes `meta/0007_snapshot.json`, and reverts `meta/_journal.json` back to `0006`.
 2. **Phase R1 Security, Build & RBAC Hardening (`11` route files, `14` services, `3` build/pkg files):**
-   - Deletes [`backend/tsconfig.build.json`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/tsconfig.build.json) and reverts `backend/package.json` (breaking `npm --prefix backend run build` & `start` fixed in R1.6/R1.7!).
+   - Deletes [`backend/tsconfig.build.json`](../../../backend/tsconfig.build.json) and reverts `backend/package.json` (breaking `npm --prefix backend run build` & `start` fixed in R1.6/R1.7!).
    - Deletes routes `conversion.routes.ts`, `ingestion.routes.ts`, `omr.routes.ts`, `worship-service.routes.ts` and reverts R1 `tokenVersion`/RBAC/IDOR fixes in `audio`, `auth`, `document`, `multitrack`, `realtime`, `setlist`, and `song` routes.
    - Deletes `audio-transcription-service.ts`, `conversion-job-service.ts`, `conversion-worker.ts`, `musical-content-completion-service.ts`, `output-retention-service.ts`, `universal-ingestion-service.ts`, and `worship-service-service.ts`, while reverting `auth-service.ts`, `token-service.ts`, `audio-service.ts`, `setlist-service.ts`, and `stream-ticket-service.ts`.
 3. **Entire Python Audio Worker (`workers/` — `7` files deleted):** Deletes `main.py`, `audio_analyzer.py`, `audio_inspector.py`, `signature_inspector.py`, `requirements.txt`, `tests/fixtures.py`, and `tests/test_worker.py` (`18/18` passing).
@@ -105,3 +105,10 @@ Merging `766650c` produces an exact snapshot identical to `36979be` (Phase 0E-R)
 
 - Zero Git commands were executed that modified refs, branches, history, or tracked files (no merge, no revert, no `git reset`, no `git rebase`, no `git push`, no branch deletion, no `git add`, no `git commit`).
 - Zero application code, database schemas, migrations, dependencies, `.gitignore`, or `.env` files were touched; the 2 prior `WS-R2.0` planning/traceability edits present before this diagnostic were left completely untouched.
+
+---
+
+## 6. Public Privacy Sanitization & Forensic Provenance Note (`2026-11-24`)
+
+- **Distinction between original private evidence and sanitized public revision:** The original byte-identical diagnostic report dated `2026-11-21` (SHA-256 `7BAF0067B687C67BBC76971A108DBF8F885242E5B43C330B9CD6DF08E4BDD05F`) is retained unmodified in the **private external evidence backup** and in Git commit `01f16e9aa0ef9c456a7fefa5f8cf87a501b4a9f4`.
+- **Sanitization applied under Option B authorization (`2026-11-24`):** Replaced the single non-portable local file URI link referencing `backend/tsconfig.build.json` with a repository-relative Markdown link (`../../../backend/tsconfig.build.json`). All forensic findings (`REVERT IS DANGEROUS — DO NOT MERGE`), SHAs, counts, and GitHub committer provenance (`GitHub <noreply@github.com>`) remain historically unchanged. See [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](../../governance/BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md).

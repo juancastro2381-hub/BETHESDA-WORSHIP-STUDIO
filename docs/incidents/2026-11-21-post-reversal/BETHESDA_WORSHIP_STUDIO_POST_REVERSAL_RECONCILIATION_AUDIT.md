@@ -28,8 +28,8 @@ Inspección verificada sin ejecutar mutaciones sobre el repositorio ni sobre el 
 
 | Concepto | Valor verificado |
 |---|---|
-| **Raíz local reportada por Git** | `C:/Users/juanc/OneDrive/Documentos/Desarrollo proyectos/Sistema Musical - Partituras/BETHESDA WORSHIP STUDIO` |
-| **Ruta activa del espacio de trabajo (Windows)** | `c:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO` |
+| **Raíz local reportada por Git** | `local verification environment (Git --show-toplevel, sanitized)` |
+| **Ruta activa del espacio de trabajo (Windows)** | `local repository workspace root (sanitized)` |
 | **Rama local activa (`HEAD`)** | `feature/phase-1a-core-foundation` |
 | **SHA exacto de `HEAD`** | `765a6312780ae155be3be7b2e19cbebbb56856c5` |
 | **Remoto `origin` (fetch)** | `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git` |
@@ -179,7 +179,7 @@ Para transicionar sin riesgos desde este estado verificado hacia la reanudación
 Todas las comprobaciones se ejecutaron en modo estrictamente de solo lectura:
 
 - **Identificación y referencias locales/remotas:**
-  - `git rev-parse --show-toplevel` → `C:/Users/juanc/OneDrive/Documentos/Desarrollo proyectos/Sistema Musical - Partituras/BETHESDA WORSHIP STUDIO`
+  - `git rev-parse --show-toplevel` → `<local-repository-workspace-root>` (verified inside local verification environment)
   - `git rev-parse --abbrev-ref HEAD` → `feature/phase-1a-core-foundation`
   - `git rev-parse HEAD` → `765a6312780ae155be3be7b2e19cbebbb56856c5`
   - `git remote -v` → `origin https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git (fetch/push)`
@@ -206,3 +206,10 @@ Todas las comprobaciones se ejecutaron en modo estrictamente de solo lectura:
 1. **Auditoría exclusivamente de solo lectura a nivel de repositorio Git y árbol de trabajo:** no se ejecutaron `git fetch --prune`, `git merge`, `git commit`, `git push`, `git fsck`, cambios de rama ni ediciones sobre archivos existentes.
 2. **Sin ejecución de compilación, pruebas ni servicios en tiempo de ejecución:** durante esta auditoría no se ejecutaron compilaciones de TypeScript/Vite, pruebas automatizadas, workers de Python ni conexiones a PostgreSQL; la preservación funcional documentada corresponde a la integridad exacta de los objetos y árboles en Git y no sustituye las compuertas técnicas y de pruebas de `WS-R2.0`.
 3. **Verificación de 21 rutas críticas combinada con igualdad criptográfica de árbol (`Tree SHA`):** si bien la inspección puntual con `git cat-file -e` cubrió 21 rutas representativas de backend, base de datos, audio worker, frontend y documentación, la identidad del `Tree SHA` (`29f0e6862332a0eb0fb0b27b75c6cd197e54e00e`) garantiza criptográficamente que el conjunto completo de archivos comprometidos en `main` es idéntico al de `feature/phase-1a-core-foundation`.
+
+---
+
+## 11. Nota de Sanitización Pública de Privacidad y Trazabilidad Forense (`2026-11-24`)
+
+- **Distinción entre evidencia privada original y revisión pública sanitizada:** La versión original íntegra de esta auditoría (fechada `2026-11-21`, SHA-256 `14723E655536DC354869347431B9AB3D4636169889E9082B429847DE0DF03E02`) se conserva sin modificaciones en el **respaldo externo privado de evidencia** (*private external evidence backup*) y en el historial Git previo (`01f16e9a`–`cc9aec18`).
+- **Sanitización ejecutada bajo autorización Opción B (`2026-11-24`):** Se reemplazaron únicamente las citas de ruta de estación de trabajo local en la Sección 2 (`L31–32`) y en la Sección 9 (`L182`) por descripciones neutrales (`local repository workspace root (sanitized)`), preservando íntegros los hechos históricos, SHAs y hallazgos. Véase [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](../../governance/BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md).

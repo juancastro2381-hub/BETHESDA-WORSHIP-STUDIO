@@ -15,7 +15,7 @@
 
 Antes de ejecutar cualquier mutación de rama o archivo se verificaron en modo estrictamente de solo lectura los 16 puntos de control:
 
-1. **Identidad y raíz del repositorio:** `C:/Users/juanc/OneDrive/Documentos/Desarrollo proyectos/Sistema Musical - Partituras/BETHESDA WORSHIP STUDIO`, remoto `origin` = `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`. GitHub API pública confirma `PRIVATE = False`, `DEFAULT_BRANCH = main`.
+1. **Identidad y raíz del repositorio:** `local repository workspace root (sanitized)`, remoto `origin` = `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`. GitHub API pública confirma `PRIVATE = False`, `DEFAULT_BRANCH = main`.
 2. **Estado real observado al inicio del Preflight (diferencia explicada frente al reporte previo):**
    - `main` local y `origin/main` sincronizados en **`97ae7c6039aa208beb5a64c6592fba0085ba0d1d`** (`0 0`).
    - `feature/phase-1a-core-foundation` y `origin/feature/phase-1a-core-foundation` se encontraban sincronizados (`0 0`) en **`efd1edc83d6a5dd15a304acc061985109983c6ff`**, es decir, **`3` commits por delante y `1` por detrás de `main`** (`11` documentos Markdown cambiados: `+1,755 / -1` líneas). Esto se explicó de forma totalmente segura y trazable: el Project Owner confirmó en `efd1edc8` (`19:46:31`) los `3` informes de estandarización de flujo generados previamente sobre `58a3cc7e` (`18:36:24`) y `953bb612` (`17:58:43`).
@@ -25,13 +25,13 @@ Antes de ejecutar cualquier mutación de rama o archivo se verificaron en modo e
    - **Pull Request `#1`:** único PR histórico (`state = closed`, `merged_at = 2026-11-21T21:56:14Z`, base `main`, merge SHA `97ae7c60`, head `765a6312`). `0` PRs abiertos actualmente.
    - **Protección de ramas y *Rulesets* en GitHub:** `PROTECTED = False` tanto en `main` como en `feature/phase-1a-core-foundation`; `rules/branches/main` devolvió **`0` rulesets**.
    - **Referencia caché local residual:** Persiste localmente `remotes/origin/revert-1-feature/phase-1a-core-foundation` (`766650c`), confirmada **inexistente en GitHub** (`git ls-remote origin`).
-4. **Estado inicial del respaldo externo (`C:\Users\Public\Documents\BETHESDA_WORSHIP_STUDIO_LOCAL_DOCS_BACKUP_20261121`):** Existente fuera de todo `.git`, con los primeros `5/5` archivos verificados y `6` documentos posteriores aún sin copiar antes de Fase 2.
+4. **Estado inicial del respaldo externo (`private external evidence backup`):** Existente fuera de todo árbol Git (`rev-parse --show-toplevel` salida `128`), con los primeros `5/5` archivos verificados y `6` documentos posteriores aún sin copiar antes de Fase 2 *(ubicación física omitida de la documentación pública por privacidad)*.
 
 ---
 
 ## 2. Completamiento y Verificación del Respaldo Externo (Fase 2)
 
-Se completó sin sobrescribir archivos existentes el respaldo en `C:\Users\Public\Documents\BETHESDA_WORSHIP_STUDIO_LOCAL_DOCS_BACKUP_20261121` (`git -C ... rev-parse --show-toplevel` salida `128`, fuera de cualquier `.git`):
+Se completó sin sobrescribir archivos existentes el respaldo en el **respaldo externo privado de evidencia** (`private external evidence backup`, comprobado fuera de cualquier árbol Git):
 - `5` archivos previos (`#1`–`#5`): intactos (`SKIPPED_EXISTING`, `MATCH=True`).
 - `6` archivos faltantes (`#6`–`#11`): copiados y verificados por longitud de bytes y SHA-256 (`COPIED_NEW`, `MATCH=True`).
 - **Resultado global:** **`11/11` documentos con `ALL_MATCH=True`** (inventario íntegro con SHA-256 detallado en [`BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md`](BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md)).
@@ -119,3 +119,13 @@ Dado que `main` tiene actualmente **`PROTECTED = False`** y **`0` rulesets**, se
 2. **Alcance final neto del PR (`main..HEAD`):** **`10` archivos Markdown (`*.md`)** y **`0` archivos de código fuente** (`git diff main..HEAD -- backend/` vacío). Ningún archivo de aplicación, SQL, migración, dependencia, prueba o infraestructura presenta diferencias frente a `main`.
 3. **Impacto funcional frente a impacto de gobernanza:** La anomalía de un espacio en el constructor vacío de `AuthGuard` tuvo **impacto funcional y de seguridad en ejecución nulo** (misma semántica AST sin cambios en DI, JWT HS256, `tokenVersion`, bloqueos ni RBAC), pero representó una **violación de gobernanza de alcance** al tocar código crítico de seguridad y cambiar su SHA-256 en un PR documental, ahora totalmente restaurado por paridad binaria.
 4. **Pruebas no ejecutadas:** Ni la auditoría forense ni esta reconciliación ejecutaron compilación TypeScript (`tsc`) ni pruebas de seguridad/autenticación en tiempo de ejecución; no se afirma que dichas pruebas hayan pasado. Cualquier compilación o prueba de seguridad adicional permanece como validación independiente opcional fuera del alcance documental. `WS-R2.0` sigue **NO AUTORIZADO / NO INICIADO**.
+
+---
+
+## 11. Nota Fechada de Sanitización de Privacidad Opción B y Alcance Final PR `#2` (`2026-11-24`)
+
+> **Preservación de evidencia original:** Los `11` documentos fuente originales de `feature/phase-1a-core-foundation` permanecen sin alteración, renombre ni sobrescritura en el **respaldo externo privado de evidencia** (`11/11` verificados por SHA-256), y las revisiones documentales previas al saneamiento siguen intactas en el historial Git hasta `cc9aec18c62b0bdd0710d37ea679af6513eca06d`.
+
+1. **Autorización Opción B del Project Owner:** Se sanitizaron en este documento las citas de raíz de estación (`Sección 1`) y ubicación física del respaldo externo privado (`Secciones 1 y 2`) para permitir publicación segura en este repositorio público (`PRIVATE = False`).
+2. **Reubicación e inventario actualizado del PR `#2` (`main..HEAD`):** Con el traslado de [`BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md`](BETHESDA_WORSHIP_STUDIO_FINAL_DOCUMENTARY_PROMOTION_ACCEPTANCE_REVIEW.md) hacia `docs/governance/` y la incorporación del informe maestro [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md), PR `#2` contiene ahora **`11` archivos Markdown (`*.md`)** y **`0` archivos de código fuente** (zero diferencias bajo `backend/`, `auth-middleware.ts` idéntico byte a byte a `main`).
+3. **Valores SHA-256 y commit correctivo:** La tabla comparativa de hashes SHA-256 originales frente a las revisiones públicas sanitizadas consta en [`BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md`](BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md) y en [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md); el SHA del commit correctivo creado a partir de `cc9aec18c62b0bdd0710d37ea679af6513eca06d` se registra inmediatamente tras el commit en la descripción de PR `#2`. **`WS-R2.0`, `Phase 2B.1`, `POD-01`–`POD-05`, `GATE 2` y Categoría D siguen estrictamente NO autorizados.**

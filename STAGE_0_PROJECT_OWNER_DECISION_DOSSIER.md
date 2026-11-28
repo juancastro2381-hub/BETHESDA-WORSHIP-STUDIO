@@ -3,8 +3,8 @@
 - **Date & Timezone:** `2026-11-27` (`UTC-05:00`) *(Project Owner Formal Approvals recorded `2026-11-27`)*
 - **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`
 - **Authoritative Branch & HEAD SHA:** `docs/stage-0-governance-and-master-plan` branched from `main` @ `98919fe85d2c656076426d0a43a1222f9a752465`
-- **Evidence References:** `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` (v1.2), `MASTER_FINDINGS_AND_ROOT_CAUSE_MATRIX.md` (v1.2), `MASTER_RISK_AND_REGRESSION_REGISTER.md` (v1.2), `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md`, and Stage 0 Specialist & Independent Challenge Reports (`Agents 1, 4, 5, 6, 9, 10`).
-- **Approval Status:** **`PROJECT OWNER APPROVED — 2026-11-27` (`POD-01` through `POD-09` and `OI-01` formally approved; `GATE 1` Stage 0 governance closure authorized ONLY; `GATE 2`–`GATE 8` remain `[ ]` LOCKED / `NOT AUTHORIZED`)**
+- **Evidence References:** `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` (v1.3), `MASTER_FINDINGS_AND_ROOT_CAUSE_MATRIX.md` (v1.2), `MASTER_RISK_AND_REGRESSION_REGISTER.md` (v1.2), `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md`, Stage 0 Specialist & Independent Challenge Reports (`Agents 1, 4, 5, 6, 9, 10`), live PR `#3`, and active Ruleset `#28275963`.
+- **Approval Status:** **`PROJECT OWNER APPROVED — 2026-11-27` (`POD-01` through `POD-09` and `OI-01` formally approved; `GATE 1: PASS` verified — PR `#3` OPEN at `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`, Ruleset `#28275963` ACTIVE; `GATE 2`–`GATE 8` remain `[ ]` LOCKED / `NOT AUTHORIZED`)**
 
 ---
 
@@ -234,3 +234,4 @@
 ### Version & Change History
 - **v1.0** — `2026-11-27` (`UTC-05:00`) — Initial Stage 0 Project Owner Decision Dossier covering all `12` required dimensions per POD, interaction matrix, Category D 3 options, `POD-09` Core/Deferred/Dead split, and Open Item `OI-01`.
 - **v1.1** — `2026-11-27` (`UTC-05:00`) — Recorded formal `PROJECT OWNER APPROVED` selections (`[x]`) for `POD-01` through `POD-09` and `OI-01` under `GATE 1` (`2026-11-27`), added explicit implementation follow-up task list without fabricating provider choices, and kept `GATE 2`–`GATE 8` locked.
+- **v1.2** — `2026-11-27` (`UTC-05:00`) — Recorded independent **`GATE 1: PASS`** verification: Pull Request `#3` (`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`) verified OPEN/unmerged and GitHub Ruleset `#28275963` (`BETHESDA - Protect Main`) verified active on `main`. `GATE 2`–`GATE 8` remain strictly locked / `NOT AUTHORIZED`.

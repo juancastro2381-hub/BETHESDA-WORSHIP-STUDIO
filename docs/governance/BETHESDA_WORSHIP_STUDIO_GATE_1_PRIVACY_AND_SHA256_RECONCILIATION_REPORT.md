@@ -78,3 +78,34 @@
    - `BETHESDA_WORSHIP_STUDIO_COMPREHENSIVE_PRODUCT_AND_FUNCTIONAL_AUDIT.md` (untracked prior local diagnostic report) was intentionally excluded from `git add` and remains untracked outside PR `#3`.
 4. **Git History Boundary:**
    - All remediations on `docs/stage-0-governance-and-master-plan` are forward-only commits on `HEAD`. Prior public commits (`2730ed6..98919fe8`) retain original history unless Project Owner explicitly authorizes a separate Git history rewrite.
+
+---
+
+## 5. `GATE 1` Independent Revalidation & `PASS` Addendum (`2026-11-27`)
+
+Following Project Owner submission, live public GitHub REST API (`X-GitHub-Api-Version: 2022-11-28`) and `git ls-remote origin` checks independently verified:
+
+1. **Pull Request `#3` Live Verification:**
+   - **URL:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3` (`refs/pull/3/head` == `c9ca01adb97adc6a33a4d6808bd179beee3af2c7` prior to this addendum commit; updated automatically on push to `docs/stage-0-governance-and-master-plan`).
+   - **State / Merge Status:** `open`, `merged: false`, `draft: false`, `mergeable: true`, `mergeable_state: clean`.
+   - **Source / Target:** `docs/stage-0-governance-and-master-plan` → `main` (`98919fe85d2c656076426d0a43a1222f9a752465`).
+   - **Diff Integrity:** `27` `.md` files only (`0` non-`.md` files).
+2. **Active Branch Protection Ruleset Verification (`main`):**
+   - `GET /branches/main` confirms `protected: true` (`required_status_checks.enforcement_level: "off"`).
+   - Active Ruleset **`#28275963`** — **`BETHESDA - Protect Main`** (`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/rules/28275963`, `enforcement: active`, `target: branch`) enforces on `main`:
+     - `deletion` (Restrict deletions — enabled)
+     - `non_fast_forward` (Block force pushes — enabled)
+     - `pull_request` (`required_approving_review_count: 0`, `allowed_merge_methods: ["merge","squash","rebase"]` — enabled)
+     - Zero required status checks (intentionally disabled during Stage 0).
+3. **Updated `GATE 1: PASS` Documents Preserving Commit `c9ca01a` Hashes:**
+   - Sections 1–4 above remain unchanged so all pre-sanitization (`98919fe8`) and Commit `#1` (`c9ca01a`) hashes stay intact. The `5` governance/master documents updated in forward-only Commit `#2` to record **`GATE 1: PASS`** and `PR #3` / Ruleset `#28275963` evidence are:
+
+| Document Path | Commit `#1` (`c9ca01a`) Git OID & SHA-256 | Updated `GATE 1 PASS` Version, Bytes & SHA-256 |
+|---|---|---|
+| `STAGE_0_GATE_PREREQUISITES_AND_ACCEPTANCE_MATRIX.md` | `8861128e355b780e181bb4c6f365f6a3ec90489f` (`21,146` B / `DA622BC36B26F0B0411836EEAE42EB66A01F0BCC84DFDBB3E803100EF5B267AD`) | `v1.2`: `22,282` B / `069C48ABE3310B0CF542C479DFB78F7A3B085BE5B1D70BC20F88D7795D8CECEC` |
+| `STAGE_0_PROJECT_OWNER_DECISION_DOSSIER.md` | `da91ca2a46d0808f5df777a52e7219ad3398e75e` (`32,927` B / `9FCE044E6174B7E1ADA39EFE18AFA4899DB0306AA4716805E5398F9C05490D04`) | `v1.2`: `33,423` B / `ECB565A5B9A4D5252405E251158651129666065607B7A9D697959512FB1B69E3` |
+| `STAGE_0_REPOSITORY_AND_CERTIFICATION_BASELINE.md` | `cd76c1c476600eda53eced50914bbd6588ff80a1` (`19,413` B / `9101289E1A4F71C2B72B749021A9EC942616BB7FA275BEA0B2230431E1B8BCF6`) | `v1.2`: `20,183` B / `A09B7D8C2DF913E07DA6A83A62C043EB6C206FD31C2CBF6BBA7C7CBF787679F5` |
+| `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` | `54c791970d6c8cbbba75a4eb3b68bc05858a3226` (`19,766` B / `1CE5B8ACEBBCB47C4360BD46063F78AB3FE753896E3623F1284BDE851A231D27`) | `v1.3`: `20,348` B / `B05AAB1BB620CCEE80869CD0745168BF0DA3FE60A67DF4B9D3B6C21B1DCE5267` |
+| `MASTER_MULTI_AGENT_ARCHITECTURE_AND_EXECUTION_PLAN.md` | `b2361f20e598624f946fe4bc876b04cd943db7f4` (`21,407` B / `3E1AB6FBF5F53F1A9756CA9E49AA8F1FECFC561E67F3B4EA471B07FE6B32A75D`) | `v1.3`: `21,983` B / `87BE41910D7C503E7323BD69EC713AE2833CC945F338F4B4463980B27315FA8E` |
+| `docs/governance/BETHESDA_WORSHIP_STUDIO_GATE_1_PRIVACY_AND_SHA256_RECONCILIATION_REPORT.md` | `cd6e2d00021053c0eaf5d2e2f1abfb3b87acdfac` (`12,904` B / `57BBFA647B076C988CDE5F27FE9A2E753521423292EAB9C5CF65E6C7AB9DD52D`) | `v1.1` *(this addendum; final digest recorded in `BETHESDA_WORSHIP_STUDIO_GATE_1_FINAL_ACCEPTANCE_REPORT.md`)* |
+

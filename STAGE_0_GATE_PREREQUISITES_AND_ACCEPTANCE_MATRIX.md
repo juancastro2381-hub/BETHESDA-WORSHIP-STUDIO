@@ -3,8 +3,8 @@
 - **Date & Timezone:** `2026-11-27` (`UTC-05:00`)
 - **Repository:** `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO.git`
 - **Authoritative Branch & HEAD SHA:** `main` @ `98919fe85d2c656076426d0a43a1222f9a752465`
-- **Evidence References:** `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` (v1.2 Section 3), `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md:147-158`, `MASTER_TEST_AND_ACCEPTANCE_STRATEGY.md` (v1.2), Agents 4, 8, 9, and 10 Stage 0 reports, and Project Owner `2026-11-27` Formal Decision Ratification.
-- **Approval Status:** `STAGE 0 GATE 1: PROJECT OWNER APPROVED (2026-11-27) | GATE 2–GATE 8: STRICTLY [ ] LOCKED / NOT AUTHORIZED`
+- **Evidence References:** `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` (v1.3 Section 3), `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md:147-158`, `MASTER_TEST_AND_ACCEPTANCE_STRATEGY.md` (v1.2), Agents 4, 8, 9, and 10 Stage 0 reports, Project Owner `2026-11-27` Formal Decision Ratification, live GitHub PR `#3`, and active GitHub Ruleset `#28275963`.
+- **Approval Status:** `STAGE 0 GATE 1: PASS (VERIFIED 2026-11-27 — PR #3 OPEN, Ruleset #28275963 ACTIVE) | GATE 2–GATE 8: STRICTLY [ ] LOCKED / NOT AUTHORIZED`
 
 ---
 
@@ -28,13 +28,13 @@ Previously, `docs/governance/...WS_R2_0...md:147-158` used `GATE 1`–`GATE 8` a
 - **Entry Criteria:** All `7` reconciled `MASTER_*.md` plans and `5` `STAGE_0_*.md` deliverables reviewed and approved by Project Owner.
 - **Target Deliverables:**
   1. Recorded PO approvals across `STAGE_0_*` & `MASTER_*` governance records (`POD-01`–`POD-09` + `OI-01`).
-  2. GitHub branch protection enabled/verified on `main` (Web UI: block force-push & deletion, require PR with `0` external approvals deadlock).
-  3. Clean working tree (`auth-middleware.ts:23` whitespace diff resolved cleanly with zero `.gitattributes`/app changes; post-merge prune deferred cleanly until PR #3 merge).
-  4. Docs-only PR #3 opened (`docs/stage-0-governance-and-master-plan -> main`) containing scrubbed `98919fe8`, scrubbed `14` `docs/` leaks, reconciled `"Phase 2B.1 NOT STARTED"` wording, Category D `Option C`, SHA-256 reconciliation report, and Stage 0/Master plans.
-- **Mandatory Acceptance Evidence:** Privacy regex scan across all PR #3 `.md` files returns `0` emails, `0` local file URIs, `0` OS usernames; `git diff --name-only main...HEAD` has `0` app/SQL/config files; clean `git status` on tracked code; independent GATE 1 review pass; GitHub branch protection & PR #3 UI verification.
-- **Verifier Agents:** Independent GATE 1 Auditor (`read-only`), Browser Subagent, Project Owner.
-- **Residual Actions At GATE 1 Closure:** GitHub PR #3 merge and post-merge `main` sync / `origin/revert-1` prune remain reserved for explicit Project Owner merge action.
-- **Owner Sign-Off:** `[x] Approved — Date: 2026-11-27` *(Status: `PROJECT OWNER APPROVED — STAGE 0 GATE 1 ONLY`)*
+  2. GitHub branch protection enabled and independently verified on `main`: Ruleset **`#28275963`** (`BETHESDA - Protect Main`, `enforcement: active`, `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/rules/28275963`) enforcing `deletion`, `non_fast_forward`, and `pull_request` (`required_approving_review_count: 0`, zero required status checks).
+  3. Clean working tree (`auth-middleware.ts:23` whitespace diff resolved cleanly with zero `.gitattributes`/app changes; post-merge prune deferred cleanly until PR `#3` merge).
+  4. Docs-only PR `#3` verified open and unmerged at **`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`** (`docs/stage-0-governance-and-master-plan -> main`) containing scrubbed `98919fe8`, scrubbed `14` `docs/` leaks, reconciled `"Phase 2B.1 NOT STARTED"` wording, Category D `Option C`, SHA-256 reconciliation report, and Stage 0/Master plans.
+- **Mandatory Acceptance Evidence:** Privacy regex scan across all PR #3 `.md` files returns `0` emails, `0` local file URIs, `0` OS usernames; `git diff --name-only origin/main...origin/docs/stage-0-governance-and-master-plan` has `0` app/SQL/config files; clean `git status` on tracked code; independent GATE 1 audit **PASS**; live GitHub REST API verification of active Ruleset `#28275963` & OPEN PR `#3`.
+- **Verifier Agents:** Independent GATE 1 Auditor (`read-only`), Live GitHub REST API / `git ls-remote`, Project Owner.
+- **Residual Actions At GATE 1 Closure:** GitHub PR `#3` merge and post-merge `main` sync / `origin/revert-1` prune remain reserved for explicit Project Owner merge action.
+- **Owner Sign-Off:** `[x] Approved — Date: 2026-11-27` *(Status: **`GATE 1: PASS (VERIFIED 2026-11-27 — PR #3 OPEN / UNMERGED)`**)*
 
 ---
 
@@ -48,7 +48,7 @@ Previously, `docs/governance/...WS_R2_0...md:147-158` used `GATE 1`–`GATE 8` a
   3. `fix/ws-r2-0-fe-runner`: `tsx` added to `frontend/package.json` `devDependencies` (`NF-15`), `npm --prefix frontend test` switched to `tsx --test`, `autoscroll.test.ts` `import.meta.url` CWD fix, and `browser-rendering-integration.test.ts:368-380` test `#8` fix + `LYRICS_ONLY` `capo === 0` invariant.
 - **Mandatory Acceptance Evidence:** `git ls-files backend/node_modules` === `0`; `npm --prefix backend ci && npm --prefix backend run typecheck` passes cleanly; external worktrees verified under `C:\dev\bws-wt\`; zero unapproved production feature diffs.
 - **Verifier Agents:** Agent 4, Agent 8, Agent 10, Agent 9 (`audit`).
-- **Blocking Conditions Today:** `GATE 1` unsigned; Docker daemon stopped & native PG CLI tools absent on workstation (`TASK-23864` preflight).
+- **Blocking Conditions Today:** PR `#3` awaiting Project Owner merge & separate `GATE 2` authorization; Docker daemon stopped & native PG CLI tools absent on workstation (`TASK-23864` preflight).
 - **Owner Sign-Off:** `[ ] Authorize WS-R2.0 Only — Date: ___________________` *(Status: `NOT AUTHORIZED`)*
 
 ---
@@ -133,16 +133,17 @@ Previously, `docs/governance/...WS_R2_0...md:147-158` used `GATE 1`–`GATE 8` a
   2. **Final Privacy & Config Gate:** `0` personal emails/local file URIs/OS usernames across tracked `.md`; `main` branch protection confirmed ON; `PROD` `.env` checklist verified (`NODE_ENV=production`, fail-closed SMTP, non-superuser DB runtime role, `enableTestFixture: false`).
   3. **Release Tag & Integrity Manifest:** Tagged `vX.Y.Z` on protected `main` with recorded SHA-256 checksums for built artifacts, `0000`–`0021` SQL migrations, and `requirements.lock`.
 - **Verifier Agents:** Agent 9, Agent 10, Agent 8, Project Owner.
-- **Blocking Conditions Today:** **`HARD STOP`** — blocked by `GATE 1`–`GATE 7`.
+- **Blocking Conditions Today:** **`HARD STOP`** — blocked by `GATE 2`–`GATE 7` (`GATE 1` PASS; `GATE 2+` `NOT AUTHORIZED`).
 - **Owner Sign-Off:** `[ ] Production Release Sign-Off — Date: ___________________` *(Status: `HARD STOP / NOT AUTHORIZED`)*
 
 ---
 
 ## 3. Open Decisions, Execution Locks & Version History
 
-- **Approved Foundation (`2026-11-27`):** `POD-01` (`Opt A+B Hybrid`), `POD-02` (`Opt A`), `POD-03` (`Opt B`), `POD-04` (`Opt C`), `POD-05` (`Git A1`, `FFmpeg B2`), `POD-06` (`PR #3` + `Cat D Opt C`), `POD-07` (`Opt A`), `POD-08` (`Opt C`), `POD-09` (`Defer R3+` + `ENABLE_EXPERIMENTAL_ROUTES=false`), and `OI-01` (`Opt A`) are formally approved under **`GATE 1` ONLY**. *(Pending downstream follow-up selections before execution gates: SMTP relay provider under `POD-04 Opt C` before `GATE 6`, and backup storage/offsite destination under `POD-01 Opt A+B Hybrid` before `GATE 6`.)*
+- **Approved Foundation (`2026-11-27`):** `POD-01` (`Opt A+B Hybrid`), `POD-02` (`Opt A`), `POD-03` (`Opt B`), `POD-04` (`Opt C`), `POD-05` (`Git A1`, `FFmpeg B2`), `POD-06` (`PR #3` + `Cat D Opt C`), `POD-07` (`Opt A`), `POD-08` (`Opt C`), `POD-09` (`Defer R3+` + `ENABLE_EXPERIMENTAL_ROUTES=false`), and `OI-01` (`Opt A`) are formally approved and **`GATE 1` is `PASS`** (PR `#3` open at `https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`, Ruleset `#28275963` active on `main`). *(Pending downstream follow-up selections before execution gates: SMTP relay provider under `POD-04 Opt C` before `GATE 6`, and backup storage/offsite destination under `POD-01 Opt A+B Hybrid` before `GATE 6`.)*
 - **Locked Execution Gates:** **`GATE 2` through `GATE 8` remain `100%` LOCKED / `NOT AUTHORIZED` (`[ ]`)**. `WS-R2.0` through `WS-R2.6` cannot start without separate explicit Project Owner authorization.
 
 ### Version & Change History
 - **v1.0** — `2026-11-27` (`UTC-05:00`) — Initial Stage 0 Gate Prerequisites and Acceptance Matrix reconciling program gates `GATE 1`–`GATE 8` with legacy `WS-R2.0-SG1`–`SG8` sub-gates and embedding Agent 8/Agent 4/Agent 10 hardened acceptance criteria.
 - **v1.1** — `2026-11-27` (`UTC-05:00`) — Recorded formal `2026-11-27` Project Owner approvals for `POD-01`–`POD-09`, `OI-01`, and **`STAGE 0 GATE 1 ONLY`** (`[x] Approved — Date: 2026-11-27`); kept `GATE 2`–`GATE 8` strictly `[ ]` LOCKED / `NOT AUTHORIZED`.
+- **v1.2** — `2026-11-27` (`UTC-05:00`) — Recorded independent **`GATE 1: PASS`** revalidation (`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3` open/unmerged; Ruleset `#28275963` `BETHESDA - Protect Main` active on `main`) and updated `GATE 2`/`GATE 8` residual blocker prose while keeping `GATE 2`–`GATE 8` strictly `[ ]` LOCKED / `NOT AUTHORIZED`.

@@ -5,7 +5,7 @@
 - **Authoritative Baseline Branch:** `main` (synced `0 0` with `origin/main`)
 - **Authoritative HEAD SHA:** `98919fe85d2c656076426d0a43a1222f9a752465` (`CATEGORY D INDEPENDENT TRACEABILITY MATRIX AUDIT AND PROMOTION READINESS REVIEW`, `2026-11-24 20:46:54 -0500`)
 - **HEAD Parent SHA:** `97d1546af599c75edaa0bfbbb7eba1d0be626635` (`Merge pull request #2`)
-- **Scope & Authorization:** Architecture, multi-agent task decomposition, dependency sequencing, and governance planning ONLY. **`STAGE 0 GATE 1` is Project Owner approved (`2026-11-27`) for governance/privacy PR `#3` and decision records ONLY.** **`GATE 2`–`GATE 8` and zero source, SQL, migration, config, dependency, or DB mutations remain STRICTLY `NOT AUTHORIZED`.**
+- **Scope & Authorization:** Architecture, multi-agent task decomposition, dependency sequencing, and governance planning ONLY. **`STAGE 0 GATE 1: PASS (VERIFIED 2026-11-27 — PR #3 OPEN, Ruleset #28275963 ACTIVE)` for governance/privacy PR `#3` and decision records ONLY.** **`GATE 2`–`GATE 8` and zero source, SQL, migration, config, dependency, or DB mutations remain STRICTLY `NOT AUTHORIZED`.**
 
 ---
 
@@ -21,7 +21,7 @@ Verified read-only on `2026-11-26T17:18:37-05:00`:
 | **Pre-existing working-tree diff** | `M backend/src/interfaces/http/middlewares/auth-middleware.ts` (`+1/-1`, line 23 `) {}` -> `) { }`, CRLF/whitespace recurrence of prior IDE anomaly; untouched) |
 | **Untracked local artifacts prior to plan** | `BETHESDA_WORSHIP_STUDIO_COMPREHENSIVE_PRODUCT_AND_FUNCTIONAL_AUDIT.md`; `183` ignored filesystem entries; `0` staged; `0` stashes |
 | **Tracked Git index bloat** | `7,367` tracked files in `backend/node_modules/` (`103.8 MiB`) and `223` tracked files in `backend/storage/` |
-| **Governance & Decision State** | `POD-01`–`POD-09`, `OI-01`, and **`GATE 1` ONLY** formally approved `2026-11-27` (`PROJECT OWNER APPROVED`); **`GATE 2`–`GATE 8`** & `WS-R2.0`–`WS-R2.6` remain strictly **`[ ]` LOCKED / `NOT AUTHORIZED / NOT STARTED`** |
+| **Governance & Decision State** | `POD-01`–`POD-09`, `OI-01`, and **`GATE 1: PASS (2026-11-27)`** (PR `#3` open, Ruleset `#28275963` active); **`GATE 2`–`GATE 8`** & `WS-R2.0`–`WS-R2.6` remain strictly **`[ ]` LOCKED / `NOT AUTHORIZED / NOT STARTED`** |
 
 ### Companion Master Deliverables
 - `MASTER_FINDINGS_AND_ROOT_CAUSE_MATRIX.md` — 48 master findings (`MF-01`–`MF-48`) cross-mapped to historical `R2-F01`–`R2-F38` and `AUD-01`–`AUD-24`
@@ -29,7 +29,7 @@ Verified read-only on `2026-11-26T17:18:37-05:00`:
 - `MASTER_DEPENDENCY_AND_INTEGRATION_GRAPH.md` — Critical path, parallel worktree graph, `packages/music-core` extraction map, and API/DB handoffs
 - `MASTER_TEST_AND_ACCEPTANCE_STRATEGY.md` — Live test baseline, 3-tier backend suite classification, 8 blind spots (`BS-01`–`BS-08`), *En Tu Presencia* 8-stage regression suite, disposable PG protocol, and manual stand acceptance matrix (`M-01`–`M-07`)
 - `MASTER_RISK_AND_REGRESSION_REGISTER.md` — 20 technical, data-loss, security, and operational regression risks (`RR-01`–`RR-20`)
-- `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` — Consolidated unsigned (`[ ]`) decisions `POD-01`–`POD-09` and `GATE 1`–`GATE 8`
+- `MASTER_PROJECT_OWNER_DECISION_REGISTER.md` — Consolidated decisions `POD-01`–`POD-09` and `OI-01` (`GATE 1 PASS`; `GATE 2`–`GATE 8` strictly `[ ]` LOCKED)
 
 ---
 
@@ -121,9 +121,9 @@ flowchart TB
 
 > **Governance Gate:** **NO workstream below is authorized today.** Every stage requires explicit Project Owner approval of its governing decisions and gate criteria.
 
-### Stage 0 — Project Owner Governance, Privacy & Decision Gate *(Prerequisites — `GATE 1` Active `2026-11-27`)*
-- **Owner Actions Ratified (`2026-11-27`):** `POD-01`–`POD-09` + `OI-01` formally approved (`A+B Hybrid`, `Opt A`, `Opt B`, `Opt C`, `A1/B2`, `PR #3 + Cat D Opt C`, `Opt A`, `Opt C`, `Defer R3+`, `OI-01 Opt A`); GitHub branch protection on `main` + docs-only PR `#3` (`98919fe8` + **`14`** pre-existing `docs/` local path leaks + Category D `Option C` + `Phase 2B.1` reconciliation + clean `auth-middleware.ts:23` LF restoration) authorized under `GATE 1 ONLY`.
-- **Execution Mode:** Documentation/Git-governance PR `#3` only (`0` app/SQL/`.gitattributes` changes), leaving `GATE 2` (`WS-R2.0`) locked until PR `#3` closes and Project Owner separately authorizes `GATE 2`.
+### Stage 0 — Project Owner Governance, Privacy & Decision Gate *(Prerequisites — `GATE 1: PASS` `2026-11-27`)*
+- **Owner Actions Ratified & Verified (`2026-11-27`):** `POD-01`–`POD-09` + `OI-01` formally approved (`A+B Hybrid`, `Opt A`, `Opt B`, `Opt C`, `A1/B2`, `PR #3 + Cat D Opt C`, `Opt A`, `Opt C`, `Defer R3+`, `OI-01 Opt A`); GitHub Ruleset `#28275963` (`BETHESDA - Protect Main`) verified ACTIVE on `main`; docs-only PR `#3` (`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`: `98919fe8` + **`14`** pre-existing `docs/` local path leaks + Category D `Option C` + `Phase 2B.1` reconciliation + clean `auth-middleware.ts:23` LF restoration) verified OPEN / UNMERGED.
+- **Execution Mode:** Documentation/Git-governance PR `#3` only (`0` app/SQL/`.gitattributes` changes), leaving `GATE 2` (`WS-R2.0`) strictly `NOT AUTHORIZED` until Project Owner merges PR `#3` and separately authorizes `GATE 2`.
 
 ### Stage 1 — `WS-R2.0`: Certification Baseline & Repository Hygiene *(First Technical Milestone)*
 - **Tracks:** `REM-04` (`POD-05 A1` safe `git rm -r --cached backend/node_modules backend/storage/*` + `.gitignore` hardening — **merges first**), `REM-01` (`provision_app_runtime_role.sql` + `pgboss` DDL split + `assertNonSuperuserRuntimeRole()`), `REM-03` (`frontend/package.json` `tsx --test` + `autoscroll.test.ts` `import.meta.url` + test #8 alignment), and `REM-02` (disposable DB `bethesda_worship_r2_cert_tmp` executing all `48` backend PG suites including `105` conversion worker + `40` audio + `68` OMR tests).
@@ -150,7 +150,7 @@ Once Stage 2 lands cleanly on `main`, these 5 tracks own disjoint files and run 
 
 ## 6. Recommended First Authorized Milestone
 
-1. **Completed Governance Step (`Stage 0 GATE 1`, Approved `2026-11-27`):** Project Owner ratified `POD-01`–`POD-09` + `OI-01`, authorizing Stage 0 docs-only PR `#3` (`98919fe8` + `14` `docs/` leaks + Category D `Option C`), `main` branch protection, and `auth-middleware.ts:23` LF cleanup (`post-merge` prune deferred until PR `#3` merge).
+1. **Completed Governance Step (`Stage 0 GATE 1: PASS`, Verified `2026-11-27`):** Project Owner ratified `POD-01`–`POD-09` + `OI-01`, enabled active GitHub Ruleset `#28275963` (`BETHESDA - Protect Main`), and opened PR `#3` (`https://github.com/juancastro2381-hub/BETHESDA-WORSHIP-STUDIO/pull/3`) with `98919fe8` + `14` `docs/` leaks sanitized, Category D `Option C`, and clean `auth-middleware.ts:23` parity (`post-merge` prune deferred until PR `#3` merge).
 2. **Next Pending Milestone (`GATE 2` — `WS-R2.0` Controlled Certification Baseline — `NOT YET AUTHORIZED`):** Upon separate `GATE 2` signature after PR `#3` merges, authorize ONLY `REM-04` (`POD-05 A1` tracked bloat cleanup + `.gitattributes`), `REM-01` (least-privilege PostgreSQL role + `pgboss` separation + startup role check), `REM-03` (frontend `tsx --test` + `tsx` devDependency + CWD + test #8 alignment), and `REM-02` (isolated disposable `bethesda_worship_r2_cert_tmp` execution of all `48` backend test suites).
 
 ---
@@ -160,3 +160,4 @@ Once Stage 2 lands cleanly on `main`, these 5 tracks own disjoint files and run 
 - **v1.0** — `2026-11-26` (`UTC-05:00`) — Initial Master Multi-Agent Architecture and Execution Plan.
 - **v1.1** — `2026-11-27` (`UTC-05:00`) — Stage 0 evidence-backed reconciliation (`POD-01`–`POD-09`, `GIT_WORKFLOW_STANDARD.md` path, `GATE 7`–`GATE 8`, `POD-02 Option A`).
 - **v1.2** — `2026-11-27` (`UTC-05:00`) — Recorded formal `2026-11-27` Project Owner approvals (`POD-01`–`POD-09` + `OI-01`, `STAGE 0 GATE 1 ONLY`), aligned `L125` leak count `13 -> 14`, and confirmed `GATE 2`–`GATE 8` & `WS-R2.0`–`WS-R2.6` remain strictly **`NOT AUTHORIZED`**.
+- **v1.3** — `2026-11-27` (`UTC-05:00`) — Recorded independent **`GATE 1: PASS`** revalidation (PR `#3` open/unmerged; Ruleset `#28275963` `BETHESDA - Protect Main` active on `main`), fixed L32 companion note, and kept `GATE 2`–`GATE 8` strictly locked.

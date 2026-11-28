@@ -129,3 +129,10 @@ El diff completo `main..HEAD` (`244f0ef7`) incluye **`8` archivos Markdown nuevo
      - `1` reporte forense del `2026-11-24` en [`../incidents/2026-11-24-pre-merge-auth-anomaly/BETHESDA_WORSHIP_STUDIO_PRE_MERGE_AUTH_MIDDLEWARE_ANOMALY_AUDIT.md`](../incidents/2026-11-24-pre-merge-auth-anomaly/BETHESDA_WORSHIP_STUDIO_PRE_MERGE_AUTH_MIDDLEWARE_ANOMALY_AUDIT.md).
    - **Código fuente y comportamiento en ejecución:** `0` cambios (`backend/src/interfaces/http/middlewares/auth-middleware.ts` continúa idéntico byte a byte a `main`, blob `010be3ca6ad1752b9138d62b6b3eb4765f5a6cc6`).
 4. **Registro posterior del commit correctivo y estado de compuertas:** El SHA del nuevo commit correctivo único se registra inmediatamente tras su creación en la descripción de PR `#2` y en la respuesta de cierre al Project Owner. PR `#2` **NO ha sido fusionado**, `main` y `feature/phase-1a-core-foundation` siguen intactas, y **`WS-R2.0` / `Phase 2B.1` / `POD-01`–`POD-05` / `GATE 2` / Categoría D permanecen estrictamente NO autorizados**.
+
+---
+
+## 10. Adenda de Reconciliación Etapa 0 — `GATE 1` (`2026-11-27`)
+
+- **SHA-256 previo (`98919fe8`):** `D9877B46D87BA8AD1D6C6384DD186DA649680ED88A89464066A101D765747346` (`19,906` B).
+- **Aclaración `Phase 2B.1` (`L131`):** La base técnica de Fase 2B.1 (`storage-provider.ts`, `output-retention-service.ts`, `cas_deletion_intents`) ya estaba integrada en `main` mediante PR `#1` (`765a6312`); la mención previa certificaba únicamente que PR `#2` no inició nueva remediación técnica sobre Fase 2B.1. Al `2026-11-27`, `POD-01`–`POD-09`, `OI-01` y **`GATE 1`** (PR `#3` + Categoría D Opción C) cuentan con aprobación formal del Project Owner; **`GATE 2`–`GATE 8` (`WS-R2.0`–`WS-R2.6`) permanecen estrictamente NO autorizados**.

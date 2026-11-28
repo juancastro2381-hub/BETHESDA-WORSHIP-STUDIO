@@ -31,22 +31,22 @@ Phase 3B implements synchronized liturgical execution across multiple atril clie
 ### 2. Implementation Inventory
 
 #### Backend Layer
-1. **Domain Types & Contracts** ([`backend/src/domain/realtime/realtime-types.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/domain/realtime/realtime-types.ts)):
+1. **Domain Types & Contracts** ([`backend/src/domain/realtime/realtime-types.ts`](../../backend/src/domain/realtime/realtime-types.ts)):
    - `RealtimeSessionStatus`: `'ACTIVE' | 'PAUSED' | 'CONCLUDED'`.
    - `RealtimeActionType`: `'SET_ITEM_INDEX' | 'SET_SECTION' | 'SET_KEY_OVERRIDE' | 'SET_BPM_OVERRIDE' | 'SET_STATUS'`.
    - `RealtimeSessionSnapshot`: Complete session state (session ID, setlist ID, host user ID, epoch, sequence, current item index, current section, key/bpm overrides, participants count and list).
    - `RealtimeEvent`: Event payload with `eventId`, `epoch`, `sequence`, `type`, `state`, and `action` provenance.
 
-2. **In-Memory Realtime Session Manager** ([`backend/src/application/realtime-session-manager.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/application/realtime-session-manager.ts)):
+2. **In-Memory Realtime Session Manager** ([`backend/src/application/realtime-session-manager.ts`](../../backend/src/application/realtime-session-manager.ts)):
    - `createOrGetSession()`: Creates or joins existing active session for a setlist.
    - `joinSession()`, `leaveSession()`, `heartbeat()`: Manages participant roster and updates `lastSeenAt`.
    - `dispatchAction()`: Enforces host/admin RBAC, verifies `expectedSequence`, checks idempotency cache, advances sequence, and broadcasts to active SSE subscribers.
    - `pruneStaleSessions()`: Automatically garbage-collects abandoned sessions (> 60 min inactivity) and offline participants (> 90 s without heartbeat).
 
-3. **Validation Schemas** ([`backend/src/interfaces/http/schemas/realtime.schemas.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/schemas/realtime.schemas.ts)):
+3. **Validation Schemas** ([`backend/src/interfaces/http/schemas/realtime.schemas.ts`](../../backend/src/interfaces/http/schemas/realtime.schemas.ts)):
    - Zod validation for session creation, action payloads, and query parameters.
 
-4. **HTTP & SSE Routes** ([`backend/src/interfaces/http/routes/realtime.routes.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/routes/realtime.routes.ts)):
+4. **HTTP & SSE Routes** ([`backend/src/interfaces/http/routes/realtime.routes.ts`](../../backend/src/interfaces/http/routes/realtime.routes.ts)):
    - `POST /api/v1/realtime/sessions`: Create or retrieve active session.
    - `GET /api/v1/realtime/sessions/by-setlist/:setlistId`: Check for live session on setlist.
    - `GET /api/v1/realtime/sessions/:sessionId`: Fetch full state snapshot.
@@ -56,16 +56,16 @@ Phase 3B implements synchronized liturgical execution across multiple atril clie
    - `POST /api/v1/realtime/sessions/:sessionId/actions`: Dispatch liturgical command.
    - `GET /api/v1/realtime/sessions/:sessionId/stream`: SSE stream (`text/event-stream`, `X-Accel-Buffering: no`, 15-second keepalive `: ping`).
 
-5. **AuthGuard Query Token Support** ([`backend/src/interfaces/http/middlewares/auth-middleware.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/backend/src/interfaces/http/middlewares/auth-middleware.ts)):
+5. **AuthGuard Query Token Support** ([`backend/src/interfaces/http/middlewares/auth-middleware.ts`](../../backend/src/interfaces/http/middlewares/auth-middleware.ts)):
    - Allows EventSource clients to authenticate via `?token=<JWT>` when headers cannot be customized by browser API.
 
 #### Frontend Layer
-1. **Domain Types** ([`frontend/src/core/realtime/realtime-types.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/realtime/realtime-types.ts)).
-2. **Client Layer** ([`frontend/src/core/realtime/realtime-client.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/realtime/realtime-client.ts)):
+1. **Domain Types** ([`frontend/src/core/realtime/realtime-types.ts`](../../frontend/src/core/realtime/realtime-types.ts)).
+2. **Client Layer** ([`frontend/src/core/realtime/realtime-client.ts`](../../frontend/src/core/realtime/realtime-client.ts)):
    - SSE subscription, automatic reconnect with exponential backoff, snapshot processing, and action dispatch.
-3. **React Hook** ([`frontend/src/core/realtime/use-realtime-flow.ts`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/core/realtime/use-realtime-flow.ts)):
+3. **React Hook** ([`frontend/src/core/realtime/use-realtime-flow.ts`](../../frontend/src/core/realtime/use-realtime-flow.ts)):
    - Connects active setlist execution to live session. Provides `broadcastItemIndex`, `broadcastSection`, `broadcastKeyOverride`, `broadcastBpmOverride`, and `toggleDecoupled`.
-4. **UI Badge Component** ([`frontend/src/components/navigation/RealtimeLiturgicalBadge.tsx`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/frontend/src/components/navigation/RealtimeLiturgicalBadge.tsx)):
+4. **UI Badge Component** (`frontend/src/components/navigation/RealtimeLiturgicalBadge.tsx`):
    - Dynamic live indicators (`🔴 EN VIVO — DIRECTOR`, `🟢 EN VIVO — SINCRONIZADO`, `🟡 ATRIL INDEPENDIENTE`).
    - Section selector dropdown for Worship Leader (`INTRO`, `VERSO 1`, `CORO`, `PUENTE`, `MINISTRACIÓN`, `ESPONTÁNEO`).
    - Participant count display and decoupling toggle.
@@ -78,7 +78,7 @@ Phase 3B implements synchronized liturgical execution across multiple atril clie
 ```bash
 npx tsx --test src/__tests__/realtime-session.test.ts
 ```
-**Working Directory**: `c:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO\backend`
+**Working Directory**: `<REPO_ROOT>/backend`
 **Exit Code**: `0`
 
 **Output**:
@@ -105,7 +105,7 @@ npx tsx --test src/__tests__/realtime-session.test.ts
 ```bash
 npx tsx --test src/core/realtime/__tests__/realtime.test.ts
 ```
-**Working Directory**: `c:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO\frontend`
+**Working Directory**: `<REPO_ROOT>/frontend`
 **Exit Code**: `0`
 
 **Output**:
@@ -159,3 +159,10 @@ As mandated by governance, multi-client browser testing was **NOT RUN** using br
 
 - **Gate C Result**: **PASSED (Automated Verification Complete)**.
 - **Pre-requisite for Gate D**: Multitracks and OMR may now proceed.
+
+---
+
+### 7. Stage 0 `GATE 1` Privacy Sanitization Addendum (`2026-11-27`)
+
+- **Pre-Sanitization SHA-256 on `98919fe8`:** `901412EF2707ACB92E0FA30D807B73EB9F516E5660B2A2A3C6793CA308FC9E24` (`12,310` B).
+- **Remediation (`POD-06` item 2b):** Replaced `9` local file URI links and `2` raw Windows working-directory paths (`11` hits total) with portable repository-relative links (`../../...`) and `<REPO_ROOT>/backend|frontend`. Per `POD-09`, Phase 3B UI wiring remains deferred to `R3+` behind `ENABLE_EXPERIMENTAL_ROUTES=false` in production.

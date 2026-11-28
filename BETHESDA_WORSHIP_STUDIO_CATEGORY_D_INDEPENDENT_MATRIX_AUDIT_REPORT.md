@@ -203,7 +203,14 @@ git cat-file -t <sha> && git merge-base --is-ancestor <sha> main
 
 - `[ ]` **Option A:** Promote the historical `feature/phase-1a-core-foundation` matrix version (`f6c03cc0...`) unchanged *(accepting `62` local file URIs and root path on L11)*.
 - `[ ]` **Option B:** Keep the current `main` matrix version (`e2ccebc1...`) and do not promote the `+2/-1` `feature` delta.
-- `[ ]` **Option C *(Advisory Recommendation Only)*:** Authorize a separate controlled documentation-only branch and PR from `main` (`97d1546a`) to incorporate the `+2/-1` traceability delta, point L11 to `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md`, sanitize all `62` local file URIs into portable repository-relative links, and preserve original hashes in provenance notes without altering original private backup evidence.
+- `[x]` **Option C *(PROJECT OWNER APPROVED — `POD-06`, `2026-11-27`)*:** Authorize a separate controlled documentation-only branch and PR from `main` (`97d1546a` / `98919fe8`) to incorporate the `+2/-1` traceability delta, point L11 to `docs/governance/BETHESDA_WORSHIP_STUDIO_PHASE_R2_WS_R2_0_PROJECT_OWNER_DECISION_REGISTER_AND_REMEDIATION_EXECUTION_PLAN.md`, sanitize all `62` local file URIs into portable repository-relative links, and preserve original hashes in provenance notes without altering original private backup evidence.
 
-**Project Owner Signature:** \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_  
-**Date:** \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
+**Project Owner Signature:** `Project Owner Written Authorization (`POD-06` Option C — `GATE 1`)`  
+**Date:** `2026-11-27`
+
+---
+
+## 13. Stage 0 `GATE 1` Reconciliation Addendum (`2026-11-27`)
+
+- **Pre-Reconciliation SHA-256 on `98919fe8`:** `F37B28861E210E1FE8398784B184EE360A277AE436972D068CBC1B66EAD11C42` (`27,316` B).
+- **Phase 2B.1 & Governance Clarification:** Core Phase 2B.1 storage/retention code (`storage-provider.ts`, `output-retention-service.ts`, `cas_deletion_intents`) was previously merged on `main` via PR #1 (`765a6312`); references in Lines `159`, `169`, and `202` above (`"Phase 2B.1 NOT STARTED"`) attested strictly that this read-only audit initiated zero new Phase 2B.1 remediation (`MF-37`/`MF-38`). Under formal Project Owner approval (`2026-11-27`), **`POD-01`–`POD-09` + `OI-01` and `GATE 1` (Stage 0 Governance PR #3 + Category D Option C)** are approved, while **`GATE 2`–`GATE 8` (`WS-R2.0`–`WS-R2.6`) remain strictly NOT AUTHORIZED**.

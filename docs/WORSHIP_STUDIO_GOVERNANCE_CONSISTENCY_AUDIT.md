@@ -102,7 +102,7 @@ This audit identified five core areas requiring reconciliation, all of which hav
 - **Audit Discovery:** The document needed to distinguish between the user-facing product name, the physical image file in the repository, and the current code implementation in `App.tsx`.
 - **Corrective Action Applied:** Confirmed and documented:
   1. Product Name: `Worship Studio`.
-  2. Logo Asset: Exists in repository at [`docs/worship_studio_saxophone_emblem.png`](file:///c:/Users/juanc/OneDrive/Documentos/Desarrollo%20proyectos/Sistema%20musical%20-%20partituras/BETHESDA%20WORSHIP%20STUDIO/docs/worship_studio_saxophone_emblem.png).
+  2. Logo Asset: Exists in repository at [`docs/worship_studio_saxophone_emblem.png`](worship_studio_saxophone_emblem.png).
   3. Current Running Code: `frontend/src/App.tsx` line 19 currently renders a Unicode cross (`✝`).
   4. Integration Status: Replacing `✝` with the saxophone emblem is a **formally approved identity decision (DEC-01)**.
 
@@ -206,3 +206,10 @@ Action Required:
 3. Await explicit Project Owner authorization before initiating implementation.
 ================================================================================
 ```
+
+---
+
+## 7. Stage 0 `GATE 1` Privacy Sanitization Addendum (`2026-11-27`)
+
+- **Pre-Sanitization SHA-256 on `98919fe8`:** `1C56F0DA2A6E83BB3A7EFEE2A40D4B0A93C15257DF652938618544A07639CF1C` (`16,487` B).
+- **Remediation (`POD-06` item 2b):** Replaced `1` local file-scheme URI in Finding 5 (`L105`) with repository-relative `[docs/worship_studio_saxophone_emblem.png](worship_studio_saxophone_emblem.png)`.

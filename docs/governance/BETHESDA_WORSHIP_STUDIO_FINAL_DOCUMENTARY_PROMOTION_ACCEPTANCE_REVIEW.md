@@ -214,3 +214,10 @@ Estado actual verificado (`API REST`): **`PROTECTED = False`**, **`GH_RULESETS_M
 3. **Sanitización aplicada:** Se removieron rutas de estación Windows, nombre de usuario local, ubicación física del respaldo externo, ejemplos de URLs locales y el correo personal en Sección 3 (`L47`).
 4. **Inventario final actualizado de PR `#2`:** Tras esta remediación y la incorporación de [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md), PR `#2` comprende **`11` archivos Markdown (`*.md`)** y **`0` archivos de código fuente** (`backend/src/interfaces/http/middlewares/auth-middleware.ts` permanece byte a byte idéntico a `main`).
 5. **Trazabilidad de SHAs:** `HEAD` previo de PR `#2` = `cc9aec18c62b0bdd0710d37ea679af6513eca06d`; el SHA del nuevo commit correctivo único se registra tras su creación en la descripción de PR `#2` y en la matriz final de aceptación. Véanse [`BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md`](BETHESDA_WORSHIP_STUDIO_DOCUMENT_PRESERVATION_AND_PROMOTION_MANIFEST.md) y [`BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md`](BETHESDA_WORSHIP_STUDIO_PR2_PRIVACY_SANITIZATION_AND_EVIDENCE_PRESERVATION_REPORT.md).
+
+---
+
+## 17. Adenda de Reconciliación Etapa 0 — `GATE 1` (`2026-11-27`)
+
+- **SHA-256 previo a esta reconciliación (`98919fe8`):** `C9418859DE848C50CC38BAFF328D76263DE461F23493BD6F37F803662B521737` (`27,294` B).
+- **Aclaración sobre `Phase 2B.1` (`L168`, `L188`, `L212`):** Los componentes base de Fase 2B.1 (`storage-provider.ts`, `output-retention-service.ts`, `cas_deletion_intents`) ya se encontraban integrados en `main` mediante PR `#1` (`765a6312`). Las menciones históricas previas certifican únicamente que PR `#2` no inició ni autorizó nueva remediación técnica sobre Fase 2B.1 (`MF-37`/`MF-38`). Con fecha `2026-11-27`, el Project Owner aprobó formalmente `POD-01`–`POD-09`, `OI-01` y **`GATE 1`** (cierre documental PR `#3`); **`GATE 2`–`GATE 8` (`WS-R2.0`–`WS-R2.6`) siguen estrictamente NO autorizados**.

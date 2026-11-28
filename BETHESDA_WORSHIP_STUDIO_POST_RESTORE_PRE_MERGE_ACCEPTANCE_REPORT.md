@@ -77,7 +77,7 @@
   - **SHA completo:** `cc9aec18c62b0bdd0710d37ea679af6513eca06d`
   - **Padre directo (`HEAD^`):** `b411a4bab0a268e8323387ffcd6ad6e5cc589d54`
   - **Fecha / Hora:** `Tue Nov 24 18:10:32 2026 -0500`
-  - **Autor / Committer:** `juancastro2381-hub <juancastro2381@gmail.com>`
+  - **Autor / Committer:** `juancastro2381-hub <email redacted for public repository hygiene>`
   - **Mensaje:** `fix(governance): restore auth middleware and reconcile documentary PR scope`
   - **Estadística del commit:** `6 files changed, 199 insertions(+), 1 deletion(-)`
 - **Cadena completa en `origin/main..origin/docs/git-governance-and-post-reversal-recovery` (sin historial reescrito):**
@@ -174,3 +174,11 @@ efd1edc83d6a5dd15a304acc061985109983c6ff	refs/heads/feature/phase-1a-core-founda
 ## 10. Veredicto Final de Aceptación: **`PASS`**
 
 - **Criterio cumplido:** Todas las remediaciones autorizadas se completaron con verificación criptográfica exacta y sin reescribir historial publicado; el Pull Request remoto (`origin/docs/git-governance-and-post-reversal-recovery` `cc9aec18c62b0bdd0710d37ea679af6513eca06d` → `origin/main` `97ae7c6039aa208beb5a64c6592fba0085ba0d1d`) es **100% documental (`10` archivos Markdown, `0` diferencias en código fuente, `0` conflictos de merge, `0` secretos)** y queda listo para revisión y decisión final del Project Owner.
+
+---
+
+## 11. Adenda de Reconciliación Etapa 0 — `GATE 1` (`2026-11-27`)
+
+- **Preservación de SHA-256 original en `98919fe8`:** `AF7E6B0FEED102C559B362121F3E930A5A5E0E43496441F7FD558CEB93D66E85` (`17,573` bytes).
+- **Sanitización de privacidad aplicada (`POD-06`):** Se redactó el correo personal en la Sección 4 (`L80`) para higiene del repositorio público.
+- **Reconciliación de custodia (`L28`) y `Phase 2B.1` (`L162`):** La nota histórica de custodia local correspondía al estado anterior al commit directo `98919fe8`. Asimismo, el código base de Fase 2B.1 (`storage-provider.ts`, `output-retention-service.ts`, `cas_deletion_intents`) ya había sido fusionado en `main` mediante PR `#1` (`765a6312`); la mención de Sección 8 (`L162`) acredita únicamente que el PR `#2` no inició nueva remediación técnica sobre Fase 2B.1 (`MF-37`/`MF-38`). Al `2026-11-27`, `POD-01`–`POD-09`, `OI-01` y **`GATE 1`** (PR `#3` + Categoría D Opción C) cuentan con aprobación formal del Project Owner, mientras **`GATE 2`–`GATE 8` (`WS-R2.0`–`WS-R2.6`) siguen estrictamente NO autorizados**.

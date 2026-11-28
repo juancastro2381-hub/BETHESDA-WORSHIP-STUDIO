@@ -73,7 +73,7 @@ D2 implements the Optical Music Recognition boundary for scanned sheet music and
 ```bash
 npx tsx --test src/__tests__/multitracks-omr.test.ts
 ```
-**Working Directory**: `c:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO\backend`
+**Working Directory**: `<REPO_ROOT>/backend`
 **Exit Code**: `0`
 
 **Output**:
@@ -102,7 +102,7 @@ npx tsx --test src/__tests__/multitracks-omr.test.ts
 ```bash
 npx tsx --test src/core/multitracks/__tests__/multitracks.test.ts src/core/ingestion/omr/__tests__/omr.test.ts
 ```
-**Working Directory**: `c:\Users\juanc\OneDrive\Documentos\Desarrollo proyectos\Sistema musical - partituras\BETHESDA WORSHIP STUDIO\frontend`
+**Working Directory**: `<REPO_ROOT>/frontend`
 **Exit Code**: `0`
 
 **Output**:
@@ -153,3 +153,10 @@ npx tsx --test src/core/multitracks/__tests__/multitracks.test.ts src/core/inges
 
 - **Gate D Result**: **PASSED (Automated Verification Complete)**.
 - **Proceed to Final Handoff Gate**: Ready for delivery of `docs/reports/AUTHORIZED_WORKSTREAMS_FINAL_HANDOFF.md`.
+
+---
+
+## 6. Stage 0 `GATE 1` Privacy Sanitization Addendum (`2026-11-27`)
+
+- **Pre-Sanitization SHA-256 on `98919fe8`:** `B8EC90EBD85710B05FACDE8B9F0620994ED5A6E405F431FEC1A3BD78D3BD1BC5` (`10,124` B).
+- **Remediation (`POD-06` item 2b):** Replaced `2` raw Windows workstation paths (`L76`, `L105`) with portable `<REPO_ROOT>/backend` and `<REPO_ROOT>/frontend`. Per `POD-09`, Phase 3C experimental UI/routes remain deferred to `R3+` behind `ENABLE_EXPERIMENTAL_ROUTES=false` in production.

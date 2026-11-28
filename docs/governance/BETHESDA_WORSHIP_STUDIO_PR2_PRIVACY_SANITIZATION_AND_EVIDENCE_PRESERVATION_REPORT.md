@@ -127,3 +127,10 @@ Pre-commit validation gates executed across all `11` Markdown files in PR `#2` (
   - `feature/phase-1a-core-foundation`: **Preserved untouched** at `efd1edc83d6a5dd15a304acc061985109983c6ff`; not deleted or altered.
   - Category D traceability matrix (`BETHESDA_WORSHIP_STUDIO_PHASE_R2_UPDATED_TRACEABILITY_AND_ACCEPTANCE_MATRIX.md`): Remains identical to `main` (`blob e2ccebc1...`) and pending separate Project Owner decision.
 - **Explicit non-merge confirmation:** PR `#2` remains **`OPEN`** and **`NOT MERGED`** into `main`; `main` remains untouched at `97ae7c6039aa208beb5a64c6592fba0085ba0d1d`.
+
+---
+
+## 9. Stage 0 `GATE 1` Reconciliation Addendum (`2026-11-27`)
+
+- **Pre-Reconciliation SHA-256 on `98919fe8`:** `E406520D34514A11962E927ACC5F4A523B108C79166B9E4B096270BCCB0B0540` (`15,874` B).
+- **Phase 2B.1 & Post-PR #2 Reconciliation (`L24, L125–L129`):** PR `#2` was subsequently merged into `main` at `97d1546af599c75edaa0bfbbb7eba1d0be626635`. Core Phase 2B.1 storage/retention code (`storage-provider.ts`, `output-retention-service.ts`, `cas_deletion_intents`) was already present on `main` via PR `#1` (`765a6312`); lines `24` and `126` attested strictly that PR `#2` initiated zero new Phase 2B.1 remediation (`MF-37`/`MF-38`). On `2026-11-27`, the Project Owner approved `POD-01`–`POD-09`, `OI-01`, and **`GATE 1`** (Stage 0 Governance PR `#3` + Category D Option C); **`GATE 2`–`GATE 8` (`WS-R2.0`–`WS-R2.6`) remain strictly NOT AUTHORIZED**.

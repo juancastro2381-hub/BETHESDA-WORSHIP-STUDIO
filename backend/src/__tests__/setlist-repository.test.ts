@@ -7,7 +7,8 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { inArray, sql } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, pool } from '../db/index.ts';
+import { runMigrations } from '../db/migrate.ts';
 import { setlists, songs, users } from '../db/schema.ts';
 import { DrizzleSetlistRepository } from '../repositories/setlist-repository.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
@@ -18,11 +19,55 @@ describe('Phase 2C — WS3: DrizzleSetlistRepository and SQL Transactions', () =
 
   let sampleSongId: string;
   let sampleUserId: string;
+  let createdFallbackSongId: string | null = null;
+  let createdFallbackUserId: string | null = null;
   let initialSongCount: number;
   let initialUserCount: number;
 
   before(async () => {
-    // 1. Obtener conteos base de canciones y usuarios
+    await runMigrations();
+
+    // 1. Asegurar entidad base si se ejecuta en una base de datos desechable recién migrada
+    let [existingUser] = await db.select({ id: users.id }).from(users).limit(1);
+    if (!existingUser) {
+      const [insertedUser] = await db
+        .insert(users)
+        .values({
+          email: `setlist_repo_seed_${Date.now()}@bethesda.test`,
+          passwordHash: 'dummy_hash',
+          firstName: 'Setlist',
+          lastName: 'Seeder',
+          role: 'WORSHIP_LEADER',
+          accountStatus: 'ACTIVE',
+          emailVerified: true,
+        })
+        .returning({ id: users.id });
+      existingUser = insertedUser!;
+      createdFallbackUserId = existingUser.id;
+    }
+    assert.ok(existingUser, 'Debe existir al menos un usuario base en la base de datos.');
+    sampleUserId = existingUser.id;
+
+    let [existingSong] = await db.select({ id: songs.id }).from(songs).limit(1);
+    if (!existingSong) {
+      const [insertedSong] = await db
+        .insert(songs)
+        .values({
+          title: `Seed Song ${Date.now()}`,
+          artist: 'Bethesda Test',
+          defaultKey: 'G',
+          status: 'APPROVED',
+          createdByUserId: sampleUserId,
+          updatedByUserId: sampleUserId,
+        })
+        .returning({ id: songs.id });
+      existingSong = insertedSong!;
+      createdFallbackSongId = existingSong.id;
+    }
+    assert.ok(existingSong, 'Debe existir al menos una canción base en la base de datos.');
+    sampleSongId = existingSong.id;
+
+    // 2. Obtener conteos base de canciones y usuarios tras asegurar referencias base
     const [songCountRes] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(songs);
@@ -32,21 +77,6 @@ describe('Phase 2C — WS3: DrizzleSetlistRepository and SQL Transactions', () =
       .select({ count: sql<number>`count(*)::int` })
       .from(users);
     initialUserCount = userCountRes?.count ?? 0;
-
-    // 2. Obtener IDs de referencia existentes
-    const [existingSong] = await db
-      .select({ id: songs.id })
-      .from(songs)
-      .limit(1);
-    assert.ok(existingSong, 'Debe existir al menos una canción base en la base de datos.');
-    sampleSongId = existingSong.id;
-
-    const [existingUser] = await db
-      .select({ id: users.id })
-      .from(users)
-      .limit(1);
-    assert.ok(existingUser, 'Debe existir al menos un usuario base en la base de datos.');
-    sampleUserId = existingUser.id;
   });
 
   after(async () => {
@@ -70,6 +100,14 @@ describe('Phase 2C — WS3: DrizzleSetlistRepository and SQL Transactions', () =
 
     assert.ok(songStillExists, 'La canción base referenciada debe mantenerse intacta.');
     assert.ok(userStillExists, 'El usuario base referenciado debe mantenerse intacto.');
+
+    if (createdFallbackSongId) {
+      await db.delete(songs).where(sql`${songs.id} = ${createdFallbackSongId}`);
+    }
+    if (createdFallbackUserId) {
+      await db.delete(users).where(sql`${users.id} = ${createdFallbackUserId}`);
+    }
+    await pool.end();
   });
 
   // ==========================================================================

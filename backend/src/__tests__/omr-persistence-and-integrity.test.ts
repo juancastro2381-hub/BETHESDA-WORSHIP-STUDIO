@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { db } from '../db/index.ts';
+import { env } from '../config/env.ts';
 import { runMigrations } from '../db/migrate.ts';
 import {
   users,
@@ -2538,41 +2539,45 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
   // 20. SEPARACIÓN DE ROLES EN POSTGRESQL Y PRUEBAS ADVERSARIALES (R3.1-04 & R3.2-02)
   // ==========================================================================
   it('20.1 to 20.12: should verify that application runtime role cannot UPDATE, DELETE, TRUNCATE, or alter audit table and trigger (R3.2-02)', async () => {
-    // 1. Aprovisionar rol no privilegiado en bethesda_worship_test usando credenciales DBA (postgres)
-    await db.execute(sql`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bethesda_app_test_runtime') THEN
-          CREATE ROLE bethesda_app_test_runtime WITH LOGIN PASSWORD 'TestAppPassword2026!';
-        ELSE
-          ALTER ROLE bethesda_app_test_runtime WITH LOGIN PASSWORD 'TestAppPassword2026!';
-        END IF;
-      END
-      $$;
-    `);
+    assert.ok(env.TEST_DATABASE_URL, 'TEST_DATABASE_URL debe estar definida para ejecutar la prueba de rol runtime');
+    const testDbUrl = new URL(env.TEST_DATABASE_URL);
+    const targetDbName = testDbUrl.pathname.replace(/^\/+|\/+$/g, '');
+    assert.match(targetDbName, /^[a-zA-Z0-9_]+$/, 'Nombre de base de datos de prueba inválido');
 
-    // 2. Otorgar permisos DML explícitos tabla por tabla según provision_app_runtime_role.sql
-    await db.execute(sql`
-      GRANT CONNECT ON DATABASE bethesda_worship_test TO bethesda_app_test_runtime;
-      GRANT USAGE ON SCHEMA public TO bethesda_app_test_runtime;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE users, songs, song_versions, audio_assets, multitrack_sessions, multitrack_tracks, omr_proposals, omr_proposal_measures, background_jobs TO bethesda_app_test_runtime;
-      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bethesda_app_test_runtime;
-      REVOKE ALL ON TABLE omr_audit_history FROM bethesda_app_test_runtime;
+    const ephemeralRuntimePassword = crypto.randomBytes(18).toString('hex');
+    const runtimeRoleName = `bethesda_app_runtime_${crypto.randomBytes(4).toString('hex')}`;
+
+    // 1. Aprovisionar rol no privilegiado efímero en la base de datos de prueba activa (sin credenciales ni nombres estáticos)
+    await db.execute(
+      sql.raw(`
+      CREATE ROLE ${runtimeRoleName} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '${ephemeralRuntimePassword}';
+    `)
+    );
+
+    // 2. Otorgar permisos DML explícitos tabla por tabla en la base de datos de prueba actual
+    await db.execute(
+      sql.raw(`
+      GRANT CONNECT ON DATABASE "${targetDbName}" TO ${runtimeRoleName};
+      GRANT USAGE ON SCHEMA public TO ${runtimeRoleName};
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE users, songs, song_versions, audio_assets, multitrack_sessions, multitrack_tracks, omr_proposals, omr_proposal_measures, background_jobs TO ${runtimeRoleName};
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${runtimeRoleName};
+      REVOKE ALL ON TABLE omr_audit_history FROM ${runtimeRoleName};
       REVOKE ALL ON TABLE omr_audit_history FROM PUBLIC;
-      GRANT SELECT, INSERT ON TABLE omr_audit_history TO bethesda_app_test_runtime;
+      GRANT SELECT, INSERT ON TABLE omr_audit_history TO ${runtimeRoleName};
       REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM PUBLIC;
-      REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM bethesda_app_test_runtime;
-      GRANT EXECUTE ON FUNCTION trg_prevent_omr_audit_modification() TO bethesda_app_test_runtime;
-    `);
+      REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM ${runtimeRoleName};
+      GRANT EXECUTE ON FUNCTION trg_prevent_omr_audit_modification() TO ${runtimeRoleName};
+    `)
+    );
 
     // 3. Inspección del catálogo de PostgreSQL para verificar privilegios efectivos
     const [privRow] = (await db.execute(sql`
       SELECT 
-        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'SELECT') as can_select,
-        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'INSERT') as can_insert,
-        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'UPDATE') as can_update,
-        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'DELETE') as can_delete,
-        has_table_privilege('bethesda_app_test_runtime', 'omr_audit_history', 'TRUNCATE') as can_truncate
+        has_table_privilege(${runtimeRoleName}, 'omr_audit_history', 'SELECT') as can_select,
+        has_table_privilege(${runtimeRoleName}, 'omr_audit_history', 'INSERT') as can_insert,
+        has_table_privilege(${runtimeRoleName}, 'omr_audit_history', 'UPDATE') as can_update,
+        has_table_privilege(${runtimeRoleName}, 'omr_audit_history', 'DELETE') as can_delete,
+        has_table_privilege(${runtimeRoleName}, 'omr_audit_history', 'TRUNCATE') as can_truncate
     `)).rows as any[];
 
     assert.equal(privRow.can_select, true);
@@ -2581,9 +2586,12 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
     assert.equal(privRow.can_delete, false);
     assert.equal(privRow.can_truncate, false);
 
-    // 4. Conectar mediante el rol de ejecución en tiempo de ejecución (bethesda_app_test_runtime)
+    // 4. Conectar mediante el rol de ejecución en tiempo de ejecución derivado de TEST_DATABASE_URL
+    const runtimeUrl = new URL(env.TEST_DATABASE_URL);
+    runtimeUrl.username = runtimeRoleName;
+    runtimeUrl.password = ephemeralRuntimePassword;
     const runtimePool = new pg.Pool({
-      connectionString: 'postgresql://bethesda_app_test_runtime:TestAppPassword2026!@localhost:5432/bethesda_worship_test',
+      connectionString: runtimeUrl.toString(),
     });
 
     try {
@@ -2689,6 +2697,16 @@ describe('Fase 1A-R3 — Integridad Musical OMR, Inmutabilidad de Auditoría, Tr
       assert.equal(selectRes.rows.length, 1);
     } finally {
       await runtimePool.end();
+      await db.execute(
+        sql.raw(`
+          REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtimeRoleName};
+          REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtimeRoleName};
+          REVOKE ALL ON FUNCTION trg_prevent_omr_audit_modification() FROM ${runtimeRoleName};
+          REVOKE ALL ON SCHEMA public FROM ${runtimeRoleName};
+          REVOKE ALL ON DATABASE "${targetDbName}" FROM ${runtimeRoleName};
+          DROP ROLE IF EXISTS ${runtimeRoleName};
+        `)
+      );
     }
   });
 

@@ -958,6 +958,7 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
       sub: tempUser.id,
       email: tempUser.email,
       role: tempUser.role,
+      tokenVersion: tempUser.tokenVersion,
     }).token;
 
     const assetA = await audioService.uploadAudio({
@@ -1016,13 +1017,29 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
     });
     assert.strictEqual(suspendedBearerStream.statusCode, 403);
 
-    // 3. Reactivar usuario, emitir nuevo ticket y bloquear temporalmente por lockoutUntil
-    await userRepo.updateStatus(tempUser.id, 'ACTIVE');
-    const t2Res = await app.inject({
+    // 3. Reactivar usuario (incrementa tokenVersion): el token previo debe seguir revocado (401)
+    // y el nuevo token actualizado debe permitir emitir ticket y luego fallar ante lockoutUntil
+    const reactivatedUser = await userRepo.updateStatus(tempUser.id, 'ACTIVE');
+    const staleAfterReactivate = await app.inject({
       method: 'POST',
       url: `/api/v1/audio/${assetA.id}/ticket`,
       headers: { authorization: `Bearer ${tempToken}` },
     });
+    assert.strictEqual(staleAfterReactivate.statusCode, 401);
+
+    const reactivatedToken = tokenService.signAccessToken({
+      sub: reactivatedUser.id,
+      email: reactivatedUser.email,
+      role: reactivatedUser.role,
+      tokenVersion: reactivatedUser.tokenVersion,
+    }).token;
+
+    const t2Res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/audio/${assetA.id}/ticket`,
+      headers: { authorization: `Bearer ${reactivatedToken}` },
+    });
+    assert.strictEqual(t2Res.statusCode, 200);
     const ticket2 = t2Res.json().data.ticket;
 
     await userRepo.update(tempUser.id, { lockoutUntil: new Date(Date.now() + 10 * 60 * 1000) });
@@ -1038,8 +1055,9 @@ describe('WS-AUDIO-01 — Gate 1 Comprehensive Audio Acceptance Suite', () => {
     const t3Res = await app.inject({
       method: 'POST',
       url: `/api/v1/audio/${assetA.id}/ticket`,
-      headers: { authorization: `Bearer ${tempToken}` },
+      headers: { authorization: `Bearer ${reactivatedToken}` },
     });
+    assert.strictEqual(t3Res.statusCode, 200);
     const ticket3 = t3Res.json().data.ticket;
 
     const crossAssetRes = await app.inject({

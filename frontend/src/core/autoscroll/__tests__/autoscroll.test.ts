@@ -13,11 +13,16 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   type AutoscrollConfig,
   type AutoscrollSpeed,
   type AutoscrollStatus,
 } from '../types.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Mock simétrico de elemento HTML contenedor para pruebas no-browser
 class MockScrollContainer {
@@ -260,14 +265,13 @@ describe('Workstream B — WP-05 Autoscroll Logic & Timing Suite (No Pedal Integ
 
   it('8. should verify strict exclusion: zero pedal APIs, hooks, or event listeners exist', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
 
     const autoscrollSource = fs.readFileSync(
-      path.resolve(process.cwd(), 'src/core/autoscroll/use-autoscroll.ts'),
+      path.resolve(__dirname, '..', 'use-autoscroll.ts'),
       'utf-8'
     );
     const controlSource = fs.readFileSync(
-      path.resolve(process.cwd(), 'src/components/workspace/AutoscrollControl.tsx'),
+      path.resolve(__dirname, '..', '..', '..', 'components', 'workspace', 'AutoscrollControl.tsx'),
       'utf-8'
     );
 
@@ -292,7 +296,6 @@ describe('Workstream B — WP-05 Autoscroll Logic & Timing Suite (No Pedal Integ
 
   it('9. resolveScrollTarget should target ONLY the dedicated musical viewport (never document.scrollingElement or window.scrollTo) and prefer nested visual viewports', async () => {
     const fs = await import('node:fs');
-    const path = await import('node:path');
     const { resolveScrollTarget } = await import('../use-autoscroll.ts');
 
     const prevDocument = (globalThis as any).document;
@@ -324,7 +327,7 @@ describe('Workstream B — WP-05 Autoscroll Logic & Timing Suite (No Pedal Integ
 
       // Caso 3: Verificar que use-autoscroll.ts no invoca window.scrollTo ni document.scrollingElement
       const autoscrollSource = fs.readFileSync(
-        path.resolve(process.cwd(), 'src/core/autoscroll/use-autoscroll.ts'),
+        path.resolve(__dirname, '..', 'use-autoscroll.ts'),
         'utf-8'
       );
       assert.equal(autoscrollSource.includes('window.scrollTo'), false);

@@ -362,21 +362,43 @@ describe('Phase 1F — Browser Rendering Integration Tests', () => {
   it('8. Update without recreation: Subsequent render/update calls re-render without recreating base adapter instance', () => {
     const adapter = new LeadSheetDomAdapter();
     const song = createCanonicalSongGMajorChordsAndLyricsOnly();
-    const vocal = instruments.getOrThrow('lead_vocal');
+    const guitar = instruments.getOrThrow('acoustic_guitar');
 
-    const pref1 = new ViewPreference({ instrumentId: 'lead_vocal', primaryRepresentation: 'LYRICS', capoFret: 0 });
-    const view1 = ProjectionService.project(song, vocal, pref1).view!;
+    const pref1 = new ViewPreference({
+      instrumentId: 'acoustic_guitar',
+      primaryRepresentation: 'CHORDS',
+      secondaryRepresentations: ['LYRICS'],
+      capoFret: 0,
+    });
+    const view1 = ProjectionService.project(song, guitar, pref1).view!;
     const res1 = adapter.render(view1);
     assert.strictEqual(res1.success, true);
     assert.strictEqual(res1.data.capo, 0);
 
-    // Actualización rápida a Capo 2
-    const pref2 = new ViewPreference({ instrumentId: 'lead_vocal', primaryRepresentation: 'LYRICS', capoFret: 2 });
-    const view2 = ProjectionService.project(song, vocal, pref2).view!;
+    // Actualización rápida a Capo 2 en perfil con acordes + letra
+    const pref2 = new ViewPreference({
+      instrumentId: 'acoustic_guitar',
+      primaryRepresentation: 'CHORDS',
+      secondaryRepresentations: ['LYRICS'],
+      capoFret: 2,
+    });
+    const view2 = ProjectionService.project(song, guitar, pref2).view!;
     const res2 = adapter.update(view2);
     assert.strictEqual(res2.success, true);
     assert.strictEqual(res2.data.capo, 2);
     assert.strictEqual(adapter.status, 'READY');
+
+    // Invariante LYRICS_ONLY: perfil solo letra debe mantener capo === 0 aunque capoFret sea 2
+    const vocal = instruments.getOrThrow('lead_vocal');
+    const prefLyricsOnly = new ViewPreference({
+      instrumentId: 'lead_vocal',
+      primaryRepresentation: 'LYRICS',
+      capoFret: 2,
+    });
+    const viewLyrics = ProjectionService.project(song, vocal, prefLyricsOnly).view!;
+    const resLyrics = adapter.update(viewLyrics);
+    assert.strictEqual(resLyrics.success, true);
+    assert.strictEqual(resLyrics.data.capo, 0);
   });
 
   it('9. Chord Notation Systems: Standard vs Latin/Solfège notation preservation in LeadSheet', () => {

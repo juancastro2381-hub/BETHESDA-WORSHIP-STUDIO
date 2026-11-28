@@ -14,6 +14,11 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const FRONTEND_PUBLIC_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'public');
 
 import {
   BETHESDA_SW_CACHE_PREFIX,
@@ -88,7 +93,7 @@ describe('Phase 2D — WS-2D-01: PWA Hardening, Offline Cold-Boot & Security Rem
   // 1. SW.JS CACHE UPGRADE TO V2 AND CACHE OWNERSHIP ISOLATION (FINDING A)
   // =========================================================================
   it('1. should upgrade sw.js cache to bethesda-worship-studio-shell-v2, delete owned v1 cache, and preserve foreign/module caches on same origin (Finding A)', async () => {
-    const swPath = path.resolve(process.cwd(), 'public', 'sw.js');
+    const swPath = path.resolve(FRONTEND_PUBLIC_DIR, 'sw.js');
     assert.ok(fs.existsSync(swPath), 'public/sw.js must exist');
     const swContent = fs.readFileSync(swPath, 'utf-8');
 
@@ -109,7 +114,7 @@ describe('Phase 2D — WS-2D-01: PWA Hardening, Offline Cold-Boot & Security Rem
       'sw.js must include /fonts/Bravura.woff2 in STATIC_SHELL_ASSETS'
     );
 
-    const bravuraFontPath = path.resolve(process.cwd(), 'public', 'fonts', 'Bravura.woff2');
+    const bravuraFontPath = path.resolve(FRONTEND_PUBLIC_DIR, 'fonts', 'Bravura.woff2');
     assert.ok(fs.existsSync(bravuraFontPath), 'public/fonts/Bravura.woff2 must exist');
 
     // Ownership predicate checks

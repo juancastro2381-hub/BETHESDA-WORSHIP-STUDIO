@@ -8,6 +8,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const FRONTEND_PUBLIC_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'public');
 
 // Simulador puro de la lógica de validación de sw.js
 interface MockRequest {
@@ -217,7 +222,7 @@ describe('Workstream A — Service Worker Cache API & Scheme Remediation Suite',
   });
 
   it('10. should verify actual sw.js file contains scheme guard, isCacheEligible, and safelyPutInCache', () => {
-    const swPath = path.resolve(process.cwd(), 'public', 'sw.js');
+    const swPath = path.resolve(FRONTEND_PUBLIC_DIR, 'sw.js');
     assert.ok(fs.existsSync(swPath), 'sw.js debe existir en public/sw.js');
     const content = fs.readFileSync(swPath, 'utf-8');
 

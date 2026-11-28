@@ -9,26 +9,67 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import pg from 'pg';
 import { env } from '../config/env.ts';
-import { db, pool } from './index.ts';
+import { areDatabaseTargetsEquivalent, db, pool } from './index.ts';
 import * as schema from './schema.ts';
 
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+export interface MigrationDbResolutionConfig {
+  NODE_ENV: string;
+  DATABASE_URL: string;
+  TEST_DATABASE_URL?: string;
+  MIGRATION_DATABASE_URL?: string;
+}
+
+/**
+ * Resuelve de forma segura la URL de conexión para migraciones DDL (NF-01).
+ * En NODE_ENV === 'test' exige TEST_DATABASE_URL aislada y rechaza cualquier
+ * MIGRATION_DATABASE_URL que no apunte al mismo destino aislado que TEST_DATABASE_URL.
+ */
+export function resolveMigrationDatabaseUrl(config: MigrationDbResolutionConfig): {
+  url: string;
+  isDedicatedMigrationPool: boolean;
+} {
+  if (config.NODE_ENV === 'test') {
+    if (!config.TEST_DATABASE_URL) {
+      throw new Error(
+        '❌ Invariante de Seguridad Violada (NF-01): TEST_DATABASE_URL es obligatoria para ejecutar migraciones en NODE_ENV=test.'
+      );
+    }
+    if (areDatabaseTargetsEquivalent(config.TEST_DATABASE_URL, config.DATABASE_URL)) {
+      throw new Error(
+        '❌ Invariante de Seguridad Violada (NF-01): TEST_DATABASE_URL no puede apuntar al mismo destino que DATABASE_URL.'
+      );
+    }
+    if (config.MIGRATION_DATABASE_URL) {
+      if (
+        !areDatabaseTargetsEquivalent(config.MIGRATION_DATABASE_URL, config.TEST_DATABASE_URL) ||
+        areDatabaseTargetsEquivalent(config.MIGRATION_DATABASE_URL, config.DATABASE_URL)
+      ) {
+        throw new Error(
+          '❌ Invariante de Seguridad Violada (NF-01): MIGRATION_DATABASE_URL en NODE_ENV=test debe apuntar exclusivamente al mismo destino aislado que TEST_DATABASE_URL.'
+        );
+      }
+      return { url: config.MIGRATION_DATABASE_URL, isDedicatedMigrationPool: true };
+    }
+    return { url: config.TEST_DATABASE_URL, isDedicatedMigrationPool: false };
+  }
+
+  if (config.MIGRATION_DATABASE_URL) {
+    return { url: config.MIGRATION_DATABASE_URL, isDedicatedMigrationPool: true };
+  }
+  return { url: config.DATABASE_URL, isDedicatedMigrationPool: false };
+}
+
 export async function runMigrations(): Promise<void> {
   const migrationsFolder = path.resolve(__dirname, 'migrations');
   console.log(`🚀 Aplicando migraciones de Drizzle desde: ${migrationsFolder}`);
 
-  // En Fase 1A-R3.2: Las herramientas de migración DDL utilizan prioritariamente MIGRATION_DATABASE_URL
-  // separando el rol de migraciones/DBA del rol de ejecución restringido (R3.2-02).
-  const migrationConnUrl =
-    env.MIGRATION_DATABASE_URL ||
-    (env.NODE_ENV === 'test' && env.TEST_DATABASE_URL
-      ? env.TEST_DATABASE_URL
-      : env.DATABASE_URL);
-
-  const isDedicatedMigrationPool = !!env.MIGRATION_DATABASE_URL;
+  // En Fase 1A-R3.2 / REM-01: Las herramientas de migración DDL utilizan prioritariamente MIGRATION_DATABASE_URL
+  // separando el rol de migraciones/DBA del rol de ejecución restringido, con aislamiento estricto en test (NF-01).
+  const { url: migrationConnUrl, isDedicatedMigrationPool } = resolveMigrationDatabaseUrl(env);
   const migrationPool = isDedicatedMigrationPool
     ? new Pool({ connectionString: migrationConnUrl, max: 2, connectionTimeoutMillis: 10000 })
     : pool;

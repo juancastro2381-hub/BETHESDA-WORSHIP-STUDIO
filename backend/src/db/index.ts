@@ -72,22 +72,37 @@ export const db = drizzle(pool, { schema });
 
 export type Database = typeof db;
 
+export interface RuntimeRoleCheckOptions {
+  enforceInAllEnvs?: boolean;
+}
+
 /**
- * Verifica en tiempo de ejecución que el rol de conexión en producción sea un rol de ejecución restringido (R3.2-02).
- * Falla de forma segura (fail-safe) si se intenta ejecutar la aplicación de producción con una cuenta de superusuario o DBA.
+ * Verifica en tiempo de ejecución que el rol de conexión sea un rol de ejecución restringido (R3.2-02 / REM-01).
+ * Falla de forma segura (fail-safe) en producción (o cuando enforceInAllEnvs es true) si el rol actual
+ * posee privilegios de superusuario, creación de roles, creación de bases de datos o bypass RLS.
  */
-export async function assertNonSuperuserRuntimeRole(activePool: pg.Pool = pool): Promise<void> {
-  if (env.NODE_ENV !== 'production') return;
+export async function assertNonSuperuserRuntimeRole(
+  activePool: pg.Pool = pool,
+  options: RuntimeRoleCheckOptions = {}
+): Promise<void> {
+  if (!options.enforceInAllEnvs && env.NODE_ENV !== 'production') return;
 
   const res = await activePool.query(`
-    SELECT r.rolname, r.rolsuper, r.rolcreaterole, r.rolcreatedb
+    SELECT r.rolname, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolbypassrls
     FROM pg_roles r
     WHERE r.rolname = current_user
   `);
   const currentRole = res.rows[0];
-  if (currentRole && currentRole.rolsuper) {
+  if (
+    !currentRole ||
+    currentRole.rolsuper ||
+    currentRole.rolcreaterole ||
+    currentRole.rolcreatedb ||
+    currentRole.rolbypassrls
+  ) {
+    const roleName = currentRole?.rolname ?? 'desconocido';
     throw new Error(
-      `❌ Invariante de Seguridad Violada: La aplicación en producción no puede ejecutarse como superusuario de PostgreSQL ("${currentRole.rolname}"). Configure una cuenta de ejecución no privilegiada (e.g. bethesda_app_runtime).`
+      `❌ Invariante de Seguridad Violada: La aplicación no puede ejecutarse con el rol privilegiado "${roleName}" (super=${Boolean(currentRole?.rolsuper)}, createrole=${Boolean(currentRole?.rolcreaterole)}, createdb=${Boolean(currentRole?.rolcreatedb)}, bypassrls=${Boolean(currentRole?.rolbypassrls)}). Configure una cuenta de ejecución no privilegiada (e.g. bethesda_app_runtime).`
     );
   }
 }

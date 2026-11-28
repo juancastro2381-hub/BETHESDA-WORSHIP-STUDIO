@@ -11,6 +11,7 @@ import { JwtTokenService } from '../application/token-service.ts';
 import { DrizzleUserRepository } from '../repositories/user-repository.ts';
 import { env } from '../config/env.ts';
 import { pool } from '../db/index.ts';
+import { runMigrations } from '../db/migrate.ts';
 
 describe('Phase 2A — Musical Conversion Center API Suite', () => {
   let app: FastifyInstance;
@@ -30,6 +31,7 @@ describe('Phase 2A — Musical Conversion Center API Suite', () => {
 `;
 
   before(async () => {
+    await runMigrations();
     app = await buildApp();
     await app.ready();
 

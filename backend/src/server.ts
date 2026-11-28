@@ -5,6 +5,7 @@
 
 import { buildApp } from './app.ts';
 import { env } from './config/env.ts';
+import { assertNonSuperuserRuntimeRole } from './db/index.ts';
 import { runMigrations } from './db/migrate.ts';
 import { bootstrapSuperAdmin } from './application/bootstrap-service.ts';
 import { DrizzleUserRepository } from './repositories/user-repository.ts';
@@ -17,6 +18,9 @@ import { globalAudioService } from './interfaces/http/routes/audio.routes.ts';
 
 async function start() {
   try {
+    // 0. Verificar en el arranque que el rol runtime de la aplicación no tenga privilegios de superusuario/DBA
+    await assertNonSuperuserRuntimeRole();
+
     // 1. Ejecutar migraciones automáticas al iniciar
     console.log('📦 Verificando y aplicando migraciones de base de datos...');
     await runMigrations();
